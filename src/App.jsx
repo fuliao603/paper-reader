@@ -142,6 +142,7 @@ function App() {
   const annotationToolbarRef = useRef(null)
   const noteDialogRef = useRef(null)
   const noteTextareaRef = useRef(null)
+  const mergeNameInputRef = useRef(null)
 
   const [pdfUrl, setPdfUrl] = useState('')
   const [currentDocument, setCurrentDocument] = useState(null)
@@ -181,6 +182,8 @@ function App() {
   const [batchExportMode, setBatchExportMode] = useState('merged')
   const [batchExportName, setBatchExportName] = useState('')
   const [mergeExportFiles, setMergeExportFiles] = useState([])
+  const [mergeNameDialog, setMergeNameDialog] = useState(null)
+  const [mergeNameDraft, setMergeNameDraft] = useState('我的合集')
   const [exportDefaultDir, setExportDefaultDir] = useState('')
   const [isAnnotationToolbarOpen, setIsAnnotationToolbarOpen] = useState(false)
   const [annotationColor, setAnnotationColor] = useState(null)
@@ -483,6 +486,23 @@ function App() {
     setNoteDraft({ title: note.title, noteText: '' })
   }
 
+  function openPageNoteDialog() {
+    const note = createBaseNote('page-note', {
+      pageNumber,
+      title: `第 ${pageNumber} 页笔记`,
+    })
+
+    if (!note) {
+      setNotesStatus('请先打开 PDF')
+      setRightPanelTab('notes')
+      return
+    }
+
+    setRightPanelTab('notes')
+    setNoteDialog({ mode: 'add', note })
+    setNoteDraft({ title: note.title, noteText: '' })
+  }
+
   function openEditNoteDialog(note) {
     setNoteDialog({ mode: 'edit', note })
     setNoteDraft({ title: note.title || '', noteText: note.noteText || '' })
@@ -754,8 +774,14 @@ function App() {
     }
 
     try {
+      let pdfDeleteWarning = ''
       if (highlight.embeddedInPdf && window.electronAPI?.deletePdfHighlightAnnotation) {
-        await window.electronAPI.deletePdfHighlightAnnotation(highlight)
+        try {
+          await window.electronAPI.deletePdfHighlightAnnotation(highlight)
+        } catch (error) {
+          console.error('Failed to delete embedded PDF highlight', error)
+          pdfDeleteWarning = error.message || '未能同步删除 PDF 本体高亮'
+        }
       }
       const nextAnnotations = window.electronAPI?.deleteDocumentAnnotation
         ? await window.electronAPI.deleteDocumentAnnotation(currentDocument.documentId, highlightId)
@@ -768,7 +794,7 @@ function App() {
         setActiveAnnotationId('')
       }
       setHighlightContextMenu(null)
-      setAnnotationStatus('')
+      setAnnotationStatus(pdfDeleteWarning ? `已删除应用内高亮；${pdfDeleteWarning}` : '')
     } catch (error) {
       setAnnotationStatus(error.message || '删除高亮失败')
     }
@@ -1154,15 +1180,30 @@ function App() {
       setExportStatus('请先添加要合并的导出文件')
       return
     }
-    const userExportName = window.prompt('命名合并文件\n\n请输入合并文件名称：', '我的合集')
-    if (userExportName === null) return
 
+    setMergeNameDraft('我的合集')
+    setMergeNameDialog({
+      filePaths: mergeExportFiles.map((file) => file.filePath).filter(Boolean),
+      documentCount: mergeExportFiles.reduce((count, file) => count + (Number(file.documentCount) || 0), 0),
+    })
+  }
+
+  async function confirmMergePaperReaderExportFiles() {
+    const filePaths = Array.isArray(mergeNameDialog?.filePaths) ? mergeNameDialog.filePaths.filter(Boolean) : []
+    if (!filePaths.length) {
+      setMergeNameDialog(null)
+      setExportStatus('请先添加要合并的导出文件')
+      return
+    }
+
+    const userExportName = mergeNameDraft.trim() || '我的合集'
     setExportStatus('')
     try {
-      const result = await window.electronAPI.mergePaperReaderExportFiles(mergeExportFiles.map((file) => file.filePath), userExportName.trim() || '我的合集')
+      const result = await window.electronAPI.mergePaperReaderExportFiles(filePaths, userExportName)
       if (!result?.canceled) {
         setExportStatus(`已合并 ${result.documentCount || 0} 份数据：${result.filePath}`)
       }
+      setMergeNameDialog(null)
     } catch (error) {
       setExportStatus(error.message || '合并导出文件失败')
     }
@@ -1311,6 +1352,17 @@ function App() {
 
     return () => window.clearTimeout(focusTimer)
   }, [noteDialog])
+
+  useEffect(() => {
+    if (!mergeNameDialog) return undefined
+
+    const focusTimer = window.setTimeout(() => {
+      mergeNameInputRef.current?.focus({ preventScroll: true })
+      mergeNameInputRef.current?.select()
+    }, 0)
+
+    return () => window.clearTimeout(focusTimer)
+  }, [mergeNameDialog])
 
   useEffect(() => {
     if (!isAnnotationToolbarOpen) return undefined
@@ -3854,8 +3906,10 @@ function App() {
       if (rects.length && !hasDuplicateHighlight(text, rects)) {
         const now = Date.now()
         const selectedHighlightColor = normalizeHighlightColor(annotationColor)
+        const highlightId = `${now}-${Math.random().toString(36).slice(2, 9)}`
         const annotation = {
-          id: `${now}-${Math.random().toString(36).slice(2, 9)}`,
+          id: highlightId,
+          highlightId,
           documentId: currentDocument.documentId,
           filePath: currentDocument.filePath,
           fileName: currentDocument.fileName,
@@ -4566,6 +4620,9 @@ function App() {
         </div>
 
         <div className="history-panel-actions">
+          <button type="button" className="history-clear-button" onClick={openPageNoteDialog}>
+            新增
+          </button>
           <button type="button" className="history-clear-button" onClick={exportCurrentNotes} disabled={isNotesImportExportBusy}>
             导出
           </button>
@@ -4879,7 +4936,7 @@ function App() {
             <p className="history-empty">暂无待合并文件</p>
           )}
           <div className="settings-inline-actions">
-            <button type="button" className="settings-secondary-button" onClick={mergePaperReaderExportFiles} disabled={!mergeExportFiles.length}>
+            <button type="button" className="settings-secondary-button" onClick={mergePaperReaderExportFiles}>
               合并
             </button>
           </div>
@@ -5454,6 +5511,62 @@ function App() {
         </div>
       ) : null}
 
+      {mergeNameDialog ? (
+        <div
+          className="note-dialog-overlay"
+          role="presentation"
+          onPointerDown={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <section
+            className="note-dialog"
+            aria-label="命名合并文件"
+            onPointerDown={(event) => event.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
+            onMouseUp={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="diagram-dialog-header">
+              <h2>命名合并文件</h2>
+              <button type="button" onClick={() => setMergeNameDialog(null)}>
+                取消
+              </button>
+            </div>
+
+            <label className="note-dialog-field">
+              <span>合并文件名称</span>
+              <input
+                ref={mergeNameInputRef}
+                type="text"
+                value={mergeNameDraft}
+                onChange={(event) => setMergeNameDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    void confirmMergePaperReaderExportFiles()
+                  }
+                }}
+              />
+            </label>
+
+            <div className="note-dialog-source">
+              <strong>待合并文件</strong>
+              <span>{mergeNameDialog.filePaths?.length || 0} 个文件，约 {mergeNameDialog.documentCount || 0} 份数据</span>
+            </div>
+
+            <div className="settings-actions">
+              <button type="button" className="settings-secondary-button" onClick={() => setMergeNameDialog(null)}>
+                取消
+              </button>
+              <button type="button" className="settings-primary-button" onClick={confirmMergePaperReaderExportFiles}>
+                合并
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       {pdfUrl ? (
         <div className="reader-layout" ref={readerLayoutRef}>
           <section
@@ -5617,7 +5730,13 @@ function App() {
       ) : null}
 
       {noteDialog ? (
-        <div className="note-dialog-overlay" role="presentation">
+        <div
+          className="note-dialog-overlay"
+          role="presentation"
+          onPointerDown={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+        >
           <section
             className="note-dialog"
             ref={noteDialogRef}
@@ -5640,6 +5759,7 @@ function App() {
                 type="text"
                 value={noteDraft.title}
                 onChange={(event) => setNoteDraft((draft) => ({ ...draft, title: event.target.value }))}
+                onFocus={() => setNotesStatus('')}
               />
             </label>
 
@@ -5649,6 +5769,7 @@ function App() {
                 ref={noteTextareaRef}
                 value={noteDraft.noteText}
                 onChange={(event) => setNoteDraft((draft) => ({ ...draft, noteText: event.target.value }))}
+                onFocus={() => setNotesStatus('')}
                 rows={6}
                 onMouseDown={(event) => event.stopPropagation()}
                 onMouseUp={(event) => event.stopPropagation()}

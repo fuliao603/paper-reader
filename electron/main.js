@@ -343,6 +343,7 @@ function normalizeAnnotationItem(item = {}) {
 
     return {
       ...base,
+      highlightId: typeof item.highlightId === 'string' ? item.highlightId : base.id,
       selectedText: String(item.selectedText || ''),
       color: String(item.color || '#fde68a'),
       rects,
@@ -858,11 +859,17 @@ async function deleteDocumentAnnotation(documentId, annotationId) {
     items: currentAnnotations.filter((item) => item.id !== annotationId),
   })
 
-  if (deletedAnnotation?.type === 'text-highlight' && deletedAnnotation.noteId) {
+  if (deletedAnnotation?.type === 'text-highlight') {
     const notes = await readDocumentNotes()
     if (notes[documentId]) {
       notes[documentId].items = normalizeNoteItems(notes[documentId].items || [])
-        .map((item) => (item.id === deletedAnnotation.noteId ? { ...item, highlightId: undefined, updatedAt: Date.now() } : item))
+        .map((item) => (
+          item.id === deletedAnnotation.noteId ||
+          item.highlightId === deletedAnnotation.id ||
+          item.highlightId === deletedAnnotation.highlightId
+            ? { ...item, highlightId: undefined, updatedAt: Date.now() }
+            : item
+        ))
       notes[documentId].lastUpdatedAt = Date.now()
       await saveDocumentNotesData(notes)
     }
@@ -995,6 +1002,35 @@ function sanitizeExportName(value, fallback = '未命名合集') {
   return (cleaned || fallback).slice(0, 40)
 }
 
+function cleanExportFileName(value, fallback = '合并导出') {
+  let stripped = String(value || '')
+    .replace(/\.paperreader\.json$/i, '')
+    .replace(/\.json$/i, '')
+    .trim()
+
+  const typePrefix = '(?:翻译历史|笔记|完整备份|混合合集|翻译历史合集|笔记合集|完整备份合集)'
+  const paperReaderPrefix = '(?:paper\\s*reader|paperreader)'
+  const prefixPatterns = [
+    new RegExp(`^${typePrefix}[_\\-\\s]*${paperReaderPrefix}[_\\-\\s]*`, 'i'),
+    new RegExp(`^${paperReaderPrefix}[_\\-\\s]*${typePrefix}?[_\\-\\s]*`, 'i'),
+    new RegExp(`^${paperReaderPrefix}[_\\-\\s]*`, 'i'),
+  ]
+
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const pattern of prefixPatterns) {
+      const nextValue = stripped.replace(pattern, '').trim()
+      if (nextValue !== stripped) {
+        stripped = nextValue
+        changed = true
+      }
+    }
+  }
+
+  return sanitizeExportName(stripped || fallback, fallback)
+}
+
 function getShortDocumentId(documentId = '') {
   return String(documentId || 'document').slice(0, 10) || 'document'
 }
@@ -1008,14 +1044,15 @@ function getExportTypeLabel(exportType) {
 }
 
 function getExportFileBaseName({ exportType, exportMode, fileName, documentId, userExportName, timestamp, merged = false }) {
+  const cleanedUserExportName = cleanExportFileName(userExportName, '未命名合集')
+
   if (merged) {
-    const label = exportType === 'mixed' ? '混合合集' : `${getExportTypeLabel(exportType)}合集`
-    return `${label}_${sanitizeExportName(userExportName, '未命名合集')}_${timestamp}`
+    return `${cleanedUserExportName || '合并导出'}_${timestamp}`
   }
 
   const label = getExportTypeLabel(exportType)
   if (exportMode === 'multi-document') {
-    return `${label}合集_${sanitizeExportName(userExportName, '未命名合集')}_${timestamp}`
+    return `${label}合集_${cleanedUserExportName}_${timestamp}`
   }
 
   return `PaperReader_${label}_${sanitizeExportName(fileName || 'document')}_${getShortDocumentId(documentId)}_${timestamp}`
@@ -1153,10 +1190,11 @@ function buildSingleDocumentExport(documentId, exportType, payload) {
 function buildMultiDocumentExport(documents, exportType, userExportName, merged = false) {
   const now = new Date()
   const timestamp = formatExportTimestamp(now)
+  const cleanedUserExportName = cleanExportFileName(userExportName, '未命名合集')
   const exportName = getExportFileBaseName({
     exportType,
     exportMode: 'multi-document',
-    userExportName,
+    userExportName: cleanedUserExportName,
     timestamp,
     merged,
   })
@@ -1167,7 +1205,7 @@ function buildMultiDocumentExport(documents, exportType, userExportName, merged 
     exportType,
     exportMode: 'multi-document',
     exportName,
-    userExportName: sanitizeExportName(userExportName, '未命名合集'),
+    userExportName: cleanedUserExportName,
     createdAt: now.getTime(),
     createdAtText: formatExportDateText(now),
     documents: documents.map((entry) => ({
@@ -1189,8 +1227,12 @@ async function writeExportJson(exportObject, targetDir = null) {
 
   if (result.canceled || !result.filePath) return { canceled: true }
 
-  await fs.writeFile(result.filePath, `${JSON.stringify(exportObject, null, 2)}\n`, 'utf8')
-  return { canceled: false, filePath: result.filePath, exportName: exportObject.exportName }
+  const targetFilePath = exportObject.exportMode === 'multi-document'
+    ? path.join(path.dirname(result.filePath), `${cleanExportFileName(path.basename(result.filePath), exportObject.exportName)}${EXPORT_EXTENSION}`)
+    : result.filePath
+
+  await fs.writeFile(targetFilePath, `${JSON.stringify(exportObject, null, 2)}\n`, 'utf8')
+  return { canceled: false, filePath: targetFilePath, exportName: exportObject.exportName }
 }
 
 async function writeExportJsonDirect(exportObject, targetDir) {
@@ -1530,6 +1572,8 @@ async function mergePaperReaderExportFiles(filePaths = [], userExportName = '未
     })))
   }
 
+  if (!documents.length) throw new Error('所选导出文件中没有可合并的数据')
+
   const merged = buildMultiDocumentExport(documents, getMergedExportType(documents), userExportName, true)
   const saved = await writeExportJson(merged)
   return { ...saved, documentCount: documents.length }
@@ -1713,6 +1757,145 @@ async function deletePdfHighlightAnnotation(annotation) {
   return { removed: true, filePath }
 }
 
+function getFilePathKey(filePath) {
+  return String(filePath || '').trim().toLowerCase()
+}
+
+function isSameStoredFilePath(container, filePathKey) {
+  return Boolean(filePathKey && getFilePathKey(container?.filePath) === filePathKey)
+}
+
+async function mergeDocumentDataForPath(canonicalDocumentId, normalizedPath, fileName, stores) {
+  const filePathKey = getFilePathKey(normalizedPath)
+  if (!canonicalDocumentId || !filePathKey) return
+
+  const { annotations, notes, histories } = stores
+  const annotationEntries = Object.entries(annotations).filter(([, container]) => isSameStoredFilePath(container, filePathKey))
+  if (annotationEntries.some(([documentId]) => documentId !== canonicalDocumentId)) {
+    const canonical = annotations[canonicalDocumentId] || { filePath: normalizedPath, fileName, items: [] }
+    let items = normalizeAnnotationItems(canonical.items || [])
+    let lastUpdatedAt = Number(canonical.lastUpdatedAt) || 0
+
+    for (const [documentId, container] of annotationEntries) {
+      if (documentId === canonicalDocumentId) continue
+      const merged = uniqueByIdAndSignature(items, normalizeAnnotationItems(container.items || []), annotationSignature)
+      items = normalizeAnnotationItems(merged.items)
+      lastUpdatedAt = Math.max(lastUpdatedAt, Number(container.lastUpdatedAt) || 0)
+      delete annotations[documentId]
+    }
+
+    annotations[canonicalDocumentId] = {
+      filePath: canonical.filePath || normalizedPath,
+      fileName: canonical.fileName || fileName,
+      lastUpdatedAt: Math.max(lastUpdatedAt, Date.now()),
+      items,
+    }
+    await saveDocumentAnnotationsData(annotations)
+  }
+
+  const noteEntries = Object.entries(notes).filter(([, container]) => isSameStoredFilePath(container, filePathKey))
+  if (noteEntries.some(([documentId]) => documentId !== canonicalDocumentId)) {
+    const canonical = notes[canonicalDocumentId] || { filePath: normalizedPath, fileName, items: [] }
+    let items = normalizeNoteItems(canonical.items || [])
+    let lastUpdatedAt = Number(canonical.lastUpdatedAt) || 0
+
+    for (const [documentId, container] of noteEntries) {
+      if (documentId === canonicalDocumentId) continue
+      const merged = uniqueByIdAndSignature(items, normalizeNoteItems(container.items || []), noteSignature)
+      items = normalizeNoteItems(merged.items)
+      lastUpdatedAt = Math.max(lastUpdatedAt, Number(container.lastUpdatedAt) || 0)
+      delete notes[documentId]
+    }
+
+    notes[canonicalDocumentId] = {
+      filePath: canonical.filePath || normalizedPath,
+      fileName: canonical.fileName || fileName,
+      lastUpdatedAt: Math.max(lastUpdatedAt, Date.now()),
+      items,
+    }
+    await saveDocumentNotesData(notes)
+  }
+
+  const historyEntries = Object.entries(histories).filter(([, container]) => isSameStoredFilePath(container, filePathKey))
+  if (historyEntries.some(([documentId]) => documentId !== canonicalDocumentId)) {
+    const canonical = histories[canonicalDocumentId] || { filePath: normalizedPath, fileName, items: [] }
+    let items = normalizeHistoryItems(canonical.items || [])
+    let lastOpenedAt = Number(canonical.lastOpenedAt) || 0
+
+    for (const [documentId, container] of historyEntries) {
+      if (documentId === canonicalDocumentId) continue
+      const merged = uniqueByIdAndSignature(items, normalizeHistoryItems(container.items || []), historySignature)
+      items = normalizeHistoryItems(merged.items).slice(0, HISTORY_LIMIT)
+      lastOpenedAt = Math.max(lastOpenedAt, Number(container.lastOpenedAt) || 0)
+      delete histories[documentId]
+    }
+
+    histories[canonicalDocumentId] = {
+      filePath: canonical.filePath || normalizedPath,
+      fileName: canonical.fileName || fileName,
+      lastOpenedAt: Math.max(lastOpenedAt, Date.now()),
+      items,
+    }
+    await saveDocumentTranslationHistories(histories, { prune: false })
+  }
+}
+
+async function resolveDocumentIdForPdf(filePath, fileName, fileSize) {
+  const normalizedPath = String(filePath || '').trim()
+  const filePathKey = getFilePathKey(normalizedPath)
+
+  if (filePathKey) {
+    const [annotations, notes, histories, browsingHistory] = await Promise.all([
+      readDocumentAnnotations(),
+      readDocumentNotes(),
+      readDocumentTranslationHistories(),
+      readBrowsingHistory(),
+    ])
+    const candidates = new Map()
+    const addCandidate = (documentId, score, updatedAt = 0) => {
+      if (!documentId) return
+      const current = candidates.get(documentId) || { documentId, score: 0, updatedAt: 0 }
+      current.score += score
+      current.updatedAt = Math.max(current.updatedAt, Number(updatedAt) || 0)
+      candidates.set(documentId, current)
+    }
+
+    for (const [documentId, container] of Object.entries(annotations)) {
+      if (isSameStoredFilePath(container, filePathKey)) {
+        addCandidate(documentId, 4000 + normalizeAnnotationItems(container.items || []).length * 20, container.lastUpdatedAt)
+      }
+    }
+
+    for (const [documentId, container] of Object.entries(notes)) {
+      if (isSameStoredFilePath(container, filePathKey)) {
+        addCandidate(documentId, 3000 + normalizeNoteItems(container.items || []).length * 10, container.lastUpdatedAt)
+      }
+    }
+
+    for (const [documentId, container] of Object.entries(histories)) {
+      if (isSameStoredFilePath(container, filePathKey)) {
+        addCandidate(documentId, 2000 + normalizeHistoryItems(container.items || []).length, container.lastOpenedAt)
+      }
+    }
+
+    for (const record of browsingHistory) {
+      if (getFilePathKey(record.filePath) === filePathKey) {
+        addCandidate(record.documentId, 1000, record.lastOpenedAt)
+      }
+    }
+
+    if (candidates.size) {
+      const canonicalDocumentId = Array.from(candidates.values())
+        .sort((first, second) => second.score - first.score || second.updatedAt - first.updatedAt)[0].documentId
+
+      await mergeDocumentDataForPath(canonicalDocumentId, normalizedPath, fileName, { annotations, notes, histories })
+      return canonicalDocumentId
+    }
+  }
+
+  return createDocumentId(normalizedPath, fileName, fileSize)
+}
+
 async function openPdfFromPath(filePath) {
   const normalizedPath = String(filePath || '').trim()
 
@@ -1730,12 +1913,13 @@ async function openPdfFromPath(filePath) {
     const buffer = await fs.readFile(normalizedPath)
     const fileName = path.basename(normalizedPath)
     const fileSize = stat.size
+    const documentId = await resolveDocumentIdForPdf(normalizedPath, fileName, fileSize)
 
     return {
       filePath: normalizedPath,
       fileName,
       fileSize,
-      documentId: createDocumentId(normalizedPath, fileName, fileSize),
+      documentId,
       dataUrl: `data:application/pdf;base64,${buffer.toString('base64')}`,
     }
   } catch (error) {
