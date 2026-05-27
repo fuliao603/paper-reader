@@ -180,7 +180,6 @@ function App() {
   const [batchExportType, setBatchExportType] = useState('full')
   const [batchExportMode, setBatchExportMode] = useState('merged')
   const [batchExportName, setBatchExportName] = useState('')
-  const [mergeExportName, setMergeExportName] = useState('')
   const [mergeExportFiles, setMergeExportFiles] = useState([])
   const [exportDefaultDir, setExportDefaultDir] = useState('')
   const [isAnnotationToolbarOpen, setIsAnnotationToolbarOpen] = useState(false)
@@ -1122,7 +1121,7 @@ function App() {
         documentIds: selectedExportDocumentIds,
         exportType: batchExportType,
         exportMode: batchExportMode,
-        userExportName: batchExportName,
+        userExportName: batchExportMode === 'merged' ? batchExportName : '',
       })
       if (!result?.canceled) {
         setExportStatus(result.outputDir ? `已导出到：${result.outputDir}` : `已导出：${result.filePath}`)
@@ -1155,9 +1154,12 @@ function App() {
       setExportStatus('请先添加要合并的导出文件')
       return
     }
+    const userExportName = window.prompt('命名合并文件\n\n请输入合并文件名称：', '我的合集')
+    if (userExportName === null) return
+
     setExportStatus('')
     try {
-      const result = await window.electronAPI.mergePaperReaderExportFiles(mergeExportFiles.map((file) => file.filePath), mergeExportName)
+      const result = await window.electronAPI.mergePaperReaderExportFiles(mergeExportFiles.map((file) => file.filePath), userExportName.trim() || '我的合集')
       if (!result?.canceled) {
         setExportStatus(`已合并 ${result.documentCount || 0} 份数据：${result.filePath}`)
       }
@@ -1209,6 +1211,12 @@ function App() {
       void loadExportSettingsData()
     }
   }, [settingsTab])
+
+  useEffect(() => {
+    if (!isPageJumpFocused) {
+      setPageJumpInput(String(pageNumber))
+    }
+  }, [isPageJumpFocused, pageNumber])
 
   useEffect(() => {
     async function loadBrowsingHistory() {
@@ -4069,10 +4077,10 @@ function App() {
     clearTranslation()
   }
 
-  function jumpToPage() {
+  function jumpToPage(inputValue = pageJumpInput) {
     if (!numPages) return
 
-    const parsedPage = Number.parseInt(pageJumpInput, 10)
+    const parsedPage = Number.parseInt(String(inputValue).trim(), 10)
 
     if (Number.isNaN(parsedPage)) {
       setPageJumpInput(String(pageNumber))
@@ -4087,8 +4095,9 @@ function App() {
 
   function handlePageJumpKeyDown(event) {
     if (event.key === 'Enter') {
+      event.preventDefault()
+      jumpToPage(event.currentTarget.value)
       event.currentTarget.blur()
-      jumpToPage()
     }
   }
 
@@ -4810,7 +4819,8 @@ function App() {
                 type="text"
                 value={batchExportName}
                 onChange={(event) => setBatchExportName(event.target.value)}
-                placeholder="未命名合集"
+                placeholder={batchExportMode === 'merged' ? '未命名合集' : '仅合并导出时需要填写'}
+                disabled={batchExportMode !== 'merged'}
               />
             </label>
           </div>
@@ -4868,15 +4878,6 @@ function App() {
           ) : (
             <p className="history-empty">暂无待合并文件</p>
           )}
-          <label className="settings-field">
-            <span>合并文件名称</span>
-            <input
-              type="text"
-              value={mergeExportName}
-              onChange={(event) => setMergeExportName(event.target.value)}
-              placeholder="我的合集"
-            />
-          </label>
           <div className="settings-inline-actions">
             <button type="button" className="settings-secondary-button" onClick={mergePaperReaderExportFiles} disabled={!mergeExportFiles.length}>
               合并
@@ -5167,9 +5168,13 @@ function App() {
               onFocus={() => {
                 setIsPageJumpFocused(true)
                 setPageJumpInput(String(pageNumber))
+                requestAnimationFrame(() => document.activeElement?.select?.())
               }}
               onKeyDown={handlePageJumpKeyDown}
-              onBlur={() => setIsPageJumpFocused(false)}
+              onBlur={(event) => {
+                jumpToPage(event.currentTarget.value)
+                setIsPageJumpFocused(false)
+              }}
               disabled={!pdfUrl || !numPages}
               aria-label="跳转页码"
             />
@@ -5291,91 +5296,102 @@ function App() {
                 {settingsTab === 'importExport' ? (
                   renderImportExportSettings()
                 ) : settingsTab === 'model' ? (
-                  <section className="settings-page">
-                    <label className="settings-field">
-                      <span>Provider</span>
-                      <select
-                        value={settingsForm.provider}
-                        onChange={(event) => updateSettingsProvider(event.target.value)}
-                      >
-                        {Object.entries(PROVIDERS).map(([provider, providerConfig]) => (
-                          <option key={provider} value={provider}>
-                            {providerConfig.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <label className="settings-field">
-                      <span>API Key</span>
-                      <input
-                        type="password"
-                        value={settingsForm.apiKey}
-                        onChange={(event) => updateSettingsField('apiKey', event.target.value)}
-                        autoComplete="off"
-                      />
-                    </label>
-
-                    <label className="settings-field">
-                      <span>Base URL</span>
-                      <input
-                        type="text"
-                        value={settingsForm.baseUrl}
-                        onChange={(event) => updateSettingsField('baseUrl', event.target.value)}
-                        placeholder={PROVIDERS[settingsForm.provider].baseUrl}
-                      />
-                    </label>
-
-                    <label className="settings-field">
-                      <span>模型名</span>
-                      <div className="settings-model-row">
+                  <section className="settings-page import-export-page">
+                    <section className="settings-glossary">
+                      <div className="settings-section-header">
+                        <h3>API 配置</h3>
+                        <span>{settingsForm.apiKey ? UI.settingsKeyConfigured : UI.settingsKeyEmpty}</span>
+                      </div>
+                      <label className="settings-field">
+                        <span>Provider</span>
+                        <select
+                          value={settingsForm.provider}
+                          onChange={(event) => updateSettingsProvider(event.target.value)}
+                        >
+                          {Object.entries(PROVIDERS).map(([provider, providerConfig]) => (
+                            <option key={provider} value={provider}>
+                              {providerConfig.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="settings-field">
+                        <span>Base URL</span>
                         <input
                           type="text"
-                          value={settingsForm.model}
-                          onChange={(event) => updateSettingsField('model', event.target.value)}
-                          placeholder={PROVIDERS[settingsForm.provider].model || 'model-id'}
+                          value={settingsForm.baseUrl}
+                          onChange={(event) => updateSettingsField('baseUrl', event.target.value)}
+                          placeholder={PROVIDERS[settingsForm.provider].baseUrl}
                         />
-                        {PROVIDERS[settingsForm.provider].presets.length ? (
-                          <select
-                            value=""
-                            aria-label="常用模型预设"
-                            onChange={(event) => {
-                              if (event.target.value) {
-                                updateSettingsField('model', event.target.value)
-                              }
-                            }}
-                          >
-                            <option value="">常用模型预设</option>
-                            {PROVIDERS[settingsForm.provider].presets.map((model) => (
-                              <option key={model} value={model}>
-                                {model}
-                              </option>
-                            ))}
-                          </select>
-                        ) : null}
-                      </div>
-                    </label>
+                      </label>
+                      <label className="settings-field">
+                        <span>API Key</span>
+                        <input
+                          type="password"
+                          value={settingsForm.apiKey}
+                          onChange={(event) => updateSettingsField('apiKey', event.target.value)}
+                          autoComplete="off"
+                        />
+                      </label>
+                    </section>
 
-                    <p className="settings-key-state">
-                      {settingsForm.apiKey ? UI.settingsKeyConfigured : UI.settingsKeyEmpty}
-                    </p>
+                    <section className="settings-glossary">
+                      <div className="settings-section-header">
+                        <h3>模型参数</h3>
+                        <span>选择或输入用于翻译的模型名称</span>
+                      </div>
+                      <label className="settings-field">
+                        <span>模型名</span>
+                        <div className="settings-model-row">
+                          <input
+                            type="text"
+                            value={settingsForm.model}
+                            onChange={(event) => updateSettingsField('model', event.target.value)}
+                            placeholder={PROVIDERS[settingsForm.provider].model || 'model-id'}
+                          />
+                          {PROVIDERS[settingsForm.provider].presets.length ? (
+                            <select
+                              value=""
+                              aria-label="常用模型预设"
+                              onChange={(event) => {
+                                if (event.target.value) {
+                                  updateSettingsField('model', event.target.value)
+                                }
+                              }}
+                            >
+                              <option value="">常用模型预设</option>
+                              {PROVIDERS[settingsForm.provider].presets.map((model) => (
+                                <option key={model} value={model}>
+                                  {model}
+                                </option>
+                              ))}
+                            </select>
+                          ) : null}
+                        </div>
+                      </label>
+                    </section>
                   </section>
                 ) : (
-                  <section className="settings-page">
-                    <label className="settings-field">
-                      <span>自定义翻译 Prompt</span>
-                      <textarea
-                        value={settingsForm.prompt}
-                        onChange={(event) => updateSettingsField('prompt', event.target.value)}
-                        rows={7}
-                      />
-                    </label>
-
-                    <div className="settings-inline-actions">
-                      <button type="button" className="settings-secondary-button" onClick={resetPrompt}>
-                        恢复默认 Prompt
-                      </button>
-                    </div>
+                  <section className="settings-page import-export-page">
+                    <section className="settings-glossary">
+                      <div className="settings-section-header">
+                        <h3>Prompt 设置</h3>
+                        <span>用于普通划词、OCR 文本和批注翻译</span>
+                      </div>
+                      <label className="settings-field">
+                        <span>自定义翻译 Prompt</span>
+                        <textarea
+                          value={settingsForm.prompt}
+                          onChange={(event) => updateSettingsField('prompt', event.target.value)}
+                          rows={7}
+                        />
+                      </label>
+                      <div className="settings-inline-actions">
+                        <button type="button" className="settings-secondary-button" onClick={resetPrompt}>
+                          恢复默认 Prompt
+                        </button>
+                      </div>
+                    </section>
 
                     <section className="settings-glossary">
                       <div className="settings-section-header">
@@ -5484,7 +5500,7 @@ function App() {
                 pageNumber={pageNumber}
                 width={pageWidth}
                 onLoadSuccess={handlePageLoadSuccess}
-                renderAnnotationLayer
+                renderAnnotationLayer={false}
                 renderTextLayer
               />
             </Document>

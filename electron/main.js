@@ -1010,12 +1010,12 @@ function getExportTypeLabel(exportType) {
 function getExportFileBaseName({ exportType, exportMode, fileName, documentId, userExportName, timestamp, merged = false }) {
   if (merged) {
     const label = exportType === 'mixed' ? '混合合集' : `${getExportTypeLabel(exportType)}合集`
-    return `PaperReader_${label}_${sanitizeExportName(userExportName, '未命名合集')}_${timestamp}`
+    return `${label}_${sanitizeExportName(userExportName, '未命名合集')}_${timestamp}`
   }
 
   const label = getExportTypeLabel(exportType)
   if (exportMode === 'multi-document') {
-    return `PaperReader_${label}合集_${sanitizeExportName(userExportName, '未命名合集')}_${timestamp}`
+    return `${label}合集_${sanitizeExportName(userExportName, '未命名合集')}_${timestamp}`
   }
 
   return `PaperReader_${label}_${sanitizeExportName(fileName || 'document')}_${getShortDocumentId(documentId)}_${timestamp}`
