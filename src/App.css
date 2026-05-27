@@ -1005,7 +1005,8 @@ body.resizing-panel {
 }
 
 .merge-export-file-item {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
   padding: 8px 10px;
@@ -1015,20 +1016,18 @@ body.resizing-panel {
 }
 
 .merge-export-file-item div {
-  flex: 1 1 auto;
   min-width: 0;
 }
 
 .merge-export-file-item strong {
-  display: -webkit-box;
+  display: block;
+  min-width: 0;
   color: #344054;
   font-size: 13px;
   font-weight: 600;
   line-height: 1.35;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  white-space: nowrap;
   overflow: hidden;
-  overflow-wrap: anywhere;
   text-overflow: ellipsis;
 }
 
@@ -1239,6 +1238,7 @@ body.resizing-panel {
   font: inherit;
   box-sizing: border-box;
   pointer-events: auto;
+  user-select: text;
 }
 
 .note-dialog-field textarea {

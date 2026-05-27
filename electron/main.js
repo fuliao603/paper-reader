@@ -1,6 +1,7 @@
 /* global process */
 
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { Buffer } from 'node:buffer'
 import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -1628,6 +1629,31 @@ function getPdfStringValue(value) {
   return ''
 }
 
+function getPdfNumberValue(value) {
+  if (typeof value?.asNumber === 'function') return value.asNumber()
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function getPdfArrayNumbers(array) {
+  if (!(array instanceof PDFArray)) return []
+
+  const values = []
+  for (let index = 0; index < array.size(); index += 1) {
+    const value = getPdfNumberValue(array.lookup(index))
+    if (!Number.isFinite(value)) return []
+    values.push(value)
+  }
+  return values
+}
+
+function arePdfRectsClose(firstRect = [], secondRect = []) {
+  if (firstRect.length !== 4 || secondRect.length !== 4) return false
+
+  const tolerance = 2
+  return firstRect.every((value, index) => Math.abs(value - secondRect[index]) <= tolerance)
+}
+
 function getPdfHighlightGeometry(annotation, pageWidth, pageHeight) {
   const rects = Array.isArray(annotation?.rects) ? annotation.rects : []
   const pdfRects = rects
@@ -1730,21 +1756,36 @@ async function embedPdfHighlightAnnotation(annotation) {
 async function deletePdfHighlightAnnotation(annotation) {
   const filePath = String(annotation?.pdfFilePath || annotation?.filePath || '').trim()
   const pdfAnnotationId = String(annotation?.pdfAnnotationId || '').trim()
-  if (!filePath || !pdfAnnotationId) {
+  if (!filePath) {
+    throw new Error('当前 PDF 路径无效，无法删除 PDF 本体高亮')
+  }
+  if (!pdfAnnotationId && !Array.isArray(annotation?.rects)) {
     throw new Error('该高亮没有可删除的 PDF 本体批注信息')
   }
 
   const pdfDoc = await PDFDocument.load(await fs.readFile(filePath), { ignoreEncryption: true })
   let removed = false
+  const pageIndex = Math.max(0, Number(annotation?.pageNumber || 1) - 1)
 
-  for (const page of pdfDoc.getPages()) {
+  for (const [currentPageIndex, page] of pdfDoc.getPages().entries()) {
     const annots = page.node.lookupMaybe(PDFName.of('Annots'), PDFArray)
     if (!annots) continue
+    const pageSize = page.getSize()
+    const expectedGeometry = currentPageIndex === pageIndex
+      ? getPdfHighlightGeometry(annotation, pageSize.width, pageSize.height)
+      : null
 
     for (let index = annots.size() - 1; index >= 0; index -= 1) {
       const annot = pdfDoc.context.lookup(annots.get(index))
+      const subtype = annot?.lookup?.(PDFName.of('Subtype'))
+      if (String(subtype) !== '/Highlight') continue
+
       const nm = annot?.lookup?.(PDFName.of('NM'))
-      if (getPdfStringValue(nm) === pdfAnnotationId) {
+      const rect = getPdfArrayNumbers(annot?.lookup?.(PDFName.of('Rect')))
+      const matchesId = Boolean(pdfAnnotationId && getPdfStringValue(nm) === pdfAnnotationId)
+      const matchesGeometry = Boolean(!matchesId && expectedGeometry && arePdfRectsClose(rect, expectedGeometry.rect))
+
+      if (matchesId || matchesGeometry) {
         annots.remove(index)
         removed = true
       }
@@ -1753,8 +1794,13 @@ async function deletePdfHighlightAnnotation(annotation) {
 
   if (!removed) throw new Error('未在 PDF 文件本体中找到对应高亮')
 
-  await fs.writeFile(filePath, await pdfDoc.save())
-  return { removed: true, filePath }
+  const nextBytes = await pdfDoc.save()
+  await fs.writeFile(filePath, nextBytes)
+  return {
+    removed: true,
+    filePath,
+    dataUrl: `data:application/pdf;base64,${Buffer.from(nextBytes).toString('base64')}`,
+  }
 }
 
 function getFilePathKey(filePath) {

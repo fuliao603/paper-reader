@@ -141,6 +141,7 @@ function App() {
   const annotationButtonRef = useRef(null)
   const annotationToolbarRef = useRef(null)
   const noteDialogRef = useRef(null)
+  const noteTitleInputRef = useRef(null)
   const noteTextareaRef = useRef(null)
   const mergeNameInputRef = useRef(null)
 
@@ -457,6 +458,9 @@ function App() {
       return
     }
 
+    setIsNotesBatchSelecting(false)
+    setSelectedNoteIds([])
+    setNotesStatus('')
     setNoteDialog({ mode: 'add', note })
     setNoteDraft({ title: note.title, noteText: '' })
   }
@@ -482,6 +486,9 @@ function App() {
       return
     }
 
+    setIsNotesBatchSelecting(false)
+    setSelectedNoteIds([])
+    setNotesStatus('')
     setNoteDialog({ mode: 'add', note })
     setNoteDraft({ title: note.title, noteText: '' })
   }
@@ -499,11 +506,18 @@ function App() {
     }
 
     setRightPanelTab('notes')
+    setIsNotesBatchSelecting(false)
+    setSelectedNoteIds([])
+    setSelectedNoteId('')
+    setNotesStatus('')
     setNoteDialog({ mode: 'add', note })
     setNoteDraft({ title: note.title, noteText: '' })
   }
 
   function openEditNoteDialog(note) {
+    setIsNotesBatchSelecting(false)
+    setSelectedNoteIds([])
+    setNotesStatus('')
     setNoteDialog({ mode: 'edit', note })
     setNoteDraft({ title: note.title || '', noteText: note.noteText || '' })
   }
@@ -775,9 +789,12 @@ function App() {
 
     try {
       let pdfDeleteWarning = ''
-      if (highlight.embeddedInPdf && window.electronAPI?.deletePdfHighlightAnnotation) {
+      if ((highlight.embeddedInPdf || highlight.pdfAnnotationId) && window.electronAPI?.deletePdfHighlightAnnotation) {
         try {
-          await window.electronAPI.deletePdfHighlightAnnotation(highlight)
+          const pdfDeleteResult = await window.electronAPI.deletePdfHighlightAnnotation(highlight)
+          if (pdfDeleteResult?.dataUrl) {
+            setPdfUrl(pdfDeleteResult.dataUrl)
+          }
         } catch (error) {
           console.error('Failed to delete embedded PDF highlight', error)
           pdfDeleteWarning = error.message || '未能同步删除 PDF 本体高亮'
@@ -1229,17 +1246,8 @@ function App() {
     )
   }
 
-  function getExportTypeDisplayLabel(exportType) {
-    if (exportType === 'translation-history') return '翻译历史'
-    if (exportType === 'notes') return '笔记'
-    if (exportType === 'full') return '完整备份'
-    if (exportType === 'mixed') return '混合合集'
-    return '未知类型'
-  }
-
   function getMergeExportFileDisplayName(file) {
-    const fileName = file?.fileName || file?.exportName || '未命名文件'
-    return `${getExportTypeDisplayLabel(file?.exportType)}_${fileName}`
+    return file?.fileName || file?.exportName || '未命名文件'
   }
 
   useEffect(() => {
@@ -1347,7 +1355,7 @@ function App() {
     if (!noteDialog) return undefined
 
     const focusTimer = window.setTimeout(() => {
-      noteTextareaRef.current?.focus({ preventScroll: true })
+      noteTitleInputRef.current?.focus({ preventScroll: true })
     }, 0)
 
     return () => window.clearTimeout(focusTimer)
@@ -1625,6 +1633,7 @@ function App() {
 
   useEffect(() => {
     function handleKeyDown(event) {
+      if (isInteractiveElement(event.target)) return
       if (event.key !== 'Escape') return
 
       if (isDiagramModalFullscreen || isCompareModalFullscreen) {
@@ -5730,21 +5739,11 @@ function App() {
       ) : null}
 
       {noteDialog ? (
-        <div
-          className="note-dialog-overlay"
-          role="presentation"
-          onPointerDown={(event) => event.stopPropagation()}
-          onMouseDown={(event) => event.stopPropagation()}
-          onClick={(event) => event.stopPropagation()}
-        >
+        <div className="note-dialog-overlay" role="presentation">
           <section
             className="note-dialog"
             ref={noteDialogRef}
             aria-label={noteDialog.mode === 'edit' ? '编辑笔记' : '添加笔记'}
-            onPointerDown={(event) => event.stopPropagation()}
-            onMouseDown={(event) => event.stopPropagation()}
-            onMouseUp={(event) => event.stopPropagation()}
-            onClick={(event) => event.stopPropagation()}
           >
             <div className="diagram-dialog-header">
               <h2>{noteDialog.mode === 'edit' ? '编辑笔记' : noteDialog.note.type === 'page-note' ? `为第 ${noteDialog.note.pageNumber} 页添加笔记` : '添加到笔记'}</h2>
@@ -5756,10 +5755,13 @@ function App() {
             <label className="note-dialog-field">
               <span>标题</span>
               <input
+                ref={noteTitleInputRef}
                 type="text"
                 value={noteDraft.title}
                 onChange={(event) => setNoteDraft((draft) => ({ ...draft, title: event.target.value }))}
+                onInput={(event) => setNoteDraft((draft) => ({ ...draft, title: event.currentTarget.value }))}
                 onFocus={() => setNotesStatus('')}
+                placeholder="输入笔记标题"
               />
             </label>
 
@@ -5769,11 +5771,10 @@ function App() {
                 ref={noteTextareaRef}
                 value={noteDraft.noteText}
                 onChange={(event) => setNoteDraft((draft) => ({ ...draft, noteText: event.target.value }))}
+                onInput={(event) => setNoteDraft((draft) => ({ ...draft, noteText: event.currentTarget.value }))}
                 onFocus={() => setNotesStatus('')}
                 rows={6}
-                onMouseDown={(event) => event.stopPropagation()}
-                onMouseUp={(event) => event.stopPropagation()}
-                onClick={(event) => event.stopPropagation()}
+                placeholder="输入笔记内容"
                 onWheel={(event) => event.stopPropagation()}
               />
             </label>
