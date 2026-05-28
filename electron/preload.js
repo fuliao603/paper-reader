@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updateBrowsingRecord: (record) => ipcRenderer.invoke('browsing-history:update', record),
   deleteBrowsingRecord: (id) => ipcRenderer.invoke('browsing-history:delete', id),
   clearBrowsingHistory: () => ipcRenderer.invoke('browsing-history:clear'),
+  getPdfSession: () => ipcRenderer.invoke('pdf-session:get'),
+  savePdfSession: (session) => ipcRenderer.invoke('pdf-session:save', session),
   openPdfDialog: () => ipcRenderer.invoke('pdf:open-dialog'),
   openPdfFromPath: (filePath) => ipcRenderer.invoke('pdf:open-from-path', filePath),
   getDocumentTranslationHistories: () => ipcRenderer.invoke('document-history:get-all'),

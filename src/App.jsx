@@ -135,6 +135,13 @@ function App() {
   const rightPanelWidthRef = useRef(DEFAULT_SETTINGS.rightPanelWidth)
   const readingRecordSaveTimerRef = useRef(null)
   const pendingReadingRestoreRef = useRef(null)
+  const pdfTabsRef = useRef([])
+  const activeTabIdRef = useRef('')
+  const pdfSessionSaveTimerRef = useRef(null)
+  const pdfSessionRestoreRef = useRef(false)
+  const pdfSessionSkipNextSaveRef = useRef(true)
+  const pdfTabScrollSaveTimerRef = useRef(null)
+  const pendingSessionRestoreRef = useRef(null)
   const fallbackFileInputRef = useRef(null)
   const recentButtonRef = useRef(null)
   const recentPopoverRef = useRef(null)
@@ -147,6 +154,12 @@ function App() {
 
   const [pdfUrl, setPdfUrl] = useState('')
   const [currentDocument, setCurrentDocument] = useState(null)
+  const [pdfTabs, setPdfTabs] = useState([])
+  const [activeTabId, setActiveTabId] = useState('')
+  const [draggingTabId, setDraggingTabId] = useState('')
+  const [dragOverTabId, setDragOverTabId] = useState('')
+  const [pdfSessionStatus, setPdfSessionStatus] = useState('')
+  const [pendingSessionRestore, setPendingSessionRestore] = useState(null)
   const [browsingHistory, setBrowsingHistory] = useState([])
   const [isRecentOpen, setIsRecentOpen] = useState(false)
   const [recentStatus, setRecentStatus] = useState('')
@@ -266,11 +279,11 @@ function App() {
     setRightPanelResult(null)
   }
 
-  function closeCurrentPdf() {
-    void saveCurrentReadingRecord()
+  function resetCurrentPdfState() {
     clearRightPanelResult()
     setPdfUrl('')
     setCurrentDocument(null)
+    setActiveTabId('')
     setPageNumber(1)
     setNumPages(null)
     setPageJumpInput('1')
@@ -297,6 +310,18 @@ function App() {
     setHighlightContextMenu(null)
     setAnnotationStatus('')
     setNoteDialog(null)
+  }
+
+  // Keep the toolbar-level close command available even though the top button is hidden.
+  // eslint-disable-next-line no-unused-vars
+  function closeCurrentPdf() {
+    if (activeTabId) {
+      closePdfTab(activeTabId)
+      return
+    }
+
+    void saveCurrentReadingRecord()
+    resetCurrentPdfState()
   }
 
   const persistHistory = useCallback(async (nextHistory, document = currentDocument) => {
@@ -343,6 +368,334 @@ function App() {
     setRightPanelTab('result')
     void addHistoryItem(result)
   }, [addHistoryItem])
+
+  function getPdfTabId(documentId, filePath, fileName) {
+    return String(documentId || filePath || fileName || Date.now())
+  }
+
+  function updateActivePdfTabSnapshot(overrides = {}) {
+    if (!activeTabId) return
+
+    const scrollTop = Number(overrides.scrollTop ?? pdfViewerRef.current?.scrollTop ?? 0)
+
+    setPdfTabs((currentTabs) => currentTabs.map((tab) => {
+      if (tab.id !== activeTabId) return tab
+
+      return {
+        ...tab,
+        pdfUrl,
+        document: currentDocument || tab.document,
+        filePath: currentDocument?.filePath || tab.filePath,
+        fileName: currentDocument?.fileName || tab.fileName,
+        documentId: currentDocument?.documentId || tab.documentId,
+        currentPage: pageNumber,
+        totalPages: numPages,
+        scale: zoomPercent,
+        scrollTop,
+        rightPanelResult,
+        ocrResult,
+        rightPanelTab,
+        rightPanelVisible,
+        updatedAt: Date.now(),
+        ...overrides,
+      }
+    }))
+  }
+
+  function getSessionTabsSnapshot(overrides = {}) {
+    const currentActiveTabId = overrides.activeTabId ?? activeTabIdRef.current
+    const currentTabs = overrides.tabs || pdfTabsRef.current
+    const scrollTop = Number(overrides.scrollTop ?? pdfViewerRef.current?.scrollTop ?? 0)
+
+    return currentTabs.map((tab) => {
+      if (tab.id !== currentActiveTabId) return tab
+
+      return {
+        ...tab,
+        pdfUrl,
+        document: currentDocument || tab.document,
+        filePath: currentDocument?.filePath || tab.filePath,
+        fileName: currentDocument?.fileName || tab.fileName,
+        documentId: currentDocument?.documentId || tab.documentId,
+        currentPage: pageNumber,
+        totalPages: numPages,
+        scale: zoomPercent,
+        scrollTop,
+        rightPanelResult,
+        ocrResult,
+        rightPanelTab,
+        rightPanelVisible,
+        updatedAt: Date.now(),
+      }
+    })
+  }
+
+  function serializePdfSession(tabs = getSessionTabsSnapshot(), nextActiveTabId = activeTabIdRef.current) {
+    return {
+      activeTabId: nextActiveTabId,
+      tabs: tabs.map((tab) => ({
+        id: tab.id,
+        documentId: tab.documentId,
+        filePath: tab.filePath,
+        fileName: tab.fileName,
+        fileSize: tab.document?.fileSize || tab.fileSize || 0,
+        currentPage: tab.currentPage || 1,
+        totalPages: tab.totalPages || null,
+        scale: tab.scale || 100,
+        scrollTop: Number(tab.scrollTop) || 0,
+        rightPanelResult: tab.rightPanelResult || null,
+        ocrResult: tab.ocrResult || null,
+        rightPanelTab: tab.rightPanelTab || 'result',
+        rightPanelVisible: tab.rightPanelVisible !== false,
+        openedAt: tab.openedAt || Date.now(),
+        updatedAt: tab.updatedAt || Date.now(),
+      })),
+      updatedAt: Date.now(),
+    }
+  }
+
+  async function savePdfSessionNow(tabs = getSessionTabsSnapshot(), nextActiveTabId = activeTabIdRef.current) {
+    if (!window.electronAPI?.savePdfSession) return
+
+    try {
+      await window.electronAPI.savePdfSession(serializePdfSession(tabs, nextActiveTabId))
+    } catch (error) {
+      console.error('Failed to save PDF session', error)
+    }
+  }
+
+  function schedulePdfSessionSave(tabs = getSessionTabsSnapshot(), nextActiveTabId = activeTabIdRef.current) {
+    if (pdfSessionRestoreRef.current || !window.electronAPI?.savePdfSession) return
+
+    if (pdfSessionSaveTimerRef.current) {
+      clearTimeout(pdfSessionSaveTimerRef.current)
+    }
+
+    const session = serializePdfSession(tabs, nextActiveTabId)
+    pdfSessionSaveTimerRef.current = setTimeout(() => {
+      pdfSessionSaveTimerRef.current = null
+      void window.electronAPI.savePdfSession(session).catch((error) => {
+        console.error('Failed to save PDF session', error)
+      })
+    }, 300)
+  }
+
+  function reorderPdfTabs(sourceTabId, targetTabId) {
+    if (!sourceTabId || !targetTabId || sourceTabId === targetTabId) return
+
+    setPdfTabs((currentTabs) => {
+      const sourceIndex = currentTabs.findIndex((tab) => tab.id === sourceTabId)
+      const targetIndex = currentTabs.findIndex((tab) => tab.id === targetTabId)
+
+      if (sourceIndex < 0 || targetIndex < 0) return currentTabs
+
+      const nextTabs = currentTabs.slice()
+      const [movedTab] = nextTabs.splice(sourceIndex, 1)
+      nextTabs.splice(targetIndex, 0, movedTab)
+      schedulePdfSessionSave(nextTabs, activeTabIdRef.current)
+      return nextTabs
+    })
+  }
+
+  function clearTransientReadingState() {
+    requestIdRef.current += 1
+    window.getSelection()?.removeAllRanges()
+    ocrStartPointRef.current = null
+    setSelectedText('')
+    setHighlightRects([])
+    setTranslation('')
+    setTranslationStatus('idle')
+    lastTranslatedTextRef.current = ''
+    setIsOcrMode(false)
+    setIsOcrMenuOpen(false)
+    setIsOcrDragging(false)
+    setOcrRect(null)
+    setPreviewHighlight(null)
+    setActiveAnnotationId('')
+    setHighlightContextMenu(null)
+    setNoteDialog(null)
+    setNoteDraft({ title: '', noteText: '' })
+    setCopyStatus('')
+  }
+
+  function restorePdfTab(tab) {
+    if (!tab?.pdfUrl || !tab.document) return
+
+    pendingReadingRestoreRef.current = null
+    setActiveTabId(tab.id)
+    setCurrentDocument(tab.document)
+    setPdfUrl(tab.pdfUrl)
+    setPageNumber(tab.currentPage || 1)
+    setNumPages(tab.totalPages || null)
+    setPageJumpInput(String(tab.currentPage || 1))
+    setIsPageJumpFocused(false)
+    setZoomPercent(tab.scale || 100)
+    setZoomInput(String(tab.scale || 100))
+    setRightPanelResult(tab.rightPanelResult || null)
+    setOcrResult(tab.ocrResult || null)
+    setRightPanelTab(tab.rightPanelTab || 'result')
+    setRightPanelVisible(tab.rightPanelVisible !== false)
+    setTranslationHistory([])
+    setDocumentNotes([])
+    setDocumentAnnotations([])
+    setSelectedNoteId('')
+    clearTransientReadingState()
+
+    requestAnimationFrame(() => {
+      if (pdfViewerRef.current) {
+        pdfViewerRef.current.scrollTop = Number(tab.scrollTop) || 0
+      }
+    })
+  }
+
+  function confirmSessionRestore() {
+    const session = pendingSessionRestore
+    const restoredTabs = Array.isArray(session?.tabs) ? session.tabs : []
+
+    if (!restoredTabs.length) {
+      setPendingSessionRestore(null)
+      resetCurrentPdfState()
+      void savePdfSessionNow([], '')
+      return
+    }
+
+    const restoredActiveTab = restoredTabs.find((tab) => tab.id === session.activeTabId) || restoredTabs[0]
+
+    setPdfTabs(restoredTabs)
+    restorePdfTab(restoredActiveTab)
+    setPendingSessionRestore(null)
+    if (session.failedTabs?.length) {
+      setPdfSessionStatus(`部分文献文件不存在，已跳过：${session.failedTabs.slice(0, 3).join('、')}`)
+    } else {
+      setPdfSessionStatus('')
+    }
+    void savePdfSessionNow(restoredTabs, restoredActiveTab.id)
+  }
+
+  function declineSessionRestore() {
+    setPendingSessionRestore(null)
+    resetCurrentPdfState()
+    setPdfTabs([])
+    setPdfSessionStatus('')
+    void savePdfSessionNow([], '')
+  }
+
+  function activatePdfTab(tabId) {
+    if (!tabId || tabId === activeTabId) return
+
+    updateActivePdfTabSnapshot()
+    void saveCurrentReadingRecord()
+
+    const targetTab = pdfTabs.find((tab) => tab.id === tabId)
+    if (targetTab) {
+      restorePdfTab(targetTab)
+      schedulePdfSessionSave(getSessionTabsSnapshot(), tabId)
+    }
+  }
+
+  function closePdfTab(tabId) {
+    const closingIndex = pdfTabs.findIndex((tab) => tab.id === tabId)
+    if (closingIndex < 0) return
+
+    if (tabId === activeTabId) {
+      updateActivePdfTabSnapshot()
+      void saveCurrentReadingRecord()
+    }
+
+    const closingTab = pdfTabs[closingIndex]
+    const nextTabs = pdfTabs.filter((tab) => tab.id !== tabId)
+
+    if (closingTab?.pdfUrl?.startsWith?.('blob:')) {
+      URL.revokeObjectURL(closingTab.pdfUrl)
+    }
+
+    const nextActiveTab = nextTabs[Math.min(closingIndex, nextTabs.length - 1)] || nextTabs[closingIndex - 1]
+    const nextActiveTabId = tabId === activeTabId ? nextActiveTab?.id || '' : activeTabIdRef.current
+
+    setPdfTabs(nextTabs)
+    schedulePdfSessionSave(nextTabs, nextActiveTabId)
+
+    if (tabId !== activeTabId) return
+
+    if (nextActiveTab) {
+      restorePdfTab(nextActiveTab)
+      return
+    }
+
+    resetCurrentPdfState()
+  }
+
+  function renderPdfTabs() {
+    return (
+      <nav className={pdfTabs.length ? 'pdf-tabs-bar' : 'pdf-tabs-bar empty'} aria-label="PDF 标签页">
+        {pdfTabs.length ? (
+          <div className="pdf-tabs-scroll">
+            {pdfTabs.map((tab) => (
+              <div
+                key={tab.id}
+                className={[
+                  'pdf-tab',
+                  tab.id === activeTabId ? 'active' : '',
+                  tab.id === draggingTabId ? 'dragging' : '',
+                  tab.id === dragOverTabId && tab.id !== draggingTabId ? 'drag-over' : '',
+                ].filter(Boolean).join(' ')}
+                title={tab.fileName}
+                draggable
+                onDragStart={(event) => {
+                  setDraggingTabId(tab.id)
+                  event.dataTransfer.effectAllowed = 'move'
+                  event.dataTransfer.setData('text/plain', tab.id)
+                }}
+                onDragOver={(event) => {
+                  event.preventDefault()
+                  event.dataTransfer.dropEffect = 'move'
+                  if (dragOverTabId !== tab.id) {
+                    setDragOverTabId(tab.id)
+                  }
+                }}
+                onDragLeave={() => {
+                  setDragOverTabId((currentId) => (currentId === tab.id ? '' : currentId))
+                }}
+                onDrop={(event) => {
+                  event.preventDefault()
+                  const sourceTabId = event.dataTransfer.getData('text/plain') || draggingTabId
+                  reorderPdfTabs(sourceTabId, tab.id)
+                  setDraggingTabId('')
+                  setDragOverTabId('')
+                }}
+                onDragEnd={() => {
+                  setDraggingTabId('')
+                  setDragOverTabId('')
+                }}
+              >
+                <button
+                  type="button"
+                  className="pdf-tab-main"
+                  onClick={() => activatePdfTab(tab.id)}
+                >
+                  <span>{tab.fileName}</span>
+                </button>
+                <button
+                  type="button"
+                  className="pdf-tab-close"
+                  draggable={false}
+                  aria-label={`关闭 ${tab.fileName}`}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    closePdfTab(tab.id)
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {pdfSessionStatus ? <p className="pdf-session-status">{pdfSessionStatus}</p> : null}
+      </nav>
+    )
+  }
 
   useEffect(() => {
     if (rightPanelResult?.type === 'ocr-text') {
@@ -1268,6 +1621,49 @@ function App() {
   }, [isPageJumpFocused, pageNumber])
 
   useEffect(() => {
+    activeTabIdRef.current = activeTabId
+  }, [activeTabId])
+
+  useEffect(() => {
+    if (!activeTabId) return
+
+    const scrollTop = Number(pdfViewerRef.current?.scrollTop || 0)
+
+    setPdfTabs((currentTabs) => currentTabs.map((tab) => (
+      tab.id === activeTabId
+        ? {
+            ...tab,
+            pdfUrl,
+            document: currentDocument || tab.document,
+            filePath: currentDocument?.filePath || tab.filePath,
+            fileName: currentDocument?.fileName || tab.fileName,
+            documentId: currentDocument?.documentId || tab.documentId,
+            currentPage: pageNumber,
+            totalPages: numPages,
+            scale: zoomPercent,
+            scrollTop,
+            rightPanelResult,
+            ocrResult,
+            rightPanelTab,
+            rightPanelVisible,
+            updatedAt: Date.now(),
+          }
+        : tab
+    )))
+  }, [activeTabId, currentDocument, numPages, ocrResult, pageNumber, pdfUrl, rightPanelResult, rightPanelTab, rightPanelVisible, zoomPercent])
+
+  useEffect(() => {
+    if (pdfSessionSkipNextSaveRef.current) {
+      pdfSessionSkipNextSaveRef.current = false
+      return
+    }
+
+    schedulePdfSessionSave()
+    // Session save helpers read refs and current state snapshots; adding them as deps would reschedule on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTabId, pdfTabs])
+
+  useEffect(() => {
     async function loadBrowsingHistory() {
       if (!window.electronAPI?.getBrowsingHistory) return
 
@@ -1280,6 +1676,101 @@ function App() {
     }
 
     loadBrowsingHistory()
+  }, [])
+
+  useEffect(() => {
+    async function restorePdfSession() {
+      if (!window.electronAPI?.getPdfSession || !window.electronAPI?.openPdfFromPath) return
+
+      pdfSessionRestoreRef.current = true
+
+      try {
+        const savedSession = await window.electronAPI.getPdfSession()
+        const savedTabs = Array.isArray(savedSession?.tabs) ? savedSession.tabs : []
+
+        if (!savedTabs.length) return
+
+        const restoredTabs = []
+        const failedTabs = []
+
+        for (const savedTab of savedTabs) {
+          try {
+            const pdfFile = await window.electronAPI.openPdfFromPath(savedTab.filePath)
+            const document = {
+              id: savedTab.documentId || pdfFile.documentId,
+              documentId: savedTab.documentId || pdfFile.documentId,
+              filePath: pdfFile.filePath || savedTab.filePath,
+              fileName: pdfFile.fileName || savedTab.fileName || 'PDF',
+              fileSize: Number(pdfFile.fileSize || savedTab.fileSize) || 0,
+            }
+
+            restoredTabs.push({
+              id: getPdfTabId(document.documentId, document.filePath, document.fileName),
+              documentId: document.documentId,
+              filePath: document.filePath,
+              fileName: document.fileName,
+              fileSize: document.fileSize,
+              document,
+              pdfUrl: pdfFile.dataUrl || pdfFile.url,
+              currentPage: savedTab.currentPage || 1,
+              totalPages: savedTab.totalPages || null,
+              scale: savedTab.scale || 100,
+              scrollTop: Number(savedTab.scrollTop) || 0,
+              rightPanelResult: savedTab.rightPanelResult || null,
+              ocrResult: savedTab.ocrResult || null,
+              rightPanelTab: savedTab.rightPanelTab || 'result',
+              rightPanelVisible: savedTab.rightPanelVisible !== false,
+              openedAt: savedTab.openedAt || Date.now(),
+              updatedAt: savedTab.updatedAt || Date.now(),
+            })
+          } catch (error) {
+            failedTabs.push(savedTab.fileName || savedTab.filePath || 'PDF')
+            console.error('Failed to restore PDF tab', error)
+          }
+        }
+
+        if (!restoredTabs.length) {
+          resetCurrentPdfState()
+          void savePdfSessionNow([], '')
+          if (failedTabs.length) {
+            setPdfSessionStatus(`上次打开的 PDF 均无法恢复：${failedTabs.slice(0, 3).join('、')}`)
+          }
+          if (failedTabs.length) {
+            setRecentStatus(`上次打开的 PDF 均无法恢复：${failedTabs.slice(0, 3).join('、')}`)
+          }
+          return
+        }
+
+        setPendingSessionRestore({
+          tabs: restoredTabs,
+          activeTabId: savedSession.activeTabId,
+          failedTabs,
+        })
+        return
+
+        /*
+        const restoredActiveTab = restoredTabs.find((tab) => tab.id === savedSession.activeTabId) || restoredTabs[0]
+
+        setPdfTabs(restoredTabs)
+        restorePdfTab(restoredActiveTab)
+        if (failedTabs.length) {
+          setPdfSessionStatus(`已跳过无法恢复的 PDF：${failedTabs.slice(0, 3).join('、')}`)
+        }
+        if (failedTabs.length) {
+          setRecentStatus(`已跳过无法恢复的 PDF：${failedTabs.slice(0, 3).join('、')}`)
+        }
+        void savePdfSessionNow(restoredTabs, restoredActiveTab.id)
+        */
+      } catch (error) {
+        console.error('Failed to restore PDF session', error)
+      } finally {
+        pdfSessionRestoreRef.current = false
+      }
+    }
+
+    void restorePdfSession()
+    // Restore should run once on startup and uses the initial Electron session only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
@@ -1505,10 +1996,80 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!pdfUrl) return
+    pdfTabsRef.current = pdfTabs
+  }, [pdfTabs])
 
-    return () => URL.revokeObjectURL(pdfUrl)
-  }, [pdfUrl])
+  useEffect(() => {
+    pendingSessionRestoreRef.current = pendingSessionRestore
+  }, [pendingSessionRestore])
+
+  useEffect(() => () => {
+    if (pdfSessionSaveTimerRef.current) {
+      clearTimeout(pdfSessionSaveTimerRef.current)
+      pdfSessionSaveTimerRef.current = null
+    }
+    if (pendingSessionRestoreRef.current?.tabs?.length) {
+      void savePdfSessionNow(pendingSessionRestoreRef.current.tabs, pendingSessionRestoreRef.current.activeTabId)
+    } else {
+      void savePdfSessionNow()
+    }
+
+    pdfTabsRef.current.forEach((tab) => {
+      if (tab.pdfUrl?.startsWith?.('blob:')) {
+        URL.revokeObjectURL(tab.pdfUrl)
+      }
+    })
+    // Final cleanup should use refs captured at unmount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    function handleBeforeUnload() {
+      if (pendingSessionRestoreRef.current?.tabs?.length) {
+        void savePdfSessionNow(pendingSessionRestoreRef.current.tabs, pendingSessionRestoreRef.current.activeTabId)
+        return
+      }
+
+      void savePdfSessionNow()
+    }
+
+    window.addEventListener('beforeunload', handleBeforeUnload)
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+    }
+    // beforeunload should keep a stable handler and read current refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    const pdfViewer = pdfViewerRef.current
+    if (!pdfViewer || !activeTabId) return
+
+    function handlePdfViewerScroll() {
+      if (pdfTabScrollSaveTimerRef.current) {
+        clearTimeout(pdfTabScrollSaveTimerRef.current)
+      }
+
+      pdfTabScrollSaveTimerRef.current = setTimeout(() => {
+        const scrollTop = Number(pdfViewer.scrollTop) || 0
+        updateActivePdfTabSnapshot({ scrollTop })
+        schedulePdfSessionSave(getSessionTabsSnapshot({ scrollTop }))
+      }, 250)
+    }
+
+    pdfViewer.addEventListener('scroll', handlePdfViewerScroll, { passive: true })
+
+    return () => {
+      pdfViewer.removeEventListener('scroll', handlePdfViewerScroll)
+      if (pdfTabScrollSaveTimerRef.current) {
+        clearTimeout(pdfTabScrollSaveTimerRef.current)
+        pdfTabScrollSaveTimerRef.current = null
+      }
+    }
+    // Scroll persistence reads current refs and should only rebind when the active document changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTabId, pdfUrl])
 
   useEffect(() => {
     return () => {
@@ -1790,15 +2351,85 @@ function App() {
       fileName: pdfFile.fileName || 'PDF',
       fileSize: Number(pdfFile.fileSize) || 0,
     }
+    const nextTabId = getPdfTabId(nextDocument.documentId, nextDocument.filePath, nextDocument.fileName)
+    const nextPdfUrl = pdfFile.dataUrl || pdfFile.url
+    const existingTab = pdfTabs.find((tab) =>
+      tab.id === nextTabId ||
+      tab.documentId === nextDocument.documentId ||
+      (nextDocument.filePath && tab.filePath === nextDocument.filePath),
+    )
+
+    if (existingTab) {
+      const nextTabs = pdfTabs.map((tab) => (
+        tab.id === existingTab.id
+          ? {
+              ...tab,
+              pdfUrl: nextPdfUrl || tab.pdfUrl,
+              document: nextDocument,
+              filePath: nextDocument.filePath,
+              fileName: nextDocument.fileName,
+              documentId: nextDocument.documentId,
+              updatedAt: Date.now(),
+            }
+          : tab
+      ))
+
+      setPdfTabs(nextTabs)
+      schedulePdfSessionSave(nextTabs, existingTab.id)
+      if (existingTab.id === activeTabId) {
+        setCurrentDocument(nextDocument)
+        setPdfUrl(nextPdfUrl)
+      } else {
+        updateActivePdfTabSnapshot()
+        void saveCurrentReadingRecord()
+        restorePdfTab({
+          ...existingTab,
+          pdfUrl: nextPdfUrl || existingTab.pdfUrl,
+          document: nextDocument,
+          filePath: nextDocument.filePath,
+          fileName: nextDocument.fileName,
+          documentId: nextDocument.documentId,
+        })
+      }
+      setIsRecentOpen(false)
+      setRecentStatus('')
+      setPdfSessionStatus('')
+      return
+    }
 
     pendingReadingRestoreRef.current = restoreRecord
+    updateActivePdfTabSnapshot()
+    void saveCurrentReadingRecord()
+    const nextTab = {
+      id: nextTabId,
+      documentId: nextDocument.documentId,
+      filePath: nextDocument.filePath,
+      fileName: nextDocument.fileName,
+      document: nextDocument,
+      pdfUrl: nextPdfUrl,
+      currentPage: 1,
+      totalPages: restoreRecord?.totalPages || null,
+      scale: restoreRecord?.scale || zoomPercent,
+      scrollTop: 0,
+      rightPanelResult: null,
+      ocrResult: null,
+      rightPanelTab: 'result',
+      rightPanelVisible: restoreRecord?.rightPanelVisible ?? rightPanelVisible,
+      openedAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+    const nextTabs = [...pdfTabs, nextTab]
+    setPdfTabs(nextTabs)
+    schedulePdfSessionSave(nextTabs, nextTab.id)
+    setActiveTabId(nextTab.id)
     setCurrentDocument(nextDocument)
-    setPdfUrl(pdfFile.dataUrl || pdfFile.url)
+    setPdfUrl(nextPdfUrl)
     setPageNumber(1)
     setNumPages(null)
     setPageJumpInput('1')
     setIsRecentOpen(false)
     setRecentStatus('')
+    setPdfSessionStatus('')
     setTranslationHistory([])
     clearRightPanelResult()
     const initialRecord = normalizeBrowsingRecord({
@@ -1818,6 +2449,18 @@ function App() {
   }
 
   async function openPdfFromRecent(record) {
+    const existingTab = pdfTabs.find((tab) =>
+      tab.documentId === record.documentId ||
+      (record.filePath && tab.filePath === record.filePath),
+    )
+
+    if (existingTab) {
+      activatePdfTab(existingTab.id)
+      setIsRecentOpen(false)
+      setRecentStatus('')
+      return
+    }
+
     if (!window.electronAPI?.openPdfFromPath) {
       setRecentStatus('当前环境无法从路径重新打开 PDF')
       return
@@ -1992,6 +2635,7 @@ function App() {
 
   function handleDocumentLoadSuccess({ numPages }) {
     setNumPages(numPages)
+    updateActivePdfTabSnapshot({ totalPages: numPages })
 
     const restoreRecord = pendingReadingRestoreRef.current
 
@@ -2019,6 +2663,13 @@ function App() {
         rightPanelVisible: restoreRecord.rightPanelVisible !== false,
       })
     } else {
+      setPageNumber((currentPage) => {
+        const nextPage = clampNumber(Number(currentPage) || 1, 1, numPages)
+        if (nextPage !== currentPage) {
+          setPageJumpInput(String(nextPage))
+        }
+        return nextPage
+      })
       void saveCurrentReadingRecord({ totalPages: numPages })
     }
   }
@@ -5154,14 +5805,6 @@ function App() {
             accept="application/pdf"
             onChange={handleFileChange}
           />
-          <button
-            type="button"
-            className="secondary-toolbar-button"
-            onClick={closeCurrentPdf}
-            disabled={!pdfUrl}
-          >
-            关闭当前 PDF
-          </button>
           <div className="annotation-menu-wrap">
             <button
               ref={annotationButtonRef}
@@ -5316,6 +5959,8 @@ function App() {
           </button>
         </section>
       </header>
+
+      {renderPdfTabs()}
 
       {isRecentOpen ? (
         <div className="recent-popover" ref={recentPopoverRef}>
@@ -5517,6 +6162,31 @@ function App() {
               </button>
             </div>
           </form>
+        </div>
+      ) : null}
+
+      {pendingSessionRestore ? (
+        <div className="note-dialog-overlay" role="presentation">
+          <section className="note-dialog session-restore-dialog" aria-label="恢复上次文献">
+            <div className="diagram-dialog-header">
+              <h2>恢复上次文献</h2>
+            </div>
+
+            <div className="note-dialog-source">
+              <strong>是否恢复上次打开的文献？</strong>
+              <p>检测到你上次关闭软件时仍有打开的文献，是否恢复这些标签页？</p>
+              <span>{pendingSessionRestore.tabs?.length || 0} 个标签可恢复</span>
+            </div>
+
+            <div className="settings-actions">
+              <button type="button" className="settings-secondary-button" onClick={declineSessionRestore}>
+                否，不恢复
+              </button>
+              <button type="button" className="settings-primary-button" onClick={confirmSessionRestore}>
+                是，恢复
+              </button>
+            </div>
+          </section>
         </div>
       ) : null}
 

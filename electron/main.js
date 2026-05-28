@@ -78,6 +78,10 @@ function getAnnotationsPath() {
   return path.join(app.getPath('userData'), 'paper-reader-annotations.json')
 }
 
+function getPdfSessionPath() {
+  return path.join(app.getPath('userData'), 'paper-reader-pdf-session.json')
+}
+
 function getAppIconPath() {
   if (app.isPackaged) {
     return path.join(process.resourcesPath, 'build', 'icon.ico')
@@ -216,6 +220,98 @@ function normalizeBrowsingHistory(records) {
       return true
     })
     .slice(0, BROWSING_HISTORY_LIMIT)
+}
+
+function normalizeSessionResult(result) {
+  if (!result || typeof result !== 'object') return null
+
+  const type = String(result.type || '')
+  if (!HISTORY_TYPES.has(type)) return null
+
+  const normalized = {
+    type,
+    title: typeof result.title === 'string' ? result.title : '',
+    pageNumber: Number.isFinite(Number(result.pageNumber)) ? Number(result.pageNumber) : undefined,
+    selectedText: typeof result.selectedText === 'string' ? result.selectedText : undefined,
+    translation: typeof result.translation === 'string' ? result.translation : undefined,
+    ocrText: typeof result.ocrText === 'string' ? result.ocrText : undefined,
+    screenshotDataUrl: typeof result.screenshotDataUrl === 'string' ? result.screenshotDataUrl : undefined,
+    diagramResultImage: typeof result.diagramResultImage === 'string' ? result.diagramResultImage : undefined,
+    compareOriginalImage: typeof result.compareOriginalImage === 'string' ? result.compareOriginalImage : undefined,
+    compareTranslatedImage: typeof result.compareTranslatedImage === 'string' ? result.compareTranslatedImage : undefined,
+    compareLayout: result.compareLayout === 'vertical' ? 'vertical' : result.compareLayout === 'horizontal' ? 'horizontal' : undefined,
+    timestamp: Number.isFinite(Number(result.timestamp)) ? Number(result.timestamp) : undefined,
+  }
+
+  if (result.ocrSelectionRect && typeof result.ocrSelectionRect === 'object') {
+    normalized.ocrSelectionRect = result.ocrSelectionRect
+  }
+
+  return normalized
+}
+
+function normalizeSessionOcrResult(result) {
+  if (!result || typeof result !== 'object') return null
+
+  return {
+    status: typeof result.status === 'string' ? result.status : 'idle',
+    mode: typeof result.mode === 'string' ? result.mode : 'sidebar',
+    image: typeof result.image === 'string' ? result.image : '',
+    text: typeof result.text === 'string' ? result.text : '',
+    translation: typeof result.translation === 'string' ? result.translation : '',
+    error: typeof result.error === 'string' ? result.error : '',
+  }
+}
+
+function normalizePdfSessionTab(tab = {}) {
+  const filePath = String(tab.filePath || tab.document?.filePath || '').trim()
+  const fileName = String(tab.fileName || tab.document?.fileName || (filePath ? path.basename(filePath) : '')).trim()
+  const fileSize = Math.max(0, Number(tab.fileSize || tab.document?.fileSize) || 0)
+
+  if (!filePath || !fileName) return null
+
+  const documentId = String(tab.documentId || tab.document?.documentId || createDocumentId(filePath, fileName, fileSize))
+  const currentPage = Math.max(1, Number(tab.currentPage) || Number(tab.lastPage) || 1)
+  const totalPages = Number(tab.totalPages)
+  const scale = Math.min(300, Math.max(50, Number(tab.scale) || 100))
+  const scrollTop = Math.max(0, Number(tab.scrollTop) || 0)
+  const openedAt = Number(tab.openedAt || Date.now())
+  const updatedAt = Number(tab.updatedAt || openedAt)
+
+  return {
+    id: String(tab.id || documentId),
+    documentId,
+    filePath,
+    fileName,
+    fileSize,
+    currentPage,
+    totalPages: Number.isFinite(totalPages) && totalPages > 0 ? totalPages : null,
+    scale,
+    scrollTop,
+    rightPanelResult: normalizeSessionResult(tab.rightPanelResult),
+    ocrResult: normalizeSessionOcrResult(tab.ocrResult),
+    rightPanelTab: ['result', 'history', 'notes'].includes(tab.rightPanelTab) ? tab.rightPanelTab : 'result',
+    rightPanelVisible: tab.rightPanelVisible !== false,
+    openedAt: Number.isFinite(openedAt) ? openedAt : Date.now(),
+    updatedAt: Number.isFinite(updatedAt) ? updatedAt : Date.now(),
+  }
+}
+
+function normalizePdfSession(session = {}) {
+  const tabs = Array.isArray(session.tabs)
+    ? session.tabs.map(normalizePdfSessionTab).filter(Boolean)
+    : []
+  const tabIds = new Set(tabs.map((tab) => tab.id))
+  const activeTabId = tabIds.has(String(session.activeTabId || ''))
+    ? String(session.activeTabId)
+    : tabs[0]?.id || ''
+
+  return {
+    schemaVersion: 1,
+    activeTabId,
+    tabs,
+    updatedAt: Number(session.updatedAt) || Date.now(),
+  }
 }
 
 function normalizeDocumentHistoryItem(item = {}) {
@@ -625,6 +721,31 @@ async function saveBrowsingHistory(history) {
   await fs.writeFile(getBrowsingHistoryPath(), `${JSON.stringify(nextHistory, null, 2)}\n`, 'utf8')
   await pruneDocumentTranslationHistories(nextHistory)
   return nextHistory
+}
+
+async function readPdfSession() {
+  try {
+    const rawSession = await fs.readFile(getPdfSessionPath(), 'utf8')
+    return normalizePdfSession(JSON.parse(rawSession))
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return normalizePdfSession()
+    }
+
+    throw new Error(`璇诲彇 PDF 浼氳瘽澶辫触锛?{error.message}`, { cause: error })
+  }
+}
+
+async function savePdfSession(session = {}) {
+  const nextSession = normalizePdfSession({
+    ...session,
+    updatedAt: Date.now(),
+  })
+
+  await fs.mkdir(app.getPath('userData'), { recursive: true })
+  await fs.writeFile(getPdfSessionPath(), `${JSON.stringify(nextSession, null, 2)}\n`, 'utf8')
+
+  return nextSession
 }
 
 async function updateBrowsingRecord(record) {
@@ -2008,6 +2129,8 @@ function registerIpcHandlers() {
   ipcMain.handle('browsing-history:update', async (_event, record) => updateBrowsingRecord(record))
   ipcMain.handle('browsing-history:delete', async (_event, id) => deleteBrowsingRecord(id))
   ipcMain.handle('browsing-history:clear', async () => clearBrowsingHistory())
+  ipcMain.handle('pdf-session:get', async () => readPdfSession())
+  ipcMain.handle('pdf-session:save', async (_event, session) => savePdfSession(session))
   ipcMain.handle('pdf:open-dialog', async () => openPdfDialog())
   ipcMain.handle('pdf:open-from-path', async (_event, filePath) => openPdfFromPath(filePath))
   ipcMain.handle('document-history:get-all', async () => readDocumentTranslationHistories())
