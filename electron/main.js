@@ -1,6 +1,6 @@
 /* global process */
 
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, Menu, dialog, ipcMain } from 'electron'
 import { Buffer } from 'node:buffer'
 import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
@@ -80,6 +80,10 @@ function getAnnotationsPath() {
 
 function getPdfSessionPath() {
   return path.join(app.getPath('userData'), 'paper-reader-pdf-session.json')
+}
+
+function getLibraryPath() {
+  return path.join(app.getPath('userData'), 'paper-reader-library.json')
 }
 
 function getAppIconPath() {
@@ -220,6 +224,76 @@ function normalizeBrowsingHistory(records) {
       return true
     })
     .slice(0, BROWSING_HISTORY_LIMIT)
+}
+
+function createLibraryFolderId() {
+  return `folder-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function normalizeLibraryFolder(folder = {}, index = 0) {
+  const name = String(folder.name || '').trim()
+
+  if (!name) return null
+
+  const now = Date.now()
+
+  return {
+    id: String(folder.id || createLibraryFolderId()),
+    name,
+    documentIds: Array.isArray(folder.documentIds) ? folder.documentIds.map(String) : [],
+    collapsed: Boolean(folder.collapsed),
+    sortOrder: Number.isFinite(Number(folder.sortOrder)) ? Number(folder.sortOrder) : index,
+    createdAt: Number(folder.createdAt) || now,
+    updatedAt: Number(folder.updatedAt) || now,
+  }
+}
+
+function normalizeLibraryDocument(document = {}, index = 0) {
+  const filePath = String(document.filePath || '').trim()
+  const fileName = String(document.fileName || (filePath ? path.basename(filePath) : '')).trim()
+  const fileSize = Math.max(0, Number(document.fileSize) || 0)
+
+  if (!filePath || !fileName) return null
+
+  const now = Date.now()
+  const documentId = String(document.documentId || createDocumentId(filePath, fileName, fileSize))
+
+  return {
+    id: String(document.id || documentId),
+    documentId,
+    filePath,
+    fileName,
+    fileSize,
+    folderId: String(document.folderId || ''),
+    importedAt: Number(document.importedAt) || Number(document.createdAt) || now,
+    updatedAt: Number(document.updatedAt) || now,
+    sortOrder: Number.isFinite(Number(document.sortOrder)) ? Number(document.sortOrder) : index,
+  }
+}
+
+function normalizeLibraryData(data = {}) {
+  const folders = Array.isArray(data.folders)
+    ? data.folders.map(normalizeLibraryFolder).filter(Boolean)
+    : []
+  const folderIds = new Set(folders.map((folder) => folder.id))
+  const seenDocuments = new Set()
+  const documents = (Array.isArray(data.documents) ? data.documents : [])
+    .map(normalizeLibraryDocument)
+    .filter(Boolean)
+    .map((document) => ({
+      ...document,
+      folderId: folderIds.has(document.folderId) ? document.folderId : '',
+    }))
+    .filter((document) => {
+      if (seenDocuments.has(document.documentId)) return false
+      seenDocuments.add(document.documentId)
+      return true
+    })
+
+  return {
+    folders: folders.sort((a, b) => a.sortOrder - b.sortOrder || a.createdAt - b.createdAt),
+    documents: documents.sort((a, b) => a.sortOrder - b.sortOrder || b.importedAt - a.importedAt),
+  }
 }
 
 function normalizeSessionResult(result) {
@@ -1102,6 +1176,204 @@ async function clearDocumentNotes(documentId) {
   }
 
   return []
+}
+
+async function readLibraryData() {
+  try {
+    const rawLibrary = await fs.readFile(getLibraryPath(), 'utf8')
+    return normalizeLibraryData(JSON.parse(rawLibrary))
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return normalizeLibraryData({})
+    }
+
+    throw new Error(`读取文献库失败：${error.message}`, { cause: error })
+  }
+}
+
+async function saveLibraryData(data) {
+  const nextData = normalizeLibraryData(data)
+  await fs.mkdir(app.getPath('userData'), { recursive: true })
+  await fs.writeFile(getLibraryPath(), `${JSON.stringify(nextData, null, 2)}\n`, 'utf8')
+  return nextData
+}
+
+async function getEnrichedLibrary() {
+  const [library, browsingHistory, notes, annotations] = await Promise.all([
+    readLibraryData(),
+    readBrowsingHistory(),
+    readDocumentNotes(),
+    readDocumentAnnotations(),
+  ])
+  const browsingByDocumentId = new Map(browsingHistory.map((record) => [record.documentId, record]))
+
+  return {
+    folders: library.folders,
+    documents: library.documents.map((document) => {
+      const browsingRecord = browsingByDocumentId.get(document.documentId)
+      const noteItems = normalizeNoteItems(notes[document.documentId]?.items || [])
+      const annotationItems = normalizeAnnotationItems(annotations[document.documentId]?.items || [])
+
+      return {
+        ...document,
+        totalPages: browsingRecord?.totalPages || null,
+        lastPage: browsingRecord?.lastPage || 1,
+        scale: browsingRecord?.scale || 100,
+        lastOpenedAt: browsingRecord?.lastOpenedAt || null,
+        notesCount: noteItems.length,
+        annotationsCount: annotationItems.length,
+      }
+    }),
+  }
+}
+
+async function upsertLibraryDocument(document = {}) {
+  const library = await readLibraryData()
+  const normalizedDocument = normalizeLibraryDocument(document)
+
+  if (!normalizedDocument) {
+    throw new Error('无法添加文献到文献库')
+  }
+
+  const existing = library.documents.find((item) =>
+    item.documentId === normalizedDocument.documentId ||
+    item.filePath.toLowerCase() === normalizedDocument.filePath.toLowerCase()
+  )
+  const nextDocument = existing
+    ? {
+        ...existing,
+        ...normalizedDocument,
+        folderId: normalizedDocument.folderId || existing.folderId,
+        importedAt: existing.importedAt || normalizedDocument.importedAt,
+        sortOrder: existing.sortOrder,
+        updatedAt: Date.now(),
+      }
+    : {
+        ...normalizedDocument,
+        sortOrder: library.documents.length,
+        updatedAt: Date.now(),
+      }
+  const nextDocuments = existing
+    ? library.documents.map((item) => (item.documentId === existing.documentId ? nextDocument : item))
+    : [nextDocument, ...library.documents]
+
+  await saveLibraryData({ ...library, documents: nextDocuments })
+  return getEnrichedLibrary()
+}
+
+async function importLibraryPdfs() {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '导入文献到文献库',
+    properties: ['openFile', 'multiSelections'],
+    filters: [{ name: 'PDF', extensions: ['pdf'] }],
+  })
+
+  if (result.canceled || !result.filePaths.length) {
+    return { canceled: true, ...(await getEnrichedLibrary()) }
+  }
+
+  const library = await readLibraryData()
+  const documentsById = new Map(library.documents.map((document) => [document.documentId, document]))
+
+  for (const filePath of result.filePaths) {
+    const stat = await fs.stat(filePath)
+
+    if (!stat.isFile()) continue
+
+    const normalizedPath = String(filePath || '').trim()
+    const fileName = path.basename(normalizedPath)
+    const fileSize = stat.size
+    const documentId = await resolveDocumentIdForPdf(normalizedPath, fileName, fileSize)
+    const existing = documentsById.get(documentId)
+    documentsById.set(documentId, {
+      ...(existing || {}),
+      id: documentId,
+      documentId,
+      filePath: normalizedPath,
+      fileName,
+      fileSize,
+      folderId: existing?.folderId || '',
+      importedAt: existing?.importedAt || Date.now(),
+      updatedAt: Date.now(),
+      sortOrder: existing?.sortOrder ?? documentsById.size,
+    })
+  }
+
+  await saveLibraryData({ ...library, documents: Array.from(documentsById.values()) })
+  return { canceled: false, ...(await getEnrichedLibrary()) }
+}
+
+async function createLibraryFolder(name) {
+  const library = await readLibraryData()
+  const normalizedName = String(name || '').trim()
+
+  if (!normalizedName) {
+    throw new Error('文件夹名称不能为空')
+  }
+
+  if (library.folders.some((folder) => folder.name.trim().toLowerCase() === normalizedName.toLowerCase())) {
+    throw new Error('已存在同名文件夹')
+  }
+
+  const folder = normalizeLibraryFolder({
+    name: normalizedName,
+    documentIds: [],
+    sortOrder: library.folders.length,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  })
+
+  await saveLibraryData({ ...library, folders: [...library.folders, folder] })
+  return getEnrichedLibrary()
+}
+
+async function updateLibraryFolder(folderId, updates = {}) {
+  const library = await readLibraryData()
+  const normalizedFolderId = String(folderId || '')
+  const nextFolders = library.folders.map((folder) => (
+    folder.id === normalizedFolderId
+      ? {
+          ...folder,
+          name: String(updates.name || folder.name).trim() || folder.name,
+          collapsed: typeof updates.collapsed === 'boolean' ? updates.collapsed : folder.collapsed,
+          updatedAt: Date.now(),
+        }
+      : folder
+  ))
+
+  await saveLibraryData({ ...library, folders: nextFolders })
+  return getEnrichedLibrary()
+}
+
+async function moveLibraryDocuments(documentIds = [], folderId = '') {
+  const library = await readLibraryData()
+  const ids = new Set((Array.isArray(documentIds) ? documentIds : []).map(String))
+  const folderIds = new Set(library.folders.map((folder) => folder.id))
+  const normalizedFolderId = folderIds.has(String(folderId)) ? String(folderId) : ''
+
+  if (!ids.size) return getEnrichedLibrary()
+
+  const nextDocuments = library.documents.map((document) => (
+    ids.has(document.documentId)
+      ? { ...document, folderId: normalizedFolderId, updatedAt: Date.now() }
+      : document
+  ))
+
+  await saveLibraryData({ ...library, documents: nextDocuments })
+  return getEnrichedLibrary()
+}
+
+async function deleteLibraryDocuments(documentIds = []) {
+  const library = await readLibraryData()
+  const ids = new Set((Array.isArray(documentIds) ? documentIds : []).map(String))
+
+  if (!ids.size) return getEnrichedLibrary()
+
+  await saveLibraryData({
+    ...library,
+    documents: library.documents.filter((document) => !ids.has(document.documentId)),
+  })
+  return getEnrichedLibrary()
 }
 
 function formatExportTimestamp(date = new Date()) {
@@ -2129,6 +2401,13 @@ function registerIpcHandlers() {
   ipcMain.handle('browsing-history:update', async (_event, record) => updateBrowsingRecord(record))
   ipcMain.handle('browsing-history:delete', async (_event, id) => deleteBrowsingRecord(id))
   ipcMain.handle('browsing-history:clear', async () => clearBrowsingHistory())
+  ipcMain.handle('library:get', async () => getEnrichedLibrary())
+  ipcMain.handle('library:import-pdfs', async () => importLibraryPdfs())
+  ipcMain.handle('library:upsert-document', async (_event, document) => upsertLibraryDocument(document))
+  ipcMain.handle('library:create-folder', async (_event, name) => createLibraryFolder(name))
+  ipcMain.handle('library:update-folder', async (_event, folderId, updates) => updateLibraryFolder(folderId, updates))
+  ipcMain.handle('library:move-documents', async (_event, documentIds, folderId) => moveLibraryDocuments(documentIds, folderId))
+  ipcMain.handle('library:delete-documents', async (_event, documentIds) => deleteLibraryDocuments(documentIds))
   ipcMain.handle('pdf-session:get', async () => readPdfSession())
   ipcMain.handle('pdf-session:save', async (_event, session) => savePdfSession(session))
   ipcMain.handle('pdf:open-dialog', async () => openPdfDialog())
@@ -2198,6 +2477,7 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   try {
+    Menu.setApplicationMenu(null)
     registerIpcHandlers()
     await startBackend()
     createWindow()

@@ -40,7 +40,6 @@ const UI = {
   settingsSave: '\u4fdd\u5b58\u8bbe\u7f6e',
   settingsSaved: '\u8bbe\u7f6e\u5df2\u4fdd\u5b58',
   settingsSaveError: '\u4fdd\u5b58\u8bbe\u7f6e\u5931\u8d25',
-  settingsTitle: 'AI \u7ffb\u8bd1\u8bbe\u7f6e',
   totalPages: '\u5171',
   translateError: '\u8bf7\u786e\u8ba4\u540e\u7aef\u670d\u52a1\u5df2\u542f\u52a8',
 }
@@ -141,6 +140,11 @@ function App() {
   const pdfSessionRestoreRef = useRef(false)
   const pdfSessionSkipNextSaveRef = useRef(true)
   const pdfTabScrollSaveTimerRef = useRef(null)
+  const pageWidthRef = useRef(700)
+  const lastViewerSizeRef = useRef({ width: 0, height: 0 })
+  const sidebarResizeSettlingRef = useRef(false)
+  const sidebarResizeTimerRef = useRef(null)
+  const syncPageWidthRef = useRef(null)
   const pendingSessionRestoreRef = useRef(null)
   const fallbackFileInputRef = useRef(null)
   const recentButtonRef = useRef(null)
@@ -151,6 +155,7 @@ function App() {
   const noteTitleInputRef = useRef(null)
   const noteTextareaRef = useRef(null)
   const mergeNameInputRef = useRef(null)
+  const libraryFolderNameInputRef = useRef(null)
 
   const [pdfUrl, setPdfUrl] = useState('')
   const [currentDocument, setCurrentDocument] = useState(null)
@@ -163,6 +168,18 @@ function App() {
   const [browsingHistory, setBrowsingHistory] = useState([])
   const [isRecentOpen, setIsRecentOpen] = useState(false)
   const [recentStatus, setRecentStatus] = useState('')
+  const [libraryFolders, setLibraryFolders] = useState([])
+  const [libraryDocuments, setLibraryDocuments] = useState([])
+  const [selectedLibraryFolderId, setSelectedLibraryFolderId] = useState('all')
+  const [librarySearch, setLibrarySearch] = useState('')
+  const [librarySort, setLibrarySort] = useState('recent')
+  const [selectedLibraryDocumentIds, setSelectedLibraryDocumentIds] = useState([])
+  const [libraryStatus, setLibraryStatus] = useState('')
+  const [libraryContextMenu, setLibraryContextMenu] = useState(null)
+  const [libraryMoveDialog, setLibraryMoveDialog] = useState(null)
+  const [libraryFolderDialogOpen, setLibraryFolderDialogOpen] = useState(false)
+  const [libraryFolderNameDraft, setLibraryFolderNameDraft] = useState('')
+  const [libraryFolderNameError, setLibraryFolderNameError] = useState('')
   const [pageNumber, setPageNumber] = useState(1)
   const [numPages, setNumPages] = useState(null)
   const [selectedText, setSelectedText] = useState('')
@@ -229,7 +246,6 @@ function App() {
   const [pageJumpInput, setPageJumpInput] = useState('1')
   const [isPageJumpFocused, setIsPageJumpFocused] = useState(false)
   const [copyStatus, setCopyStatus] = useState('')
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [settingsForm, setSettingsForm] = useState(DEFAULT_SETTINGS)
   const [settingsStatus, setSettingsStatus] = useState('')
   const [isSavingSettings, setIsSavingSettings] = useState(false)
@@ -237,6 +253,9 @@ function App() {
   const [glossaryStatus, setGlossaryStatus] = useState('未导入术语库')
   const [isGlossaryVisible, setIsGlossaryVisible] = useState(false)
   const [settingsTab, setSettingsTab] = useState('model')
+  const [importExportTab, setImportExportTab] = useState('importExport')
+  const [activeModule, setActiveModule] = useState('reader')
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [rightPanelWidth, setRightPanelWidth] = useState(DEFAULT_SETTINGS.rightPanelWidth)
   const [rightPanelVisible, setRightPanelVisible] = useState(true)
   const [isResizingPanel, setIsResizingPanel] = useState(false)
@@ -1361,6 +1380,37 @@ function App() {
     }
   }
 
+  const updateLibraryState = useCallback((library) => {
+    setLibraryFolders(Array.isArray(library?.folders) ? library.folders : [])
+    setLibraryDocuments(Array.isArray(library?.documents) ? library.documents : [])
+    setSelectedLibraryDocumentIds((currentIds) => (
+      currentIds.filter((id) => library?.documents?.some?.((document) => document.documentId === id))
+    ))
+  }, [])
+
+  const refreshLibrary = useCallback(async () => {
+    if (!window.electronAPI?.getLibrary) return
+
+    try {
+      const library = await window.electronAPI.getLibrary()
+      updateLibraryState(library)
+      setLibraryStatus('')
+    } catch (error) {
+      setLibraryStatus(error.message || '读取文献库失败')
+    }
+  }, [updateLibraryState])
+
+  const syncDocumentToLibrary = useCallback(async (document = currentDocument) => {
+    if (!document?.documentId || !window.electronAPI?.upsertLibraryDocument) return
+
+    try {
+      const library = await window.electronAPI.upsertLibraryDocument(document)
+      updateLibraryState(library)
+    } catch (error) {
+      console.error('Failed to sync library document', error)
+    }
+  }, [currentDocument, updateLibraryState])
+
   async function exportCurrentHistory() {
     if (!currentDocument?.documentId) {
       setHistoryStatus('请先打开 PDF')
@@ -1793,6 +1843,56 @@ function App() {
     }
   }, [isRecentOpen])
 
+  useEffect(() => {
+    if (!libraryContextMenu) return
+
+    function closeLibraryContextMenu() {
+      setLibraryContextMenu(null)
+    }
+
+    document.addEventListener('pointerdown', closeLibraryContextMenu)
+
+    return () => {
+      document.removeEventListener('pointerdown', closeLibraryContextMenu)
+    }
+  }, [libraryContextMenu])
+
+  useEffect(() => {
+    if (!libraryMoveDialog) return
+
+    function closeMoveDialog() {
+      setLibraryMoveDialog(null)
+    }
+
+    document.addEventListener('pointerdown', closeMoveDialog)
+
+    return () => {
+      document.removeEventListener('pointerdown', closeMoveDialog)
+    }
+  }, [libraryMoveDialog])
+
+  useEffect(() => {
+    if (!libraryFolderDialogOpen) return
+
+    const frameId = requestAnimationFrame(() => {
+      libraryFolderNameInputRef.current?.focus()
+      libraryFolderNameInputRef.current?.select()
+    })
+
+    function handleKeyDown(event) {
+      if (event.key === 'Escape') {
+        closeLibraryFolderDialog()
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      cancelAnimationFrame(frameId)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [libraryFolderDialogOpen])
+
   const saveCurrentReadingRecord = useCallback(async (overrides = {}) => {
     if (!currentDocument?.documentId || !window.electronAPI?.updateBrowsingRecord) return
 
@@ -1812,10 +1912,11 @@ function App() {
     try {
       const nextHistory = await window.electronAPI.updateBrowsingRecord(record)
       setBrowsingHistory(normalizeBrowsingHistory(nextHistory))
+      void syncDocumentToLibrary(currentDocument)
     } catch (error) {
       console.error('Failed to save browsing record', error)
     }
-  }, [currentDocument, numPages, pageNumber, rightPanelVisible, rightPanelWidth, zoomPercent])
+  }, [currentDocument, numPages, pageNumber, rightPanelVisible, rightPanelWidth, syncDocumentToLibrary, zoomPercent])
 
   useEffect(() => {
     if (!currentDocument?.documentId) return
@@ -2003,6 +2104,18 @@ function App() {
     pendingSessionRestoreRef.current = pendingSessionRestore
   }, [pendingSessionRestore])
 
+  useEffect(() => {
+    pageWidthRef.current = pageWidth
+  }, [pageWidth])
+
+  useEffect(() => () => {
+    if (sidebarResizeTimerRef.current) {
+      clearTimeout(sidebarResizeTimerRef.current)
+      sidebarResizeTimerRef.current = null
+    }
+    syncPageWidthRef.current = null
+  }, [])
+
   useEffect(() => () => {
     if (pdfSessionSaveTimerRef.current) {
       clearTimeout(pdfSessionSaveTimerRef.current)
@@ -2101,28 +2214,74 @@ function App() {
   useEffect(() => {
     if (!pdfViewerRef.current) return
 
+    lastViewerSizeRef.current = { width: 0, height: 0 }
+
+    function getStableDevicePixelRatio() {
+      if (typeof window === 'undefined') return 1
+
+      const ratio = Number(window.devicePixelRatio) || 1
+      return Math.max(1, Math.min(ratio, 4))
+    }
+
+    function alignWidthToDevicePixels(width) {
+      const flooredWidth = Math.max(160, Math.floor(width))
+      const pixelRatio = getStableDevicePixelRatio()
+
+      for (let candidateWidth = flooredWidth; candidateWidth >= Math.max(160, flooredWidth - 8); candidateWidth -= 1) {
+        const deviceWidth = candidateWidth * pixelRatio
+
+        if (Math.abs(Math.round(deviceWidth) - deviceWidth) < 0.01) {
+          return candidateWidth
+        }
+      }
+
+      return flooredWidth
+    }
+
     function updatePageWidth(containerWidth, containerHeight) {
+      const roundedContainerWidth = Math.floor(containerWidth)
+      const roundedContainerHeight = Math.floor(containerHeight)
+      const lastViewerSize = lastViewerSizeRef.current
+
+      if (
+        Math.abs(lastViewerSize.width - roundedContainerWidth) < 1 &&
+        Math.abs(lastViewerSize.height - roundedContainerHeight) < 1
+      ) {
+        return
+      }
+
+      lastViewerSizeRef.current = {
+        width: roundedContainerWidth,
+        height: roundedContainerHeight,
+      }
+
       const sideSpace = isFullscreen ? 24 : 28
-      const availableWidth = Math.max(160, containerWidth - sideSpace)
-      const availableHeight = Math.max(160, containerHeight - sideSpace)
+      const availableWidth = Math.max(160, roundedContainerWidth - sideSpace)
+      const availableHeight = Math.max(160, roundedContainerHeight - sideSpace)
       const widthByHeight = availableHeight * pageRatio
       const basePageWidth = isFullscreen
         ? Math.min(availableWidth, widthByHeight, 1200)
         : Math.min(availableWidth, 1200)
       const zoomedWidth = basePageWidth * (zoomPercent / 100)
-      const nextPageWidth = Math.max(160, Math.floor(zoomedWidth))
+      const nextPageWidth = alignWidthToDevicePixels(zoomedWidth)
 
-      setPageWidth((currentWidth) => {
-        if (Math.abs(currentWidth - nextPageWidth) < 2) {
-          return currentWidth
-        }
+      if (Math.abs(pageWidthRef.current - nextPageWidth) < 4) {
+        return
+      }
 
-        return nextPageWidth
-      })
+      pageWidthRef.current = nextPageWidth
+      setPageWidth(nextPageWidth)
     }
 
     let animationFrameId = null
     const pdfViewer = pdfViewerRef.current
+
+    syncPageWidthRef.current = () => {
+      if (!pdfViewerRef.current) return
+
+      updatePageWidth(pdfViewerRef.current.clientWidth, pdfViewerRef.current.clientHeight)
+    }
+
     const resizeObserver = new ResizeObserver((entries) => {
       const entry = entries[0]
 
@@ -2136,6 +2295,10 @@ function App() {
       }
 
       animationFrameId = requestAnimationFrame(() => {
+        if (sidebarResizeSettlingRef.current && !isFullscreen) {
+          return
+        }
+
         updatePageWidth(nextWidth, nextHeight)
       })
     })
@@ -2149,6 +2312,7 @@ function App() {
       if (animationFrameId) {
         cancelAnimationFrame(animationFrameId)
       }
+      syncPageWidthRef.current = null
       resizeObserver.disconnect()
     }
   }, [isFullscreen, pageRatio, pdfUrl, zoomPercent])
@@ -2236,6 +2400,18 @@ function App() {
     if (!pdfViewer || !pdfUrl) return
 
     function handleWheel(event) {
+      if (event.shiftKey) {
+        const horizontalDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
+        const maxScrollLeft = Math.max(0, pdfViewer.scrollWidth - pdfViewer.clientWidth)
+
+        if (maxScrollLeft > 0 && Math.abs(horizontalDelta) >= 1) {
+          event.preventDefault()
+          pdfViewer.scrollLeft = Math.min(maxScrollLeft, Math.max(0, pdfViewer.scrollLeft + horizontalDelta))
+        }
+
+        return
+      }
+
       if (Math.abs(event.deltaY) < 10) return
       if (isOcrMode || isOcrDragging || isSelectingRef.current) return
 
@@ -2379,6 +2555,7 @@ function App() {
       if (existingTab.id === activeTabId) {
         setCurrentDocument(nextDocument)
         setPdfUrl(nextPdfUrl)
+        void syncDocumentToLibrary(nextDocument)
       } else {
         updateActivePdfTabSnapshot()
         void saveCurrentReadingRecord()
@@ -2432,6 +2609,7 @@ function App() {
     setPdfSessionStatus('')
     setTranslationHistory([])
     clearRightPanelResult()
+    void syncDocumentToLibrary(nextDocument)
     const initialRecord = normalizeBrowsingRecord({
       ...nextDocument,
       totalPages: restoreRecord?.totalPages || null,
@@ -2505,6 +2683,190 @@ function App() {
     })
   }
 
+  function getLibraryFolderName(folderId) {
+    if (!folderId) return '未分类'
+    return libraryFolders.find((folder) => folder.id === folderId)?.name || '未分类'
+  }
+
+  function getLibraryProgress(document) {
+    if (!document?.totalPages) return '未开始'
+    const page = Math.min(Number(document.lastPage) || 1, Number(document.totalPages) || 1)
+    return `${page} / ${document.totalPages}`
+  }
+
+  function getLibraryProgressPercent(document) {
+    if (!document?.totalPages) return 0
+    return Math.min(100, Math.max(0, Math.round(((Number(document.lastPage) || 1) / document.totalPages) * 100)))
+  }
+
+  function getVisibleLibraryDocuments() {
+    const query = librarySearch.trim().toLowerCase()
+
+    return libraryDocuments
+      .filter((document) => (
+        selectedLibraryFolderId === 'all' ||
+        (selectedLibraryFolderId === 'unfiled' ? !document.folderId : document.folderId === selectedLibraryFolderId)
+      ))
+      .filter((document) => !query || document.fileName.toLowerCase().includes(query))
+      .sort((first, second) => {
+        if (librarySort === 'progress') {
+          return getLibraryProgressPercent(second) - getLibraryProgressPercent(first)
+        }
+        if (librarySort === 'notes') {
+          return (second.notesCount || 0) - (first.notesCount || 0)
+        }
+        return (second.lastOpenedAt || second.updatedAt || 0) - (first.lastOpenedAt || first.updatedAt || 0)
+      })
+  }
+
+  async function importLibraryDocuments() {
+    if (!window.electronAPI?.importLibraryPdfs) {
+      setLibraryStatus('文献库导入仅在桌面版可用')
+      return
+    }
+
+    try {
+      const library = await window.electronAPI.importLibraryPdfs()
+      updateLibraryState(library)
+      setLibraryStatus(library?.canceled ? '' : '文献已导入文献库')
+    } catch (error) {
+      setLibraryStatus(error.message || '导入文献失败')
+    }
+  }
+
+  function openLibraryFolderDialog() {
+    setLibraryFolderNameDraft('')
+    setLibraryFolderNameError('')
+    setLibraryFolderDialogOpen(true)
+  }
+
+  function closeLibraryFolderDialog() {
+    setLibraryFolderDialogOpen(false)
+    setLibraryFolderNameDraft('')
+    setLibraryFolderNameError('')
+  }
+
+  async function confirmCreateLibraryFolder() {
+    const name = libraryFolderNameDraft.trim()
+
+    if (!name) {
+      setLibraryFolderNameError('文件夹名称不能为空')
+      return
+    }
+
+    if (libraryFolders.some((folder) => folder.name.trim().toLowerCase() === name.toLowerCase())) {
+      setLibraryFolderNameError('已存在同名文件夹')
+      return
+    }
+
+    try {
+      const library = await window.electronAPI.createLibraryFolder(name)
+      updateLibraryState(library)
+      setSelectedLibraryFolderId(library.folders.at(-1)?.id || selectedLibraryFolderId)
+      closeLibraryFolderDialog()
+      setLibraryStatus('文件夹已创建')
+    } catch (error) {
+      setLibraryFolderNameError(error.message || '创建文件夹失败')
+    }
+  }
+
+  function toggleLibraryDocumentSelection(documentId) {
+    setSelectedLibraryDocumentIds((currentIds) => (
+      currentIds.includes(documentId)
+        ? currentIds.filter((id) => id !== documentId)
+        : [...currentIds, documentId]
+    ))
+  }
+
+  function openLibraryMoveDialog(documentIds, currentFolderId = '', position = null) {
+    const ids = (Array.isArray(documentIds) ? documentIds : []).filter(Boolean)
+
+    if (!ids.length) return
+
+    setLibraryContextMenu(null)
+    setLibraryMoveDialog({
+      documentIds: ids,
+      currentFolderId,
+      targetFolderId: currentFolderId || '',
+      x: position?.x ?? Math.min(window.innerWidth - 260, Math.max(24, window.innerWidth / 2 - 120)),
+      y: position?.y ?? Math.min(window.innerHeight - 260, Math.max(72, window.innerHeight / 2 - 120)),
+    })
+  }
+
+  async function moveLibraryDocuments(documentIds, folderId) {
+    if (!documentIds.length) return
+
+    try {
+      const library = await window.electronAPI.moveLibraryDocuments(documentIds, folderId)
+      updateLibraryState(library)
+      setLibraryContextMenu(null)
+      setLibraryMoveDialog(null)
+      setLibraryStatus(`已移动到${getLibraryFolderName(folderId)}`)
+    } catch (error) {
+      setLibraryStatus(error.message || '移动文献失败')
+    }
+  }
+
+  async function deleteLibraryDocuments(documentIds = selectedLibraryDocumentIds) {
+    if (!documentIds.length) return
+    if (!window.confirm('确定要从文献库删除选中的文献吗？不会删除 PDF 文件和已有笔记/批注。')) return
+
+    try {
+      const library = await window.electronAPI.deleteLibraryDocuments(documentIds)
+      updateLibraryState(library)
+      setSelectedLibraryDocumentIds([])
+      setLibraryContextMenu(null)
+      setLibraryStatus('已从文献库删除')
+    } catch (error) {
+      setLibraryStatus(error.message || '删除文献失败')
+    }
+  }
+
+  async function openLibraryDocument(document) {
+    if (!document?.filePath) return
+
+    const existingTab = pdfTabs.find((tab) =>
+      tab.documentId === document.documentId ||
+      (document.filePath && tab.filePath === document.filePath),
+    )
+
+    if (existingTab) {
+      setActiveModule('reader')
+      activatePdfTab(existingTab.id)
+      return
+    }
+
+    if (!window.electronAPI?.openPdfFromPath) {
+      setLibraryStatus('当前环境无法从路径打开 PDF')
+      return
+    }
+
+    try {
+      const pdfFile = await window.electronAPI.openPdfFromPath(document.filePath)
+      setActiveModule('reader')
+      applyOpenedPdf(pdfFile, {
+        ...document,
+        id: document.documentId,
+        lastPage: document.lastPage || 1,
+        totalPages: document.totalPages || null,
+        scale: document.scale || zoomPercent,
+        lastOpenedAt: document.lastOpenedAt || Date.now(),
+      })
+    } catch (error) {
+      setLibraryStatus(error.message || '文件不存在或已移动')
+    }
+  }
+
+  function openLibraryContextMenu(event, document) {
+    event.preventDefault()
+    setLibraryContextMenu({
+      documentId: document.documentId,
+      x: Math.min(event.clientX + 2, window.innerWidth - 220),
+      y: Math.min(event.clientY + 2, window.innerHeight - 180),
+      folderId: document.folderId || '',
+    })
+  }
+
   function normalizeSettings(config = {}) {
     const provider = Object.hasOwn(PROVIDERS, config.provider) ? config.provider : 'deepseek'
     const providerDefaults = PROVIDERS[provider]
@@ -2529,10 +2891,8 @@ function App() {
     setGlossaryStatus(nextGlossary.length ? `已导入 ${nextGlossary.length} 条术语` : '未导入术语库')
   }
 
-  async function openSettings() {
+  async function loadSettingsData() {
     setSettingsStatus('')
-    setSettingsTab('model')
-    setIsSettingsOpen(true)
 
     if (!window.electronAPI) {
       setSettingsForm(DEFAULT_SETTINGS)
@@ -2553,9 +2913,24 @@ function App() {
     }
   }
 
-  function closeSettings() {
-    setIsSettingsOpen(false)
-    setSettingsStatus('')
+  function switchModule(moduleName) {
+    setActiveModule(moduleName)
+
+    if (moduleName === 'settings') {
+      setSettingsTab((currentTab) => (currentTab === 'importExport' ? 'model' : currentTab))
+      void loadSettingsData()
+      return
+    }
+
+    if (moduleName === 'importExport') {
+      setSettingsTab('importExport')
+      void loadSettingsData()
+      return
+    }
+
+    if (moduleName === 'library') {
+      void refreshLibrary()
+    }
   }
 
   function updateSettingsField(field, value) {
@@ -5480,141 +5855,416 @@ function App() {
 
   function renderImportExportSettings() {
     return (
-      <section className="settings-page import-export-page">
-        <section className="settings-glossary">
-          <div className="settings-section-header">
-            <h3>默认导出位置</h3>
-            <span>{exportDefaultDir || 'Downloads'}</span>
-          </div>
-          <div className="settings-inline-actions">
-            <button type="button" className="settings-secondary-button" onClick={selectExportDefaultDir}>
-              选择文件夹
-            </button>
-            <button type="button" className="settings-secondary-button" onClick={resetExportDefaultDir}>
-              恢复默认
-            </button>
-          </div>
-        </section>
+      <div className="settings-dialog module-settings-panel import-export-settings-panel">
+        <div className="settings-dialog-body">
+          <nav className="settings-tabs" aria-label="导入与导出分类">
+          <button
+            type="button"
+            className={importExportTab === 'importExport' ? 'settings-tab active' : 'settings-tab'}
+            onClick={() => setImportExportTab('importExport')}
+          >
+            导入与导出
+          </button>
+          <button
+            type="button"
+            className={importExportTab === 'mergeSplit' ? 'settings-tab active' : 'settings-tab'}
+            onClick={() => setImportExportTab('mergeSplit')}
+          >
+            合并与拆分
+          </button>
+          </nav>
 
-        <section className="settings-glossary">
-          <div className="settings-section-header">
-            <h3>批量导入</h3>
-            <span>支持单篇、合集和完整备份</span>
-          </div>
-          <div className="settings-inline-actions">
-            <button type="button" className="settings-primary-button" onClick={batchImportPaperReaderData}>
-              选择导入文件
-            </button>
-          </div>
-        </section>
+          <div className="settings-content">
+            <section className="settings-page import-export-page">
 
-        <section className="settings-glossary">
-          <div className="settings-section-header">
-            <h3>批量自选导出</h3>
-            <span>{selectedExportDocumentIds.length} / {exportableDocuments.length} 篇</span>
-          </div>
+        {importExportTab === 'importExport' ? (
+          <>
+            <section className="settings-glossary">
+              <div className="settings-section-header">
+                <h3>默认导出位置</h3>
+                <span>{exportDefaultDir || 'Downloads'}</span>
+              </div>
+              <div className="settings-inline-actions">
+                <button type="button" className="settings-secondary-button" onClick={selectExportDefaultDir}>
+                  选择文件夹
+                </button>
+                <button type="button" className="settings-secondary-button" onClick={resetExportDefaultDir}>
+                  恢复默认
+                </button>
+              </div>
+            </section>
 
-          <div className="export-options-grid">
-            <label className="settings-field">
-              <span>导出内容</span>
-              <select value={batchExportType} onChange={(event) => setBatchExportType(event.target.value)}>
-                <option value="translation-history">只导出翻译历史</option>
-                <option value="notes">只导出笔记</option>
-                <option value="full">同时导出翻译历史和笔记</option>
-              </select>
-            </label>
-            <label className="settings-field">
-              <span>导出方式</span>
-              <select value={batchExportMode} onChange={(event) => setBatchExportMode(event.target.value)}>
-                <option value="separate">每篇一个文件</option>
-                <option value="merged">合并为一个文件</option>
-              </select>
-            </label>
-            <label className="settings-field">
-              <span>导出名称</span>
-              <input
-                type="text"
-                value={batchExportName}
-                onChange={(event) => setBatchExportName(event.target.value)}
-                placeholder={batchExportMode === 'merged' ? '未命名合集' : '仅合并导出时需要填写'}
-                disabled={batchExportMode !== 'merged'}
-              />
-            </label>
-          </div>
+            <section className="settings-glossary">
+              <div className="settings-section-header">
+                <h3>批量自选导出</h3>
+                <span>{selectedExportDocumentIds.length} / {exportableDocuments.length} 篇</span>
+              </div>
 
-          <div className="exportable-document-list">
-            {exportableDocuments.length ? exportableDocuments.map((document) => (
-              <label className="exportable-document-item" key={document.documentId}>
-                <input
-                  type="checkbox"
-                  checked={selectedExportDocumentIds.includes(document.documentId)}
-                  onChange={() => toggleExportDocument(document.documentId)}
-                />
-                <span>
-                  <strong>{document.fileName || document.documentId}</strong>
-                  <small>历史 {document.historyCount} 条 · 笔记 {document.notesCount} 条 · 批注 {document.annotationsCount} 条 · {formatHistoryTime(document.lastUpdatedAt)}</small>
-                </span>
-              </label>
-            )) : <p className="history-empty">暂无可导出的文献数据</p>}
-          </div>
+              <div className="export-options-grid">
+                <label className="settings-field">
+                  <span>导出内容</span>
+                  <select value={batchExportType} onChange={(event) => setBatchExportType(event.target.value)}>
+                    <option value="translation-history">只导出翻译历史</option>
+                    <option value="notes">只导出笔记</option>
+                    <option value="full">同时导出翻译历史和笔记</option>
+                  </select>
+                </label>
+                <label className="settings-field">
+                  <span>导出方式</span>
+                  <select value={batchExportMode} onChange={(event) => setBatchExportMode(event.target.value)}>
+                    <option value="separate">每篇一个文件</option>
+                    <option value="merged">合并为一个文件</option>
+                  </select>
+                </label>
+                <label className="settings-field">
+                  <span>导出名称</span>
+                  <input
+                    type="text"
+                    value={batchExportName}
+                    onChange={(event) => setBatchExportName(event.target.value)}
+                    placeholder={batchExportMode === 'merged' ? '未命名合集' : '仅合并导出时需要填写'}
+                    disabled={batchExportMode !== 'merged'}
+                  />
+                </label>
+              </div>
 
-          <div className="settings-inline-actions">
-            <button type="button" className="settings-primary-button" onClick={batchExportPaperReaderData}>
-              开始导出
-            </button>
-          </div>
-        </section>
+              <div className="exportable-document-list">
+                {exportableDocuments.length ? exportableDocuments.map((document) => (
+                  <label className="exportable-document-item" key={document.documentId}>
+                    <input
+                      type="checkbox"
+                      checked={selectedExportDocumentIds.includes(document.documentId)}
+                      onChange={() => toggleExportDocument(document.documentId)}
+                    />
+                    <span>
+                      <strong>{document.fileName || document.documentId}</strong>
+                      <small>历史 {document.historyCount} 条 · 笔记 {document.notesCount} 条 · 批注 {document.annotationsCount} 条 · {formatHistoryTime(document.lastUpdatedAt)}</small>
+                    </span>
+                  </label>
+                )) : <p className="history-empty">暂无可导出的文献数据</p>}
+              </div>
 
-        <section className="settings-glossary">
-          <div className="settings-section-header">
-            <h3>合并导出文件</h3>
-            <span>逐个添加导出文件后再合并</span>
-          </div>
-          <div className="settings-inline-actions">
-            <button type="button" className="settings-secondary-button merge-add-button" onClick={addMergeExportFile}>
-              +
-            </button>
-          </div>
-          {mergeExportFiles.length ? (
-            <div className="merge-export-file-list">
-              {mergeExportFiles.map((file) => (
-                <article key={file.filePath} className="merge-export-file-item">
-                  <div>
-                    <strong>{getMergeExportFileDisplayName(file)}</strong>
-                  </div>
-                  <button
-                    type="button"
-                    className="history-delete-button"
-                    onClick={() => setMergeExportFiles((currentFiles) => currentFiles.filter((item) => item.filePath !== file.filePath))}
-                  >
-                    移除
-                  </button>
-                </article>
-              ))}
-            </div>
-          ) : (
-            <p className="history-empty">暂无待合并文件</p>
-          )}
-          <div className="settings-inline-actions">
-            <button type="button" className="settings-secondary-button" onClick={mergePaperReaderExportFiles}>
-              合并
-            </button>
-          </div>
-        </section>
+              <div className="settings-inline-actions">
+                <button type="button" className="settings-primary-button" onClick={batchExportPaperReaderData}>
+                  开始导出
+                </button>
+              </div>
+            </section>
 
-        <section className="settings-glossary">
-          <div className="settings-section-header">
-            <h3>拆分导出文件</h3>
-            <span>将合并文件拆成多个单篇文件</span>
-          </div>
-          <div className="settings-inline-actions">
-            <button type="button" className="settings-secondary-button" onClick={splitPaperReaderExportFile}>
-              拆分为多个文件
-            </button>
-          </div>
-        </section>
+            <section className="settings-glossary">
+              <div className="settings-section-header">
+                <h3>批量导入</h3>
+                <span>支持单篇、合集和完整备份</span>
+              </div>
+              <div className="settings-inline-actions">
+                <button type="button" className="settings-primary-button" onClick={batchImportPaperReaderData}>
+                  选择导入文件
+                </button>
+              </div>
+            </section>
+          </>
+        ) : null}
+
+        {importExportTab === 'mergeSplit' ? (
+          <>
+            <section className="settings-glossary">
+              <div className="settings-section-header">
+                <h3>合并导出文件</h3>
+                <span>逐个添加导出文件后再合并</span>
+              </div>
+              <div className="settings-inline-actions">
+                <button type="button" className="settings-secondary-button merge-add-button" onClick={addMergeExportFile}>
+                  +
+                </button>
+              </div>
+              {mergeExportFiles.length ? (
+                <div className="merge-export-file-list">
+                  {mergeExportFiles.map((file) => (
+                    <article key={file.filePath} className="merge-export-file-item">
+                      <div>
+                        <strong>{getMergeExportFileDisplayName(file)}</strong>
+                      </div>
+                      <button
+                        type="button"
+                        className="history-delete-button"
+                        onClick={() => setMergeExportFiles((currentFiles) => currentFiles.filter((item) => item.filePath !== file.filePath))}
+                      >
+                        移除
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="history-empty">暂无待合并文件</p>
+              )}
+              <div className="settings-inline-actions">
+                <button type="button" className="settings-secondary-button" onClick={mergePaperReaderExportFiles}>
+                  合并
+                </button>
+              </div>
+            </section>
+
+            <section className="settings-glossary">
+              <div className="settings-section-header">
+                <h3>拆分导出文件</h3>
+                <span>将合并文件拆成多个单篇文件</span>
+              </div>
+              <div className="settings-inline-actions">
+                <button type="button" className="settings-secondary-button" onClick={splitPaperReaderExportFile}>
+                  拆分为多个文件
+                </button>
+              </div>
+            </section>
+          </>
+        ) : null}
 
         {exportStatus ? <p className="settings-status">{exportStatus}</p> : null}
+            </section>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  function renderLibraryPage() {
+    const visibleDocuments = getVisibleLibraryDocuments()
+    const folderCounts = libraryDocuments.reduce((counts, document) => {
+      const key = document.folderId || 'unfiled'
+      counts[key] = (counts[key] || 0) + 1
+      return counts
+    }, {})
+
+    return (
+      <section className="library-page">
+        <aside className="library-folder-panel">
+          <div className="library-folder-header">
+            <strong>项目文件夹</strong>
+            <button type="button" className="settings-secondary-button" onClick={openLibraryFolderDialog}>
+              新建
+            </button>
+          </div>
+          <button
+            type="button"
+            className={selectedLibraryFolderId === 'all' ? 'library-folder-button active' : 'library-folder-button'}
+            onClick={() => setSelectedLibraryFolderId('all')}
+          >
+            <span>全部文献</span>
+            <small>{libraryDocuments.length}</small>
+          </button>
+          <button
+            type="button"
+            className={selectedLibraryFolderId === 'unfiled' ? 'library-folder-button active' : 'library-folder-button'}
+            onClick={() => setSelectedLibraryFolderId('unfiled')}
+          >
+            <span>未分类</span>
+            <small>{folderCounts.unfiled || 0}</small>
+          </button>
+          {libraryFolders.map((folder) => (
+            <button
+              type="button"
+              key={folder.id}
+              className={selectedLibraryFolderId === folder.id ? 'library-folder-button active' : 'library-folder-button'}
+              onClick={() => setSelectedLibraryFolderId(folder.id)}
+            >
+              <span>{folder.name}</span>
+              <small>{folderCounts[folder.id] || 0}</small>
+            </button>
+          ))}
+        </aside>
+
+        <section className="library-main-panel">
+          <div className="library-toolbar">
+            <label className="library-search">
+              <span>搜索文献</span>
+              <input
+                type="search"
+                value={librarySearch}
+                onChange={(event) => setLibrarySearch(event.target.value)}
+                placeholder="按文件名搜索"
+              />
+            </label>
+            <label className="library-sort">
+              <span>排序</span>
+              <select value={librarySort} onChange={(event) => setLibrarySort(event.target.value)}>
+                <option value="recent">最近阅读</option>
+                <option value="progress">阅读进度</option>
+                <option value="notes">笔记数量</option>
+              </select>
+            </label>
+            <button type="button" className="settings-primary-button" onClick={importLibraryDocuments}>
+              导入文献
+            </button>
+          </div>
+
+          <div className="library-batch-bar">
+            <span>已选 {selectedLibraryDocumentIds.length} 篇</span>
+            <button
+              type="button"
+              className="settings-secondary-button"
+              onClick={() => openLibraryMoveDialog(selectedLibraryDocumentIds)}
+              disabled={!selectedLibraryDocumentIds.length}
+            >
+              批量移动
+            </button>
+            <button
+              type="button"
+              className="settings-secondary-button"
+              onClick={() => deleteLibraryDocuments()}
+              disabled={!selectedLibraryDocumentIds.length}
+            >
+              批量删除
+            </button>
+          </div>
+
+          {libraryStatus ? <p className="settings-status">{libraryStatus}</p> : null}
+
+          <div className="library-document-list">
+            {visibleDocuments.length ? visibleDocuments.map((document) => (
+              <article
+                key={document.documentId}
+                className="library-document-row"
+                onContextMenu={(event) => openLibraryContextMenu(event, document)}
+              >
+                <input
+                  type="checkbox"
+                  checked={selectedLibraryDocumentIds.includes(document.documentId)}
+                  onChange={() => toggleLibraryDocumentSelection(document.documentId)}
+                  aria-label={`选择 ${document.fileName}`}
+                />
+                <button type="button" className="library-document-main" onClick={() => openLibraryDocument(document)}>
+                  <strong>{document.fileName}</strong>
+                  <span>{document.filePath}</span>
+                  <div className="library-progress">
+                    <i style={{ width: `${getLibraryProgressPercent(document)}%` }} />
+                  </div>
+                </button>
+                <div className="library-document-meta">
+                  <span>导入 {formatHistoryTime(document.importedAt)}</span>
+                  <span>最近 {document.lastOpenedAt ? formatHistoryTime(document.lastOpenedAt) : '未阅读'}</span>
+                  <span>进度 {getLibraryProgress(document)}</span>
+                  <span>笔记 {document.notesCount || 0}</span>
+                  <span>批注 {document.annotationsCount || 0}</span>
+                </div>
+              </article>
+            )) : (
+              <p className="history-empty">暂无文献</p>
+            )}
+          </div>
+
+          {libraryContextMenu ? (
+            <div
+              className="library-context-menu"
+              style={{ left: `${libraryContextMenu.x}px`, top: `${libraryContextMenu.y}px` }}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                onClick={() => openLibraryMoveDialog(
+                  [libraryContextMenu.documentId],
+                  libraryContextMenu.folderId,
+                  { x: libraryContextMenu.x, y: libraryContextMenu.y },
+                )}
+              >
+                移动到
+              </button>
+              <button type="button" onClick={() => deleteLibraryDocuments([libraryContextMenu.documentId])}>
+                删除文献
+              </button>
+            </div>
+          ) : null}
+
+          {libraryMoveDialog ? (
+            <div
+              className="library-move-popover"
+              style={{ left: `${libraryMoveDialog.x}px`, top: `${libraryMoveDialog.y}px` }}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              <div className="library-move-header">
+                <strong>移动到</strong>
+                <button type="button" onClick={() => setLibraryMoveDialog(null)}>
+                  取消
+                </button>
+              </div>
+              <div className="library-move-folder-list">
+                {[{ id: '', name: '未分类' }, ...libraryFolders].map((folder) => {
+                  const isSelectedFolder = folder.id === libraryMoveDialog.targetFolderId
+
+                  return (
+                    <button
+                      type="button"
+                      key={folder.id || 'unfiled'}
+                      className={isSelectedFolder ? 'library-move-folder active' : 'library-move-folder'}
+                      onClick={() => setLibraryMoveDialog((dialog) => ({ ...dialog, targetFolderId: folder.id }))}
+                    >
+                      <span>{folder.name}</span>
+                    </button>
+                  )
+                })}
+              </div>
+              <div className="library-move-actions">
+                <button type="button" className="settings-secondary-button" onClick={() => setLibraryMoveDialog(null)}>
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="settings-primary-button"
+                  onClick={() => moveLibraryDocuments(libraryMoveDialog.documentIds, libraryMoveDialog.targetFolderId)}
+                >
+                  确认
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </section>
+
+        {libraryFolderDialogOpen ? (
+          <div className="note-dialog-overlay" role="presentation">
+            <section
+              className="note-dialog library-folder-dialog"
+              aria-label="新建文件夹"
+              onPointerDown={(event) => event.stopPropagation()}
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="diagram-dialog-header">
+                <h2>新建文件夹</h2>
+                <button type="button" onClick={closeLibraryFolderDialog}>
+                  取消
+                </button>
+              </div>
+
+              <label className="note-dialog-field">
+                <span>文件夹名称</span>
+                <input
+                  ref={libraryFolderNameInputRef}
+                  type="text"
+                  value={libraryFolderNameDraft}
+                  onChange={(event) => {
+                    setLibraryFolderNameDraft(event.target.value)
+                    setLibraryFolderNameError('')
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault()
+                      void confirmCreateLibraryFolder()
+                    }
+                  }}
+                />
+              </label>
+
+              {libraryFolderNameError ? <p className="settings-status error">{libraryFolderNameError}</p> : null}
+
+              <div className="settings-actions">
+                <button type="button" className="settings-secondary-button" onClick={closeLibraryFolderDialog}>
+                  取消
+                </button>
+                <button type="button" className="settings-primary-button" onClick={confirmCreateLibraryFolder}>
+                  确认
+                </button>
+              </div>
+            </section>
+          </div>
+        ) : null}
       </section>
     )
   }
@@ -5791,10 +6441,83 @@ function App() {
     return <p className="selection-placeholder">{getPanelText()}</p>
   }
 
+  function toggleSidebarCollapsed() {
+    sidebarResizeSettlingRef.current = true
+
+    if (sidebarResizeTimerRef.current) {
+      clearTimeout(sidebarResizeTimerRef.current)
+    }
+
+    setSidebarCollapsed((isCollapsed) => !isCollapsed)
+
+    sidebarResizeTimerRef.current = setTimeout(() => {
+      sidebarResizeSettlingRef.current = false
+      sidebarResizeTimerRef.current = null
+      requestAnimationFrame(() => {
+        syncPageWidthRef.current?.()
+      })
+    }, 190)
+  }
+
   return (
-    <main className="app" ref={appRef}>
+    <main className={sidebarCollapsed ? 'app sidebar-collapsed' : 'app'} ref={appRef}>
+      <aside className="module-sidebar" aria-label="主模块">
+        <button
+          type="button"
+          className="module-sidebar-toggle"
+          onClick={toggleSidebarCollapsed}
+          aria-label={sidebarCollapsed ? '展开左侧栏' : '折叠左侧栏'}
+          title={sidebarCollapsed ? '展开左侧栏' : '折叠左侧栏'}
+        >
+          {sidebarCollapsed ? '›' : '‹'}
+        </button>
+        <nav className="module-nav-list" aria-label="页面模块">
+        <button
+          type="button"
+          className={activeModule === 'reader' ? 'module-nav-button active' : 'module-nav-button'}
+          onClick={() => switchModule('reader')}
+          title="阅读"
+        >
+          <span className="module-nav-icon" aria-hidden="true">📖</span>
+          <span className="module-nav-label">阅读</span>
+        </button>
+        <button
+          type="button"
+          className={activeModule === 'library' ? 'module-nav-button active' : 'module-nav-button'}
+          onClick={() => switchModule('library')}
+          title="文献库"
+        >
+          <span className="module-nav-icon" aria-hidden="true">▦</span>
+          <span className="module-nav-label">文献库</span>
+        </button>
+        <button
+          type="button"
+          className={activeModule === 'importExport' ? 'module-nav-button active' : 'module-nav-button'}
+          onClick={() => switchModule('importExport')}
+          title="历史笔记管理"
+        >
+          <span className="module-nav-icon" aria-hidden="true">⇄</span>
+          <span className="module-nav-label">历史笔记管理</span>
+        </button>
+        <button
+          type="button"
+          className={activeModule === 'settings' ? 'module-nav-button active' : 'module-nav-button'}
+          onClick={() => switchModule('settings')}
+          title="设置"
+        >
+          <span className="module-nav-icon" aria-hidden="true">⚙</span>
+          <span className="module-nav-label">设置</span>
+        </button>
+        </nav>
+      </aside>
+
+      <div className="app-content">
+        <section
+          className={activeModule === 'reader' ? 'module-page reader-module active' : 'module-page reader-module'}
+          aria-hidden={activeModule !== 'reader'}
+        >
       <header className="toolbar">
-        <section className="toolbar-group" aria-label="文件">
+        <section className="toolbar-group toolbar-left" aria-label="文件">
           <button type="button" className="upload-button" onClick={handleOpenPdfClick}>
             {UI.choosePdf}
           </button>
@@ -5805,6 +6528,14 @@ function App() {
             accept="application/pdf"
             onChange={handleFileChange}
           />
+          <button
+            ref={recentButtonRef}
+            type="button"
+            className={isRecentOpen ? 'secondary-toolbar-button active' : 'secondary-toolbar-button'}
+            onClick={() => setIsRecentOpen((isOpen) => !isOpen)}
+          >
+            最近打开
+          </button>
           <div className="annotation-menu-wrap">
             <button
               ref={annotationButtonRef}
@@ -5850,17 +6581,9 @@ function App() {
               </div>
             ) : null}
           </div>
-          <button
-            ref={recentButtonRef}
-            type="button"
-            className={isRecentOpen ? 'secondary-toolbar-button active' : 'secondary-toolbar-button'}
-            onClick={() => setIsRecentOpen((isOpen) => !isOpen)}
-          >
-            最近打开
-          </button>
         </section>
 
-        <section className="toolbar-group page-controls" aria-label={UI.pageControl}>
+        <section className="toolbar-group toolbar-navigation page-controls" aria-label={UI.pageControl}>
           <button type="button" onClick={goToPreviousPage} disabled={!pdfUrl || pageNumber <= 1}>
             {UI.previousPage}
           </button>
@@ -5900,7 +6623,7 @@ function App() {
           </button>
         </section>
 
-        <section className="toolbar-group zoom-controls" aria-label="PDF 缩放">
+        <section className="toolbar-group toolbar-view zoom-controls" aria-label="PDF 缩放">
           <button type="button" onClick={() => changeZoom(-ZOOM_STEP)} disabled={!pdfUrl}>
             -
           </button>
@@ -5922,7 +6645,7 @@ function App() {
           </button>
         </section>
 
-        <section className="toolbar-group view-controls" aria-label="视图">
+        <section className="toolbar-group toolbar-actions view-controls" aria-label="工具与设置">
           <div className="ocr-menu-wrap">
             <button
               type="button"
@@ -5954,9 +6677,6 @@ function App() {
           >
             {isFullscreen ? UI.exitFullscreen : UI.fullscreen}
           </button>
-          <button type="button" className="settings-button" onClick={openSettings}>
-            {UI.settings}
-          </button>
         </section>
       </header>
 
@@ -5968,16 +6688,260 @@ function App() {
         </div>
       ) : null}
 
-      {isSettingsOpen ? (
-        <div className="settings-overlay" role="presentation">
-          <form className="settings-dialog" onSubmit={saveSettings}>
-            <div className="settings-dialog-header">
-              <h2>{UI.settingsTitle}</h2>
-              <button type="button" className="settings-close-button" onClick={closeSettings}>
-                {UI.settingsCancel}
+      {pendingSessionRestore ? (
+        <div className="note-dialog-overlay" role="presentation">
+          <section className="note-dialog session-restore-dialog" aria-label="恢复上次文献">
+            <div className="diagram-dialog-header">
+              <h2>恢复上次文献</h2>
+            </div>
+
+            <div className="note-dialog-source">
+              <strong>是否恢复上次打开的文献？</strong>
+              <p>检测到你上次关闭软件时仍有打开的文献，是否恢复这些标签页？</p>
+              <span>{pendingSessionRestore.tabs?.length || 0} 个标签可恢复</span>
+            </div>
+
+            <div className="settings-actions">
+              <button type="button" className="settings-secondary-button" onClick={declineSessionRestore}>
+                否，不恢复
+              </button>
+              <button type="button" className="settings-primary-button" onClick={confirmSessionRestore}>
+                是，恢复
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {mergeNameDialog ? (
+        <div
+          className="note-dialog-overlay"
+          role="presentation"
+          onPointerDown={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <section
+            className="note-dialog"
+            aria-label="命名合并文件"
+            onPointerDown={(event) => event.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
+            onMouseUp={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="diagram-dialog-header">
+              <h2>命名合并文件</h2>
+              <button type="button" onClick={() => setMergeNameDialog(null)}>
+                取消
               </button>
             </div>
 
+            <label className="note-dialog-field">
+              <span>合并文件名称</span>
+              <input
+                ref={mergeNameInputRef}
+                type="text"
+                value={mergeNameDraft}
+                onChange={(event) => setMergeNameDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    void confirmMergePaperReaderExportFiles()
+                  }
+                }}
+              />
+            </label>
+
+            <div className="note-dialog-source">
+              <strong>待合并文件</strong>
+              <span>{mergeNameDialog.filePaths?.length || 0} 个文件，约 {mergeNameDialog.documentCount || 0} 份数据</span>
+            </div>
+
+            <div className="settings-actions">
+              <button type="button" className="settings-secondary-button" onClick={() => setMergeNameDialog(null)}>
+                取消
+              </button>
+              <button type="button" className="settings-primary-button" onClick={confirmMergePaperReaderExportFiles}>
+                合并
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {pdfUrl ? (
+        <div className="reader-layout" ref={readerLayoutRef}>
+          <section
+            className={isOcrMode ? 'pdf-viewer ocr-mode' : 'pdf-viewer'}
+            ref={pdfViewerRef}
+            onMouseDown={handleSelectionStart}
+            onMouseMove={handleSelectionMove}
+            onMouseUp={handleTextSelection}
+          >
+            <div className="selection-highlight-layer" aria-hidden="true">
+              {!annotationColor ? highlightRects.map((rect, index) => (
+                <div
+                  className="selection-highlight"
+                  key={`${index}-${rect.left}-${rect.top}`}
+                  style={{
+                    left: `${rect.left}px`,
+                    top: `${rect.top}px`,
+                    width: `${rect.width}px`,
+                    height: `${rect.height}px`,
+                  }}
+                />
+              )) : null}
+            </div>
+            {renderAnnotationOverlay()}
+            {ocrRect ? (
+              <div
+                className="ocr-selection-box"
+                aria-hidden="true"
+                style={{
+                  left: `${ocrRect.left}px`,
+                  top: `${ocrRect.top}px`,
+                  width: `${ocrRect.width}px`,
+                  height: `${ocrRect.height}px`,
+                }}
+              />
+            ) : null}
+            <div
+              className="pdf-pages-container"
+              style={{ '--pdf-page-width': `${pageWidth}px` }}
+            >
+              <Document
+                file={pdfUrl}
+                onLoadSuccess={handleDocumentLoadSuccess}
+                loading={<p className="status">{UI.loadingPdf}</p>}
+                error={<p className="status error">{UI.pageError}</p>}
+              >
+                <Page
+                  pageNumber={pageNumber}
+                  width={pageWidth}
+                  onLoadSuccess={handlePageLoadSuccess}
+                  renderAnnotationLayer={false}
+                  renderTextLayer
+                />
+              </Document>
+            </div>
+          </section>
+
+          <button
+            type="button"
+            className={rightPanelVisible ? 'panel-toggle-button visible' : 'panel-toggle-button collapsed'}
+            onClick={() => setRightPanelVisible((isVisible) => !isVisible)}
+            aria-label={rightPanelVisible ? '隐藏结果栏' : '显示结果栏'}
+            title={rightPanelVisible ? '隐藏结果栏' : '显示结果栏'}
+          >
+            {rightPanelVisible ? '›' : '‹'}
+          </button>
+
+          {rightPanelVisible ? (
+            <div
+              className={isResizingPanel ? 'resize-handle active' : 'resize-handle'}
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize translation panel"
+              onMouseDown={startPanelResize}
+            />
+          ) : null}
+
+          {rightPanelVisible ? (
+            <aside
+              className="selection-panel"
+              style={{
+                width: `${rightPanelWidth}px`,
+                flexBasis: `${rightPanelWidth}px`,
+            }}
+          >
+            <div className="selection-panel-header">
+              <div className="right-panel-tabs" role="tablist" aria-label="右侧栏模块">
+                <button
+                  type="button"
+                  className={rightPanelTab === 'result' ? 'right-panel-tab active' : 'right-panel-tab'}
+                  onClick={() => setRightPanelTab('result')}
+                >
+                  翻译结果
+                </button>
+                <button
+                  type="button"
+                  className={rightPanelTab === 'history' ? 'right-panel-tab active' : 'right-panel-tab'}
+                  onClick={() => setRightPanelTab('history')}
+                >
+                  翻译历史
+                </button>
+                <button
+                  type="button"
+                  className={rightPanelTab === 'notes' ? 'right-panel-tab active' : 'right-panel-tab'}
+                  onClick={() => setRightPanelTab('notes')}
+                >
+                  笔记
+                </button>
+              </div>
+            </div>
+
+            {rightPanelTab === 'result' ? (
+              <div className="selection-panel-actions">
+              <button
+                type="button"
+                className="copy-button"
+                onClick={copyTranslation}
+                disabled={!canCopyTranslation()}
+              >
+                复制
+              </button>
+              <button
+                type="button"
+                className="copy-button"
+                onClick={clearRightPanelResult}
+                disabled={!hasRightPanelContent()}
+              >
+                清空
+              </button>
+              {copyStatus ? <span className="copy-status">{copyStatus}</span> : null}
+              </div>
+            ) : null}
+
+            <div
+              className="selection-panel-body"
+              onWheel={(event) => event.stopPropagation()}
+              onWheelCapture={(event) => event.stopPropagation()}
+            >
+              {rightPanelTab === 'result' ? renderRightPanelResult() : null}
+              {rightPanelTab === 'history' ? renderHistoryPanel() : null}
+              {rightPanelTab === 'notes' ? renderNotesPanel() : null}
+            </div>
+            </aside>
+          ) : null}
+        </div>
+      ) : (
+        <section className="empty-state">
+          <p>{UI.emptyPdf}</p>
+        </section>
+      )}
+        </section>
+
+        <section
+          className={activeModule === 'importExport' ? 'module-page settings-module-page active' : 'module-page settings-module-page'}
+          aria-hidden={activeModule !== 'importExport'}
+        >
+          <div className="module-settings-content">
+            {renderImportExportSettings()}
+          </div>
+        </section>
+
+        <section
+          className={activeModule === 'library' ? 'module-page library-module-page active' : 'module-page library-module-page'}
+          aria-hidden={activeModule !== 'library'}
+        >
+          {renderLibraryPage()}
+        </section>
+
+        <section
+          className={activeModule === 'settings' ? 'module-page settings-module-page active' : 'module-page settings-module-page'}
+          aria-hidden={activeModule !== 'settings'}
+        >
+          <form className="settings-dialog module-settings-panel" onSubmit={saveSettings}>
             <div className="settings-dialog-body">
               <nav className="settings-tabs" aria-label="设置分类">
                 <button
@@ -5994,19 +6958,10 @@ function App() {
                 >
                   翻译设置
                 </button>
-                <button
-                  type="button"
-                  className={settingsTab === 'importExport' ? 'settings-tab active' : 'settings-tab'}
-                  onClick={() => setSettingsTab('importExport')}
-                >
-                  导入与导出
-                </button>
               </nav>
 
               <div className="settings-content">
-                {settingsTab === 'importExport' ? (
-                  renderImportExportSettings()
-                ) : settingsTab === 'model' ? (
+                {settingsTab === 'model' ? (
                   <section className="settings-page import-export-page">
                     <section className="settings-glossary">
                       <div className="settings-section-header">
@@ -6154,243 +7109,68 @@ function App() {
             {settingsStatus ? <p className="settings-status">{settingsStatus}</p> : null}
 
             <div className="settings-actions">
-              <button type="button" className="settings-secondary-button" onClick={closeSettings}>
-                {UI.settingsCancel}
-              </button>
               <button type="submit" className="settings-primary-button" disabled={isSavingSettings}>
                 {UI.settingsSave}
               </button>
             </div>
           </form>
-        </div>
-      ) : null}
+        </section>
 
-      {pendingSessionRestore ? (
-        <div className="note-dialog-overlay" role="presentation">
-          <section className="note-dialog session-restore-dialog" aria-label="恢复上次文献">
-            <div className="diagram-dialog-header">
-              <h2>恢复上次文献</h2>
-            </div>
-
-            <div className="note-dialog-source">
-              <strong>是否恢复上次打开的文献？</strong>
-              <p>检测到你上次关闭软件时仍有打开的文献，是否恢复这些标签页？</p>
-              <span>{pendingSessionRestore.tabs?.length || 0} 个标签可恢复</span>
-            </div>
-
-            <div className="settings-actions">
-              <button type="button" className="settings-secondary-button" onClick={declineSessionRestore}>
-                否，不恢复
-              </button>
-              <button type="button" className="settings-primary-button" onClick={confirmSessionRestore}>
-                是，恢复
-              </button>
-            </div>
-          </section>
-        </div>
-      ) : null}
-
-      {mergeNameDialog ? (
-        <div
-          className="note-dialog-overlay"
-          role="presentation"
-          onPointerDown={(event) => event.stopPropagation()}
-          onMouseDown={(event) => event.stopPropagation()}
-          onClick={(event) => event.stopPropagation()}
-        >
-          <section
-            className="note-dialog"
-            aria-label="命名合并文件"
+        {activeModule !== 'reader' && mergeNameDialog ? (
+          <div
+            className="note-dialog-overlay"
+            role="presentation"
             onPointerDown={(event) => event.stopPropagation()}
             onMouseDown={(event) => event.stopPropagation()}
-            onMouseUp={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
           >
-            <div className="diagram-dialog-header">
-              <h2>命名合并文件</h2>
-              <button type="button" onClick={() => setMergeNameDialog(null)}>
-                取消
-              </button>
-            </div>
+            <section
+              className="note-dialog"
+              aria-label="命名合并文件"
+              onPointerDown={(event) => event.stopPropagation()}
+              onMouseDown={(event) => event.stopPropagation()}
+              onMouseUp={(event) => event.stopPropagation()}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="diagram-dialog-header">
+                <h2>命名合并文件</h2>
+                <button type="button" onClick={() => setMergeNameDialog(null)}>
+                  取消
+                </button>
+              </div>
 
-            <label className="note-dialog-field">
-              <span>合并文件名称</span>
-              <input
-                ref={mergeNameInputRef}
-                type="text"
-                value={mergeNameDraft}
-                onChange={(event) => setMergeNameDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.preventDefault()
-                    void confirmMergePaperReaderExportFiles()
-                  }
-                }}
-              />
-            </label>
-
-            <div className="note-dialog-source">
-              <strong>待合并文件</strong>
-              <span>{mergeNameDialog.filePaths?.length || 0} 个文件，约 {mergeNameDialog.documentCount || 0} 份数据</span>
-            </div>
-
-            <div className="settings-actions">
-              <button type="button" className="settings-secondary-button" onClick={() => setMergeNameDialog(null)}>
-                取消
-              </button>
-              <button type="button" className="settings-primary-button" onClick={confirmMergePaperReaderExportFiles}>
-                合并
-              </button>
-            </div>
-          </section>
-        </div>
-      ) : null}
-
-      {pdfUrl ? (
-        <div className="reader-layout" ref={readerLayoutRef}>
-          <section
-            className={isOcrMode ? 'pdf-viewer ocr-mode' : 'pdf-viewer'}
-            ref={pdfViewerRef}
-            onMouseDown={handleSelectionStart}
-            onMouseMove={handleSelectionMove}
-            onMouseUp={handleTextSelection}
-          >
-            <div className="selection-highlight-layer" aria-hidden="true">
-              {!annotationColor ? highlightRects.map((rect, index) => (
-                <div
-                  className="selection-highlight"
-                  key={`${index}-${rect.left}-${rect.top}`}
-                  style={{
-                    left: `${rect.left}px`,
-                    top: `${rect.top}px`,
-                    width: `${rect.width}px`,
-                    height: `${rect.height}px`,
+              <label className="note-dialog-field">
+                <span>合并文件名称</span>
+                <input
+                  ref={mergeNameInputRef}
+                  type="text"
+                  value={mergeNameDraft}
+                  onChange={(event) => setMergeNameDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault()
+                      void confirmMergePaperReaderExportFiles()
+                    }
                   }}
                 />
-              )) : null}
-            </div>
-            {renderAnnotationOverlay()}
-            {ocrRect ? (
-              <div
-                className="ocr-selection-box"
-                aria-hidden="true"
-                style={{
-                  left: `${ocrRect.left}px`,
-                  top: `${ocrRect.top}px`,
-                  width: `${ocrRect.width}px`,
-                  height: `${ocrRect.height}px`,
-                }}
-              />
-            ) : null}
-            <Document
-              file={pdfUrl}
-              onLoadSuccess={handleDocumentLoadSuccess}
-              loading={<p className="status">{UI.loadingPdf}</p>}
-              error={<p className="status error">{UI.pageError}</p>}
-            >
-              <Page
-                pageNumber={pageNumber}
-                width={pageWidth}
-                onLoadSuccess={handlePageLoadSuccess}
-                renderAnnotationLayer={false}
-                renderTextLayer
-              />
-            </Document>
-          </section>
+              </label>
 
-          <button
-            type="button"
-            className={rightPanelVisible ? 'panel-toggle-button visible' : 'panel-toggle-button collapsed'}
-            onClick={() => setRightPanelVisible((isVisible) => !isVisible)}
-            aria-label={rightPanelVisible ? '隐藏结果栏' : '显示结果栏'}
-            title={rightPanelVisible ? '隐藏结果栏' : '显示结果栏'}
-          >
-            {rightPanelVisible ? '›' : '‹'}
-          </button>
+              <div className="note-dialog-source">
+                <strong>待合并文件</strong>
+                <span>{mergeNameDialog.filePaths?.length || 0} 个文件，约 {mergeNameDialog.documentCount || 0} 份数据</span>
+              </div>
 
-          {rightPanelVisible ? (
-            <div
-              className={isResizingPanel ? 'resize-handle active' : 'resize-handle'}
-              role="separator"
-              aria-orientation="vertical"
-              aria-label="Resize translation panel"
-              onMouseDown={startPanelResize}
-            />
-          ) : null}
-
-          {rightPanelVisible ? (
-            <aside
-              className="selection-panel"
-              style={{
-                width: `${rightPanelWidth}px`,
-                flexBasis: `${rightPanelWidth}px`,
-            }}
-          >
-            <div className="selection-panel-header">
-              <div className="right-panel-tabs" role="tablist" aria-label="右侧栏模块">
-                <button
-                  type="button"
-                  className={rightPanelTab === 'result' ? 'right-panel-tab active' : 'right-panel-tab'}
-                  onClick={() => setRightPanelTab('result')}
-                >
-                  翻译结果
+              <div className="settings-actions">
+                <button type="button" className="settings-secondary-button" onClick={() => setMergeNameDialog(null)}>
+                  取消
                 </button>
-                <button
-                  type="button"
-                  className={rightPanelTab === 'history' ? 'right-panel-tab active' : 'right-panel-tab'}
-                  onClick={() => setRightPanelTab('history')}
-                >
-                  翻译历史
-                </button>
-                <button
-                  type="button"
-                  className={rightPanelTab === 'notes' ? 'right-panel-tab active' : 'right-panel-tab'}
-                  onClick={() => setRightPanelTab('notes')}
-                >
-                  笔记
+                <button type="button" className="settings-primary-button" onClick={confirmMergePaperReaderExportFiles}>
+                  合并
                 </button>
               </div>
-            </div>
-
-            {rightPanelTab === 'result' ? (
-              <div className="selection-panel-actions">
-              <button
-                type="button"
-                className="copy-button"
-                onClick={copyTranslation}
-                disabled={!canCopyTranslation()}
-              >
-                复制
-              </button>
-              <button
-                type="button"
-                className="copy-button"
-                onClick={clearRightPanelResult}
-                disabled={!hasRightPanelContent()}
-              >
-                清空
-              </button>
-              {copyStatus ? <span className="copy-status">{copyStatus}</span> : null}
-              </div>
-            ) : null}
-
-            <div
-              className="selection-panel-body"
-              onWheel={(event) => event.stopPropagation()}
-              onWheelCapture={(event) => event.stopPropagation()}
-            >
-              {rightPanelTab === 'result' ? renderRightPanelResult() : null}
-              {rightPanelTab === 'history' ? renderHistoryPanel() : null}
-              {rightPanelTab === 'notes' ? renderNotesPanel() : null}
-            </div>
-            </aside>
-          ) : null}
-        </div>
-      ) : (
-        <section className="empty-state">
-          <p>{UI.emptyPdf}</p>
-        </section>
-      )}
+            </section>
+          </div>
+        ) : null}
 
       {highlightContextMenu ? (
         <div
@@ -6592,6 +7372,7 @@ function App() {
           </section>
         </div>
       ) : null}
+      </div>
     </main>
   )
 }
