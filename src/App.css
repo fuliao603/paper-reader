@@ -486,9 +486,11 @@ body {
 
 .toolbar {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 10px 12px;
+  flex-shrink: 0;
   min-width: 0;
   overflow: visible;
   padding-bottom: 2px;
@@ -611,8 +613,10 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-wrap: nowrap;
-  min-width: max-content;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  max-width: 100%;
+  min-width: 0;
   padding: 0 16px;
 }
 
@@ -993,6 +997,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: flex-start;
+  flex: 1 1 360px;
+  flex-wrap: wrap;
   gap: 8px;
   margin-left: 0;
 }
@@ -1027,12 +1033,15 @@ body {
 }
 
 .view-controls {
+  flex: 0 1 auto;
   justify-content: flex-end;
   margin-left: 0;
   gap: 10px;
 }
 
 .zoom-controls {
+  flex: 0 1 auto;
+  flex-wrap: nowrap;
   justify-content: flex-start;
   gap: 9px;
   margin-right: 0;
@@ -1044,6 +1053,12 @@ body {
 
 .view-controls .settings-button {
   order: 2;
+}
+
+@media (max-width: 1180px) {
+  .toolbar-actions {
+    margin-left: 0;
+  }
 }
 
 .reader-layout {
@@ -1069,13 +1084,45 @@ body.resizing-panel {
   min-width: 0;
   min-height: 0;
   height: 100%;
+  /* border-box so height:100% includes the 14px padding; with content-box the
+     viewer became 28px taller than .reader-layout and its bottom (where the
+     horizontal scrollbar lives) was clipped by .reader-layout's overflow:hidden. */
+  box-sizing: border-box;
   overflow-x: auto;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 14px;
   background: #d0d5dd;
   border-radius: 8px;
-  contain: layout;
-  scrollbar-gutter: stable both-edges;
+}
+
+/* Force persistent, always-visible scrollbars (instead of Chromium overlay
+   scrollbars, which auto-hide the horizontal bar when there is no horizontal
+   scroll input on a regular mouse). NOTE: do NOT also set scrollbar-width /
+   scrollbar-color here — when those standard properties are present, Chromium
+   ignores the ::-webkit-scrollbar rules below. */
+.pdf-viewer::-webkit-scrollbar {
+  width: 14px;
+  height: 14px;
+}
+
+.pdf-viewer::-webkit-scrollbar-track {
+  background: #c2c8d0;
+  border-radius: 8px;
+}
+
+.pdf-viewer::-webkit-scrollbar-thumb {
+  background: #98a2b3;
+  border: 3px solid #c2c8d0;
+  border-radius: 8px;
+}
+
+.pdf-viewer::-webkit-scrollbar-thumb:hover {
+  background: #667085;
+}
+
+.pdf-viewer::-webkit-scrollbar-corner {
+  background: #c2c8d0;
 }
 
 .pdf-viewer.ocr-mode {
@@ -1084,20 +1131,33 @@ body.resizing-panel {
 }
 
 .pdf-pages-container {
-  width: max(100%, var(--pdf-page-width));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: max-content;
   min-width: 100%;
   max-width: none;
 }
 
-.pdf-viewer .react-pdf__Document {
-  display: block;
+.pdf-page-wrapper {
+  flex-shrink: 0;
   width: var(--pdf-page-width);
   max-width: none;
   margin-inline: auto;
 }
 
+.pdf-viewer .react-pdf__Document {
+  display: block;
+  width: fit-content;
+  max-width: none;
+}
+
 .pdf-viewer .react-pdf__Page {
   width: fit-content !important;
+  max-width: none !important;
+}
+
+.pdf-viewer .react-pdf__Page__canvas {
   max-width: none !important;
 }
 
@@ -1512,10 +1572,15 @@ body.resizing-panel {
 }
 
 .history-panel-header span,
+.history-panel-limit,
 .history-empty {
   color: #667085;
   font-size: 13px;
   line-height: 1.5;
+}
+
+.history-panel-limit {
+  margin: -4px 0 0;
 }
 
 .history-clear-button,
@@ -2406,7 +2471,8 @@ body.fullscreen-reading #root {
   min-height: 0;
   align-items: flex-start;
   justify-content: center;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
   padding: 12px;
   background: #1f2937;
 }
@@ -2478,15 +2544,17 @@ body.fullscreen-reading #root {
   }
 
   .toolbar {
-    align-items: center;
+    align-items: flex-start;
     justify-content: flex-start;
-    overflow-x: auto;
-    overflow-y: visible;
+    flex-wrap: wrap;
+    overflow: visible;
   }
 
   .toolbar-group {
     align-items: center;
     justify-content: flex-start;
+    flex-wrap: wrap;
+    min-width: 0;
     padding: 0 10px;
   }
 

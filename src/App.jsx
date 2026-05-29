@@ -156,6 +156,7 @@ function App() {
   const noteTextareaRef = useRef(null)
   const mergeNameInputRef = useRef(null)
   const libraryFolderNameInputRef = useRef(null)
+  const retainedRightPanelActionsRef = useRef(null)
 
   const [pdfUrl, setPdfUrl] = useState('')
   const [currentDocument, setCurrentDocument] = useState(null)
@@ -205,8 +206,8 @@ function App() {
   const [notesStatus, setNotesStatus] = useState('')
   const [historyStatus, setHistoryStatus] = useState('')
   const [exportStatus, setExportStatus] = useState('')
-  const [isHistoryImportExportBusy, setIsHistoryImportExportBusy] = useState(false)
-  const [isNotesImportExportBusy, setIsNotesImportExportBusy] = useState(false)
+  const [, setIsHistoryImportExportBusy] = useState(false)
+  const [, setIsNotesImportExportBusy] = useState(false)
   const [exportableDocuments, setExportableDocuments] = useState([])
   const [selectedExportDocumentIds, setSelectedExportDocumentIds] = useState([])
   const [batchExportType, setBatchExportType] = useState('full')
@@ -1501,6 +1502,14 @@ function App() {
     }
   }
 
+  retainedRightPanelActionsRef.current = {
+    openPageNoteDialog,
+    exportCurrentHistory,
+    importCurrentHistory,
+    exportCurrentNotes,
+    importCurrentNotes,
+  }
+
   async function loadExportSettingsData() {
     if (!window.electronAPI) return
 
@@ -2319,18 +2328,29 @@ function App() {
 
   useEffect(() => {
     const pdfViewer = pdfViewerRef.current
-
     if (!pdfViewer) return
 
-    const animationFrameId = requestAnimationFrame(() => {
-      const overflowWidth = pdfViewer.scrollWidth - pdfViewer.clientWidth
-      pdfViewer.scrollLeft = overflowWidth > 0 ? overflowWidth / 2 : 0
+    let pageObserver = null
+    let cancelled = false
 
+    function updateCenterScroll() {
+      if (cancelled || !pdfViewerRef.current) return
+
+      const overflowWidth = pdfViewerRef.current.scrollWidth - pdfViewerRef.current.clientWidth
+
+      // Keep the page horizontally centered when it overflows the viewer; the
+      // overflow stays reachable in both directions via scrollbar / shift+wheel.
+      if (overflowWidth > 0) {
+        pdfViewerRef.current.scrollLeft = overflowWidth / 2
+      }
+
+      // Vertical landing position after a wheel-driven page turn is independent
+      // of whether the page overflows horizontally.
       const pendingScroll = pendingWheelScrollRef.current
 
       if (pendingScroll) {
         requestAnimationFrame(() => {
-          if (!pdfViewerRef.current) return
+          if (cancelled || !pdfViewerRef.current) return
 
           if (pendingScroll === 'bottom') {
             pdfViewerRef.current.scrollTop = Math.max(0, pdfViewerRef.current.scrollHeight - pdfViewerRef.current.clientHeight)
@@ -2341,10 +2361,32 @@ function App() {
           pendingWheelScrollRef.current = null
         })
       }
-    })
+    }
 
-    return () => cancelAnimationFrame(animationFrameId)
-  }, [pageWidth, pageNumber, pdfUrl])
+    function observePage() {
+      if (cancelled) return
+      const pageEl = pdfViewerRef.current?.querySelector('.pdf-page-wrapper')
+      if (!pageEl) {
+        requestAnimationFrame(observePage)
+        return
+      }
+
+      // Re-center whenever the rendered page size changes (zoom, fit, page turn).
+      if (pageObserver) pageObserver.disconnect()
+      pageObserver = new ResizeObserver(() => {
+        requestAnimationFrame(updateCenterScroll)
+      })
+      pageObserver.observe(pageEl)
+      requestAnimationFrame(updateCenterScroll)
+    }
+
+    requestAnimationFrame(observePage)
+
+    return () => {
+      cancelled = true
+      if (pageObserver) pageObserver.disconnect()
+    }
+  }, [pageWidth, pageNumber, pdfUrl, zoomPercent])
 
   useEffect(() => {
     if (!copyStatus) return
@@ -2400,19 +2442,28 @@ function App() {
     if (!pdfViewer || !pdfUrl) return
 
     function handleWheel(event) {
-      if (event.shiftKey) {
-        const horizontalDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY
-        const maxScrollLeft = Math.max(0, pdfViewer.scrollWidth - pdfViewer.clientWidth)
+      const absDx = Math.abs(event.deltaX)
+      const absDy = Math.abs(event.deltaY)
+      const maxScrollLeft = Math.max(0, pdfViewer.scrollWidth - pdfViewer.clientWidth)
+      const canScrollHorizontally = maxScrollLeft > 0
 
-        if (maxScrollLeft > 0 && Math.abs(horizontalDelta) >= 1) {
+      if (canScrollHorizontally && absDx >= 1 && absDx >= absDy) {
+        const nextScrollLeft = Math.min(maxScrollLeft, Math.max(0, pdfViewer.scrollLeft + event.deltaX))
+
+        if (Math.abs(nextScrollLeft - pdfViewer.scrollLeft) >= 0.5) {
           event.preventDefault()
-          pdfViewer.scrollLeft = Math.min(maxScrollLeft, Math.max(0, pdfViewer.scrollLeft + horizontalDelta))
+          pdfViewer.scrollLeft = nextScrollLeft
+          return
         }
+      }
 
+      if (canScrollHorizontally && event.shiftKey && absDy >= 1) {
+        event.preventDefault()
+        pdfViewer.scrollLeft = Math.min(maxScrollLeft, Math.max(0, pdfViewer.scrollLeft + event.deltaY))
         return
       }
 
-      if (Math.abs(event.deltaY) < 10) return
+      if (absDy < 10 || absDx > absDy) return
       if (isOcrMode || isOcrDragging || isSelectingRef.current) return
 
       const scrollTolerance = 2
@@ -5366,6 +5417,8 @@ function App() {
   }
 
   function getShortHistoryPreview(item) {
+    if (item.type === 'ocr-diagram' || item.type === 'ocr-compare') return ''
+
     const preview = getHistoryPreview(item).replace(/\s+/g, ' ').trim()
 
     if (preview.length <= 72) return preview
@@ -5453,6 +5506,12 @@ function App() {
     }
 
     return null
+  }
+
+  function renderHistoryPreviewText(item) {
+    const preview = getShortHistoryPreview(item)
+
+    return preview ? <span>{preview}</span> : null
   }
 
   function renderAnnotationOverlay() {
@@ -5635,67 +5694,36 @@ function App() {
   }
 
   function renderNotesPanel() {
-    if (!currentDocument?.documentId) {
-      return (
-        <section className="history-panel" aria-label="笔记">
-          <p className="history-empty">请先打开 PDF</p>
-        </section>
-      )
-    }
-
     const selectedNote = documentNotes.find((note) => note.id === selectedNoteId)
 
     return (
       <section className="history-panel notes-panel" aria-label="笔记">
-        <div className="history-panel-header">
-          <div>
-            <p className="history-document-name">《{currentDocument.fileName}》</p>
-            <h3>笔记</h3>
-          </div>
-        </div>
-
         <div className="history-panel-actions">
-          <button type="button" className="history-clear-button" onClick={openPageNoteDialog}>
-            新增
+          <button
+            type="button"
+            className="history-clear-button"
+            onClick={isNotesBatchSelecting ? deleteSelectedNotes : clearCurrentDocumentNotes}
+            disabled={!documentNotes.length || (isNotesBatchSelecting && !selectedNoteIds.length)}
+          >
+            {isNotesBatchSelecting ? '删除所选' : '清空'}
           </button>
-          <button type="button" className="history-clear-button" onClick={exportCurrentNotes} disabled={isNotesImportExportBusy}>
-            导出
+          <button
+            type="button"
+            className="history-clear-button"
+            onClick={() => {
+              if (isNotesBatchSelecting) {
+                setIsNotesBatchSelecting(false)
+                setSelectedNoteIds([])
+                return
+              }
+
+              setSelectedNoteId('')
+              setIsNotesBatchSelecting(true)
+            }}
+            disabled={!documentNotes.length}
+          >
+            {isNotesBatchSelecting ? '取消选择' : '批量选择'}
           </button>
-          <button type="button" className="history-clear-button" onClick={importCurrentNotes} disabled={isNotesImportExportBusy}>
-            导入
-          </button>
-          <button type="button" className="history-clear-button" onClick={clearCurrentDocumentNotes} disabled={!documentNotes.length}>
-            清空
-          </button>
-          {isNotesBatchSelecting ? (
-            <>
-              <button type="button" className="history-clear-button" onClick={deleteSelectedNotes}>
-                删除所选
-              </button>
-              <button
-                type="button"
-                className="history-clear-button"
-                onClick={() => {
-                  setIsNotesBatchSelecting(false)
-                  setSelectedNoteIds([])
-                }}
-              >
-                取消选择
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              className="history-clear-button"
-              onClick={() => {
-                setSelectedNoteId('')
-                setIsNotesBatchSelecting(true)
-              }}
-              disabled={!documentNotes.length}
-            >
-              批量选择
-            </button>
-          )}
         </div>
 
         {notesStatus ? <p className="note-status">{notesStatus}</p> : null}
@@ -5741,9 +5769,7 @@ function App() {
               </article>
             ))}
           </div>
-        ) : (
-          <p className="history-empty">暂无当前文献的笔记</p>
-        )}
+        ) : null}
       </section>
     )
   }
@@ -5751,57 +5777,33 @@ function App() {
   function renderHistoryPanel() {
     return (
       <section className="history-panel" aria-label="翻译历史记录">
-        <div className="history-panel-header">
-          <div>
-            {currentDocument?.fileName ? (
-              <p className="history-document-name">《{currentDocument.fileName}》</p>
-            ) : null}
-            <h3>历史记录</h3>
-            <span>最多保留最新 {HISTORY_LIMIT} 条</span>
-          </div>
-          <div className="history-panel-actions">
-            <button type="button" className="history-clear-button" onClick={exportCurrentHistory} disabled={isHistoryImportExportBusy}>
-              导出
-            </button>
-            <button type="button" className="history-clear-button" onClick={importCurrentHistory} disabled={isHistoryImportExportBusy}>
-              导入
-            </button>
-            <button
-              type="button"
-              className="history-clear-button"
-              onClick={clearHistory}
-              disabled={!translationHistory.length}
-            >
-              清空历史
-            </button>
-            {isHistoryBatchSelecting ? (
-              <>
-                <button type="button" className="history-clear-button" onClick={deleteSelectedHistoryItems}>
-                  删除所选
-                </button>
-                <button
-                  type="button"
-                  className="history-clear-button"
-                  onClick={() => {
-                    setIsHistoryBatchSelecting(false)
-                    setSelectedHistoryIds([])
-                  }}
-                >
-                  取消选择
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                className="history-clear-button"
-                onClick={() => setIsHistoryBatchSelecting(true)}
-                disabled={!translationHistory.length}
-              >
-                批量选择
-              </button>
-            )}
-          </div>
+        <div className="history-panel-actions">
+          <button
+            type="button"
+            className="history-clear-button"
+            onClick={isHistoryBatchSelecting ? deleteSelectedHistoryItems : clearHistory}
+            disabled={!translationHistory.length || (isHistoryBatchSelecting && !selectedHistoryIds.length)}
+          >
+            {isHistoryBatchSelecting ? '删除所选' : '清空'}
+          </button>
+          <button
+            type="button"
+            className="history-clear-button"
+            onClick={() => {
+              if (isHistoryBatchSelecting) {
+                setIsHistoryBatchSelecting(false)
+                setSelectedHistoryIds([])
+                return
+              }
+
+              setIsHistoryBatchSelecting(true)
+            }}
+            disabled={!translationHistory.length}
+          >
+            {isHistoryBatchSelecting ? '取消选择' : '批量选择'}
+          </button>
         </div>
+        <p className="history-panel-limit">最多保留最新 {HISTORY_LIMIT} 条</p>
 
         {historyStatus ? <p className="note-status">{historyStatus}</p> : null}
 
@@ -5829,7 +5831,7 @@ function App() {
                   </span>
                   <span className="history-item-content">
                     {renderHistoryThumbnail(item)}
-                    <span>{getShortHistoryPreview(item)}</span>
+                    {renderHistoryPreviewText(item)}
                   </span>
                 </button>
                 <button
@@ -5846,9 +5848,7 @@ function App() {
               </article>
             ))}
           </div>
-        ) : (
-          <p className="history-empty">暂无历史记录</p>
-        )}
+        ) : null}
       </section>
     )
   }
@@ -6809,20 +6809,25 @@ function App() {
               className="pdf-pages-container"
               style={{ '--pdf-page-width': `${pageWidth}px` }}
             >
-              <Document
-                file={pdfUrl}
-                onLoadSuccess={handleDocumentLoadSuccess}
-                loading={<p className="status">{UI.loadingPdf}</p>}
-                error={<p className="status error">{UI.pageError}</p>}
+              <div
+                className="pdf-page-wrapper"
+                style={{ width: `${pageWidth}px` }}
               >
-                <Page
-                  pageNumber={pageNumber}
-                  width={pageWidth}
-                  onLoadSuccess={handlePageLoadSuccess}
-                  renderAnnotationLayer={false}
-                  renderTextLayer
-                />
-              </Document>
+                <Document
+                  file={pdfUrl}
+                  onLoadSuccess={handleDocumentLoadSuccess}
+                  loading={<p className="status">{UI.loadingPdf}</p>}
+                  error={<p className="status error">{UI.pageError}</p>}
+                >
+                  <Page
+                    pageNumber={pageNumber}
+                    width={pageWidth}
+                    onLoadSuccess={handlePageLoadSuccess}
+                    renderAnnotationLayer={false}
+                    renderTextLayer
+                  />
+                </Document>
+              </div>
             </div>
           </section>
 
