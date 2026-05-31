@@ -239,6 +239,7 @@ function App() {
   const [isCompareModalFullscreen, setIsCompareModalFullscreen] = useState(false)
   const [imagePreview, setImagePreview] = useState(null)
   const [imagePreviewZoom, setImagePreviewZoom] = useState(1)
+  const [isImagePreviewFullscreen, setIsImagePreviewFullscreen] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [pageWidth, setPageWidth] = useState(700)
   const [pageRatio, setPageRatio] = useState(0.72)
@@ -288,7 +289,68 @@ function App() {
     setIsCompareModalFullscreen(false)
     setImagePreview(null)
     setImagePreviewZoom(1)
+    setIsImagePreviewFullscreen(false)
   }, [clearOcrSelection])
+
+  function clearNoteDialogBlockers() {
+    if (selectionFrameRef.current) {
+      cancelAnimationFrame(selectionFrameRef.current)
+      selectionFrameRef.current = null
+    }
+
+    requestIdRef.current += 1
+    window.getSelection()?.removeAllRanges()
+    isSelectingRef.current = false
+    ocrStartPointRef.current = null
+    panelResizeStartRef.current = null
+    document.body.classList.remove('resizing-panel')
+
+    setSelectedText('')
+    setHighlightRects([])
+    setPreviewHighlight(null)
+    setActiveAnnotationId('')
+    setHighlightContextMenu(null)
+    setIsAnnotationToolbarOpen(false)
+    setAnnotationStatus('')
+    setIsOcrMode(false)
+    setIsOcrMenuOpen(false)
+    setIsOcrDragging(false)
+    setOcrRect(null)
+    setLibraryContextMenu(null)
+    setLibraryMoveDialog(null)
+    setIsRecentOpen(false)
+    setIsResizingPanel(false)
+    setDraggingTabId('')
+    setDragOverTabId('')
+    setImagePreview(null)
+    setImagePreviewZoom(1)
+    setIsImagePreviewFullscreen(false)
+    setDiagramResult(null)
+    setDiagramZoom(1)
+    setIsDiagramModalFullscreen(false)
+    setCompareResult(null)
+    setCompareOriginalZoom(1)
+    setCompareTranslatedZoom(1)
+    setIsCompareModalFullscreen(false)
+  }
+
+  function clearOcrCaptureUi() {
+    if (selectionFrameRef.current) {
+      cancelAnimationFrame(selectionFrameRef.current)
+      selectionFrameRef.current = null
+    }
+
+    window.getSelection()?.removeAllRanges()
+    isSelectingRef.current = false
+    setSelectedText('')
+    setHighlightRects([])
+    setPreviewHighlight(null)
+    setHighlightContextMenu(null)
+    setIsAnnotationToolbarOpen(false)
+    setActiveAnnotationId('')
+    setAnnotationStatus('')
+    setIsOcrMenuOpen(false)
+  }
 
   function clearRightPanelResult() {
     clearTranslation()
@@ -833,9 +895,9 @@ function App() {
 
     setIsNotesBatchSelecting(false)
     setSelectedNoteIds([])
+    setSelectedNoteId('')
     setNotesStatus('')
-    setNoteDialog({ mode: 'add', note })
-    setNoteDraft({ title: note.title, noteText: '' })
+    openNoteDialog('add', note)
   }
 
   function openAnnotationNoteDialog(annotation) {
@@ -861,9 +923,9 @@ function App() {
 
     setIsNotesBatchSelecting(false)
     setSelectedNoteIds([])
+    setSelectedNoteId('')
     setNotesStatus('')
-    setNoteDialog({ mode: 'add', note })
-    setNoteDraft({ title: note.title, noteText: '' })
+    openNoteDialog('add', note)
   }
 
   function openPageNoteDialog() {
@@ -883,21 +945,36 @@ function App() {
     setSelectedNoteIds([])
     setSelectedNoteId('')
     setNotesStatus('')
-    setNoteDialog({ mode: 'add', note })
-    setNoteDraft({ title: note.title, noteText: '' })
+    openNoteDialog('add', note)
   }
 
   function openEditNoteDialog(note) {
     setIsNotesBatchSelecting(false)
     setSelectedNoteIds([])
     setNotesStatus('')
-    setNoteDialog({ mode: 'edit', note })
-    setNoteDraft({ title: note.title || '', noteText: note.noteText || '' })
+    openNoteDialog('edit', note)
   }
 
   function closeNoteDialog() {
     setNoteDialog(null)
     setNoteDraft({ title: '', noteText: '' })
+  }
+
+  function openNoteDialog(mode, note) {
+    clearNoteDialogBlockers()
+
+    const draft = {
+      title: note.title || NOTE_TYPE_LABELS[note.type] || '笔记',
+      noteText: mode === 'edit' ? note.noteText || '' : '',
+    }
+
+    setNoteDraft(draft)
+    setNoteDialog({
+      mode,
+      note,
+      draft,
+      dialogId: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+    })
   }
 
   function isInteractiveElement(target) {
@@ -911,8 +988,10 @@ function App() {
   async function saveNoteDialog() {
     if (!noteDialog?.note) return
 
-    const title = noteDraft.title.trim() || NOTE_TYPE_LABELS[noteDialog.note.type] || '笔记'
-    const noteText = noteDraft.noteText.trim()
+    const titleValue = noteTitleInputRef.current?.value ?? noteDialog.draft?.title ?? noteDraft.title
+    const noteTextValue = noteTextareaRef.current?.value ?? noteDialog.draft?.noteText ?? noteDraft.noteText
+    const title = titleValue.trim() || NOTE_TYPE_LABELS[noteDialog.note.type] || '笔记'
+    const noteText = noteTextValue.trim()
 
     if (!noteText) {
       setNotesStatus('请输入笔记内容')
@@ -1956,11 +2035,56 @@ function App() {
     if (!noteDialog) return undefined
 
     const focusTimer = window.setTimeout(() => {
-      noteTitleInputRef.current?.focus({ preventScroll: true })
-    }, 0)
+      const targetInput = noteTitleInputRef.current || noteTextareaRef.current
+
+      targetInput?.focus({ preventScroll: true })
+
+      if (import.meta.env.DEV) {
+        const inspectedFields = [noteTitleInputRef.current, noteTextareaRef.current].filter(Boolean)
+
+        for (const field of inspectedFields) {
+          const rect = field.getBoundingClientRect()
+          const centerX = rect.left + rect.width / 2
+          const centerY = rect.top + rect.height / 2
+          const topElement = document.elementFromPoint(centerX, centerY)
+
+          console.log('[PaperReader] note dialog focus debug', {
+            field: field.tagName,
+            fieldClassName: field.className,
+            activeElement: document.activeElement?.tagName,
+            topElement: topElement?.tagName,
+            topElementClassName: topElement?.className,
+            isFieldReachable: topElement === field || field.contains(topElement),
+            bodyClassName: document.body.className,
+            states: {
+              isFullscreen,
+              isOcrMode,
+              isOcrDragging,
+              isResizingPanel,
+              isAnnotationToolbarOpen,
+              hasHighlightContextMenu: Boolean(highlightContextMenu),
+              hasImagePreview: Boolean(imagePreview),
+              hasDiagramResult: Boolean(diagramResult),
+              hasCompareResult: Boolean(compareResult),
+            },
+          })
+        }
+      }
+    }, 50)
 
     return () => window.clearTimeout(focusTimer)
-  }, [noteDialog])
+  }, [
+    compareResult,
+    diagramResult,
+    highlightContextMenu,
+    imagePreview,
+    isAnnotationToolbarOpen,
+    isFullscreen,
+    isOcrDragging,
+    isOcrMode,
+    isResizingPanel,
+    noteDialog,
+  ])
 
   useEffect(() => {
     if (!mergeNameDialog) return undefined
@@ -2411,6 +2535,7 @@ function App() {
 
       if (imagePreview) {
         setImagePreview(null)
+        setIsImagePreviewFullscreen(false)
         return
       }
 
@@ -2425,6 +2550,7 @@ function App() {
       }
 
       setImagePreview(null)
+      setIsImagePreviewFullscreen(false)
       setIsOcrMode(false)
       setIsOcrMenuOpen(false)
       clearOcrSelection()
@@ -3688,7 +3814,59 @@ function App() {
     }
   }
 
-  function cropOcrImage(rect) {
+  function suppressHighlightTintOnCanvas(canvas) {
+    const context = canvas.getContext('2d', { willReadFrequently: true })
+    if (!context) return ''
+
+    let imageData
+
+    try {
+      imageData = context.getImageData(0, 0, canvas.width, canvas.height)
+    } catch {
+      return ''
+    }
+
+    const { data } = imageData
+    let changedPixels = 0
+
+    for (let index = 0; index < data.length; index += 4) {
+      const red = data[index]
+      const green = data[index + 1]
+      const blue = data[index + 2]
+      const alpha = data[index + 3]
+      if (alpha < 16) continue
+
+      const maxChannel = Math.max(red, green, blue)
+      const minChannel = Math.min(red, green, blue)
+      const saturation = maxChannel - minChannel
+      const brightness = red * 0.299 + green * 0.587 + blue * 0.114
+      const isDarkInk = brightness < 105 && maxChannel < 150
+      const isLikelyHighlight =
+        !isDarkInk &&
+        brightness > 135 &&
+        saturation > 34 &&
+        (
+          (red > 185 && green > 165 && blue < 175) ||
+          (green > 170 && blue > 150 && red < 210) ||
+          (green > 170 && red < 180) ||
+          (red > 190 && blue > 165 && green < 190)
+        )
+
+      if (!isLikelyHighlight) continue
+
+      data[index] = Math.min(255, Math.round(red * 0.16 + 255 * 0.84))
+      data[index + 1] = Math.min(255, Math.round(green * 0.16 + 255 * 0.84))
+      data[index + 2] = Math.min(255, Math.round(blue * 0.16 + 255 * 0.84))
+      changedPixels += 1
+    }
+
+    if (!changedPixels) return ''
+
+    context.putImageData(imageData, 0, 0)
+    return canvas.toDataURL('image/png')
+  }
+
+  function cropOcrImage(rect, options = {}) {
     const pdfViewer = pdfViewerRef.current
     const canvas = pdfViewer?.querySelector('.react-pdf__Page canvas')
 
@@ -3698,11 +3876,12 @@ function App() {
 
     const viewerRect = pdfViewer.getBoundingClientRect()
     const canvasRect = canvas.getBoundingClientRect()
+    const padding = Math.max(0, Number(options.padding) || 0)
     const rectInViewport = {
-      left: viewerRect.left - pdfViewer.scrollLeft + rect.left,
-      top: viewerRect.top - pdfViewer.scrollTop + rect.top,
-      right: viewerRect.left - pdfViewer.scrollLeft + rect.left + rect.width,
-      bottom: viewerRect.top - pdfViewer.scrollTop + rect.top + rect.height,
+      left: viewerRect.left - pdfViewer.scrollLeft + rect.left - padding,
+      top: viewerRect.top - pdfViewer.scrollTop + rect.top - padding,
+      right: viewerRect.left - pdfViewer.scrollLeft + rect.left + rect.width + padding,
+      bottom: viewerRect.top - pdfViewer.scrollTop + rect.top + rect.height + padding,
     }
     const cropRect = {
       left: Math.max(rectInViewport.left, canvasRect.left),
@@ -3730,20 +3909,27 @@ function App() {
     outputCanvas
       .getContext('2d')
       .drawImage(canvas, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, sourceWidth, sourceHeight)
+    const image = outputCanvas.toDataURL('image/png')
+    const cleanedCanvas = document.createElement('canvas')
+
+    cleanedCanvas.width = outputCanvas.width
+    cleanedCanvas.height = outputCanvas.height
+    cleanedCanvas.getContext('2d')?.drawImage(outputCanvas, 0, 0)
 
     return {
-      image: outputCanvas.toDataURL('image/png'),
+      image,
+      ocrImage: suppressHighlightTintOnCanvas(cleanedCanvas) || image,
       width: outputCanvas.width,
       height: outputCanvas.height,
     }
   }
 
   function isNumberedLine(line) {
-    return /^\s*(\d+|[A-Z])[\s.)、-]+/.test(line)
+    return /^\s*(?:\d+[\s.)、-]+|[A-Z][.)、-]+\s*)/.test(line)
   }
 
   function hasSentenceEnding(line) {
-    return /[.!?。！？:：;；)]["')\]]*$/.test(line)
+    return /[.!?。！？:：;；]["')\]]*$/.test(line)
   }
 
   function cleanOcrText(rawText) {
@@ -3852,13 +4038,12 @@ function App() {
     if (!normalizedText) return false
 
     const compactText = normalizedText.replace(/\s/g, '')
-    const usefulShortTerms =
-      /^(enzyme|product|substrate|coenzyme|cofactor|inhibitor|activator|metal|ion|ions)$/i
+    const usefulShortTerms = isUsefulShortOcrLabel(normalizedText)
     const usefulAcademicPhrase =
-      /\b(enzyme|substrate|product|transition|ground|state|reaction|coordinate|coenzyme|cofactor|metal|ion|ions|precursor|activity|rate|energy|enhancement|carbonic|anhydrase|isomerase|transfer|chemical|group|groups|dietary)\b/i
+      /\b(enzyme|substrate|product|transition|ground|state|reaction|coordinate|coenzyme|cofactor|metal|ion|ions|precursor|activity|rate|energy|enhancement|carbonic|anhydrase|isomerase|transfer|chemical|group|groups|dietary|heat|light|work|cell|cells|signal|signals|transduction|production|motion|protein|proteins|gene|genes|dna|rna)\b/i
 
     if (isScientificExpressionOnly(normalizedText)) return false
-    if (usefulShortTerms.test(normalizedText)) return true
+    if (usefulShortTerms) return true
     if (compactText.length < 3) return false
 
     const latinLetters = normalizedText.match(/[A-Za-z]/g) || []
@@ -3882,9 +4067,49 @@ function App() {
     return true
   }
 
+  function isUsefulShortOcrLabel(text) {
+    const normalizedText = normalizeScientificText(text).toLowerCase()
+
+    if (!normalizedText) return false
+
+    return /^(enzyme|product|substrate|coenzyme|cofactor|inhibitor|activator|metal|ion|ions|heat|light|work|cell|cells|signal|signals|transduction|production|light production|heat production|motion|energy|protein|proteins|gene|genes|dna|rna)$/i.test(normalizedText)
+  }
+
+  function isLikelyOcrNoiseText(text, confidence = 100, nearEdge = false) {
+    const normalizedText = String(text || '').replace(/\s+/g, ' ').trim()
+    const lowerText = normalizedText.toLowerCase()
+    const letters = normalizedText.match(/[A-Za-z]/g) || []
+    const usefulCharacters = normalizedText.match(/[A-Za-z0-9]/g) || []
+    const symbolCharacters = normalizedText.match(/[|\\/_~`^=<>[\]{}]+/g) || []
+    const wordTokens = normalizedText.match(/[A-Za-z]+/g) || []
+    const hasKnownShortAbbreviation = /\b(DNA|RNA|ATP|ADP|AMP|NADH|NADPH|FAD|CO2|NH3|H2O)\b/i.test(normalizedText)
+
+    if (!normalizedText) return true
+    if (/^(li|dl|iii|lll|ii|ll|l|i)(\s+(li|dl|iii|lll|ii|ll|l|i))*$/.test(lowerText)) return true
+    if (
+      !hasKnownShortAbbreviation &&
+      wordTokens.length >= 2 &&
+      wordTokens.every((token) => token.length <= 2) &&
+      !isUsefulShortOcrLabel(normalizedText)
+    ) {
+      return true
+    }
+    if (letters.length < 2 && normalizedText.length <= 4) return true
+    if (usefulCharacters.length / Math.max(normalizedText.length, 1) < 0.42) return true
+    if (symbolCharacters.length > Math.max(2, normalizedText.length * 0.24)) return true
+    if (/(.)\1{4,}/.test(normalizedText)) return true
+    if (isUsefulShortOcrLabel(normalizedText)) return false
+    if (!nearEdge && Number.isFinite(confidence) && confidence < 18) return true
+
+    return false
+  }
+
   function shouldTranslateOcrBlock(block) {
     if (!block?.text) return false
-    if (Number.isFinite(block.confidence) && block.confidence < 35) return false
+    const isNearEdge = block.nearEdge || (block.sourceBlocks || []).some((sourceBlock) => sourceBlock.nearEdge)
+    const isShortLabel = isUsefulShortOcrLabel(block.text)
+    if (isLikelyOcrNoiseText(block.text, block.confidence, isNearEdge)) return false
+    if (Number.isFinite(block.confidence) && block.confidence < (isNearEdge || isShortLabel ? 18 : 35)) return false
 
     return isMeaningfulEnglishText(block.text)
   }
@@ -3945,6 +4170,40 @@ function App() {
     return { x0, y0, x1, y1 }
   }
 
+  function clampOcrBboxToImage(box, imageSize) {
+    if (!box || !imageSize?.width || !imageSize?.height) return null
+
+    const edgeTolerance = Math.max(6, Math.min(imageSize.width, imageSize.height) * 0.025)
+
+    if (
+      box.x1 < -edgeTolerance ||
+      box.y1 < -edgeTolerance ||
+      box.x0 > imageSize.width + edgeTolerance ||
+      box.y0 > imageSize.height + edgeTolerance
+    ) {
+      return null
+    }
+
+    const x0 = clampNumber(box.x0, 0, imageSize.width)
+    const y0 = clampNumber(box.y0, 0, imageSize.height)
+    const x1 = clampNumber(box.x1, 0, imageSize.width)
+    const y1 = clampNumber(box.y1, 0, imageSize.height)
+
+    if (x1 - x0 <= 1 || y1 - y0 <= 1) return null
+
+    return {
+      x0,
+      y0,
+      x1,
+      y1,
+      nearEdge:
+        box.x0 <= edgeTolerance ||
+        box.y0 <= edgeTolerance ||
+        box.x1 >= imageSize.width - edgeTolerance ||
+        box.y1 >= imageSize.height - edgeTolerance,
+    }
+  }
+
   function getBboxFromWords(words = []) {
     const boxes = words.map((word) => normalizeOcrBbox(word.bbox)).filter(Boolean)
 
@@ -3965,19 +4224,6 @@ function App() {
       .flatMap((line) => line.words || [])
   }
 
-  function isBboxInImage(box, imageSize) {
-    const tolerance = 3
-
-    return (
-      box.x1 > 0 &&
-      box.y1 > 0 &&
-      box.x1 - box.x0 > 2 &&
-      box.y1 - box.y0 > 2 &&
-      box.x0 < imageSize.width + tolerance &&
-      box.y0 < imageSize.height + tolerance
-    )
-  }
-
   function collectOcrLines(data) {
     if (Array.isArray(data.lines) && data.lines.length) return data.lines
 
@@ -3989,16 +4235,18 @@ function App() {
   function normalizeOcrWord(word, imageSize) {
     const text = (word.text || '').replace(/\s+/g, ' ').trim()
     const box = normalizeOcrBbox(word.bbox)
+    const clippedBox = clampOcrBboxToImage(box, imageSize)
 
-    if (!text || !box || !isBboxInImage(box, imageSize)) return null
-    if (Number.isFinite(word.confidence) && word.confidence < 30) return null
+    if (!text || !clippedBox) return null
+    if (Number.isFinite(word.confidence) && word.confidence < (clippedBox.nearEdge ? 18 : 30)) return null
 
     return {
       text,
-      x0: clampNumber(box.x0, 0, imageSize.width),
-      y0: clampNumber(box.y0, 0, imageSize.height),
-      x1: clampNumber(box.x1, 0, imageSize.width),
-      y1: clampNumber(box.y1, 0, imageSize.height),
+      x0: clippedBox.x0,
+      y0: clippedBox.y0,
+      x1: clippedBox.x1,
+      y1: clippedBox.y1,
+      nearEdge: clippedBox.nearEdge,
       confidence: Number(word.confidence) || 0,
     }
   }
@@ -4057,6 +4305,7 @@ function App() {
       y: box.y0,
       width: box.x1 - box.x0,
       height: box.y1 - box.y0,
+      nearEdge: sortedWords.some((word) => word.nearEdge),
       confidence:
         sortedWords.reduce((sum, word) => sum + (Number(word.confidence) || 0), 0) /
         Math.max(sortedWords.length, 1),
@@ -4069,6 +4318,22 @@ function App() {
 
   function getBlockBottom(block) {
     return block.y + block.height
+  }
+
+  function getBlockSourceLines(block) {
+    return (Array.isArray(block?.sourceBlocks) && block.sourceBlocks.length ? block.sourceBlocks : [block])
+      .filter(Boolean)
+      .sort((firstBlock, secondBlock) => firstBlock.y - secondBlock.y || firstBlock.x - secondBlock.x)
+  }
+
+  function getFirstSourceLine(block) {
+    return getBlockSourceLines(block)[0] || block
+  }
+
+  function getLastSourceLine(block) {
+    const lines = getBlockSourceLines(block)
+
+    return lines[lines.length - 1] || block
   }
 
   function getHorizontalOverlapRatio(firstBlock, secondBlock) {
@@ -4087,9 +4352,10 @@ function App() {
 
     return (
       isNumberedLine(text) ||
-      /^[-•*]\s+/.test(text) ||
+      /^[-*•·]\s+/.test(text) ||
       /^\(?[A-Za-z0-9]\)\s+/.test(text) ||
-      /^[A-Za-z]\.\s+/.test(text)
+      /^[A-Za-z]\.\s+/.test(text) ||
+      /^\s*(table|figure|fig\.|scheme|equation)\s+\d+/i.test(text)
     )
   }
 
@@ -4103,36 +4369,112 @@ function App() {
     )
   }
 
-  function isLikelySameTextRegion(previousBlock, nextBlock) {
-    const lineHeight = Math.max(previousBlock.height, nextBlock.height, 1)
-    const verticalGap = nextBlock.y - getBlockBottom(previousBlock)
-    const sameX = Math.abs(previousBlock.x - nextBlock.x) < lineHeight * 1.6
-    const similarHeight = Math.abs(previousBlock.height - nextBlock.height) < lineHeight * 0.65
-    const normalGap = verticalGap >= -lineHeight * 0.25 && verticalGap < lineHeight * 1.65
-    const horizontalOverlap = getHorizontalOverlapRatio(previousBlock, nextBlock)
-    const widthRatio = Math.min(previousBlock.width, nextBlock.width) / Math.max(previousBlock.width, nextBlock.width, 1)
+  function isLikelyFormulaOrTableLine(text) {
+    const normalizedText = text.replace(/\s+/g, ' ').trim()
+    const letters = normalizedText.match(/[A-Za-z]/g) || []
+    const digits = normalizedText.match(/\d/g) || []
+    const operators = normalizedText.match(/[=+*/<>→←↔^_()[\]{}|]/g) || []
+    const words = normalizedText.match(/[A-Za-z][A-Za-z-]{1,}/g) || []
 
-    return normalGap && similarHeight && (sameX || horizontalOverlap > 0.45) && widthRatio > 0.34
+    if (!normalizedText) return false
+    if (operators.length >= Math.max(2, letters.length * 0.45)) return true
+    if (digits.length >= 4 && words.length <= 2) return true
+    if (/\b(kcat|km|ph|h2o|co2|nad|atp)\b/i.test(normalizedText) && operators.length >= 1) return true
+
+    return false
   }
 
-  function shouldMergeWrappedLine(previousBlock, nextBlock) {
-    if (!previousBlock || !nextBlock) return false
-    if (isNewListOrTableRow(nextBlock)) return false
-    if (hasSentenceEnding(previousBlock.text.trim())) return false
-    if (!isLikelySameTextRegion(previousBlock, nextBlock)) return false
+  function getBlockOrientation(block) {
+    return block.height > block.width * 1.35 ? 'vertical' : 'horizontal'
+  }
 
-    const previousText = previousBlock.text.trim()
-    const nextText = nextBlock.text.trim()
+  function isLikelySameTextRegion(previousBlock, nextBlock, options = {}) {
+    const lineHeight = Math.max(previousBlock.height, nextBlock.height, 1)
+    const verticalGap = nextBlock.y - getBlockBottom(previousBlock)
+    const strict = options.strict === true
+    const sameX = Math.abs(previousBlock.x - nextBlock.x) < lineHeight * (strict ? 1.35 : 1.8)
+    const similarHeight = Math.abs(previousBlock.height - nextBlock.height) < lineHeight * (strict ? 0.55 : 0.7)
+    const normalGap = verticalGap >= -lineHeight * 0.3 && verticalGap < lineHeight * (strict ? 1.12 : 1.55)
+    const horizontalOverlap = getHorizontalOverlapRatio(previousBlock, nextBlock)
+    const widthRatio = Math.min(previousBlock.width, nextBlock.width) / Math.max(previousBlock.width, nextBlock.width, 1)
+    const sameOrientation = getBlockOrientation(previousBlock) === getBlockOrientation(nextBlock)
+
+    return (
+      normalGap &&
+      similarHeight &&
+      sameOrientation &&
+      (sameX || horizontalOverlap > (strict ? 0.48 : 0.36)) &&
+      widthRatio > (strict ? 0.32 : 0.25)
+    )
+  }
+
+  function shouldMergeWrappedLine(previousBlock, nextBlock, options = {}) {
+    if (!previousBlock || !nextBlock) return false
+    const previousLine = getLastSourceLine(previousBlock)
+    const nextLine = getFirstSourceLine(nextBlock)
+    const strict = options.strict === true
+    const diagram = options.diagram === true
+
+    if (isNewListOrTableRow(nextLine) && !diagram) return false
+    if (isLikelyFormulaOrTableLine(previousLine.text) || isLikelyFormulaOrTableLine(nextLine.text)) return false
+    if (!isLikelySameTextRegion(previousLine, nextLine, options)) return false
+
+    const previousText = previousLine.text.trim()
+    const nextText = nextLine.text.trim()
     const previousWords = getWordCount(previousText)
     const nextWords = getWordCount(nextText)
+    const lineHeight = Math.max(previousLine.height, nextLine.height, 1)
+    const verticalGap = nextLine.y - getBlockBottom(previousLine)
+    const nextStartsLikeHeading = /^[A-Z][A-Za-z\s-]{2,}$/.test(nextText) && nextWords <= 6
     const previousEndsOpen =
       /[-,(]$/.test(previousText) ||
-      /\b(of|by|for|with|from|to|in|on|at|and|or|the|a|an|into|under|over|between|within)$/i.test(previousText)
+      /\b(of|by|for|with|from|to|in|on|at|and|or|the|a|an|into|under|over|between|within|using|via)$/i.test(previousText)
     const nextContinues = /^[a-z(]/.test(nextText) || isLikelyContinuationLine(nextText)
+    const previousEndsListIntro = /[:：]$/.test(previousText)
+    const nextLooksLikeListItem = isNewListOrTableRow(nextLine) || nextWords <= 4
+    const diagramShortStack =
+      diagram &&
+      previousWords <= 4 &&
+      nextWords <= 4 &&
+      verticalGap >= -lineHeight * 0.25 &&
+      verticalGap < lineHeight * 1.35 &&
+      Math.abs(previousLine.x - nextLine.x) < lineHeight * 1.8
+    const diagramListContinuation =
+      diagram &&
+      (previousEndsListIntro || previousWords <= 5 || nextLooksLikeListItem) &&
+      nextWords <= 7 &&
+      verticalGap >= -lineHeight * 0.25 &&
+      verticalGap < lineHeight * 1.55
+    const previousLooksLikeHeading =
+      previousWords <= 8 &&
+      nextWords >= 6 &&
+      previousLine.width < nextLine.width * 0.75 &&
+      /^[A-Z0-9]/.test(previousText)
     const bodyWrap = previousWords >= 5 && nextWords >= 2 && (/^[a-z(]/.test(nextText) || previousWords >= 8)
     const titleWrap = previousWords >= 2 && nextWords >= 2 && (previousEndsOpen || nextContinues)
+    const continuousBody = previousWords >= 5 && nextWords >= 3 && !previousLooksLikeHeading
 
-    return previousEndsOpen || nextContinues || bodyWrap || titleWrap
+    if (hasSentenceEnding(previousText) && !diagramListContinuation) return false
+    if (nextStartsLikeHeading && !previousEndsOpen) return false
+    if (previousLooksLikeHeading && !previousEndsOpen) return false
+    if (
+      strict &&
+      !diagramShortStack &&
+      !diagramListContinuation &&
+      verticalGap > lineHeight * 0.72 &&
+      !previousEndsOpen &&
+      !nextContinues
+    ) {
+      return false
+    }
+
+    if (diagram && (diagramShortStack || diagramListContinuation)) return true
+
+    if (strict) {
+      return previousEndsOpen || nextContinues || bodyWrap || titleWrap || (continuousBody && previousWords >= 7)
+    }
+
+    return previousEndsOpen || nextContinues || bodyWrap || titleWrap || continuousBody
   }
 
   function mergeOcrBlocks(blocks, index) {
@@ -4154,6 +4496,7 @@ function App() {
       y: y0,
       width: x1 - x0,
       height: y1 - y0,
+      nearEdge: sourceBlocks.some((block) => block.nearEdge),
       confidence:
         sourceBlocks.reduce((sum, block) => sum + (Number(block.confidence) || 0), 0) /
         Math.max(sourceBlocks.length, 1),
@@ -4161,7 +4504,48 @@ function App() {
     }
   }
 
-  function mergeWrappedLinesIntoBlocks(blocks) {
+  function scoreMergeCandidate(previousBlock, nextBlock) {
+    const previousLine = getLastSourceLine(previousBlock)
+    const nextLine = getFirstSourceLine(nextBlock)
+    const lineHeight = Math.max(previousLine.height, nextLine.height, 1)
+    const verticalGap = Math.max(0, nextLine.y - getBlockBottom(previousLine))
+    const xDistance = Math.abs(previousLine.x - nextLine.x) / lineHeight
+    const overlapPenalty = 1 - getHorizontalOverlapRatio(previousLine, nextLine)
+    const widthRatio = Math.min(previousLine.width, nextLine.width) / Math.max(previousLine.width, nextLine.width, 1)
+
+    return verticalGap / lineHeight + xDistance * 0.28 + overlapPenalty * 0.75 + (1 - widthRatio) * 0.2
+  }
+
+  function findMergeTargetIndex(mergedBlocks, currentBlock, options = {}) {
+    const lastIndex = mergedBlocks.length - 1
+
+    if (lastIndex < 0) return -1
+
+    if (options.strict !== true) {
+      return shouldMergeWrappedLine(mergedBlocks[lastIndex], currentBlock, options) ? lastIndex : -1
+    }
+
+    let bestIndex = -1
+    let bestScore = Infinity
+    const lookbackLimit = 10
+
+    for (let index = lastIndex; index >= 0 && lastIndex - index < lookbackLimit; index -= 1) {
+      const candidate = mergedBlocks[index]
+
+      if (!shouldMergeWrappedLine(candidate, currentBlock, options)) continue
+
+      const score = scoreMergeCandidate(candidate, currentBlock)
+
+      if (score < bestScore) {
+        bestScore = score
+        bestIndex = index
+      }
+    }
+
+    return bestIndex
+  }
+
+  function mergeWrappedLinesIntoBlocks(blocks, options = {}) {
     const sortedBlocks = blocks
       .slice()
       .sort((firstBlock, secondBlock) => firstBlock.y - secondBlock.y || firstBlock.x - secondBlock.x)
@@ -4172,10 +4556,11 @@ function App() {
         ...block,
         sourceBlocks: block.sourceBlocks || [block],
       }
-      const previousBlock = mergedBlocks[mergedBlocks.length - 1]
+      const mergeTargetIndex = findMergeTargetIndex(mergedBlocks, currentBlock, options)
 
-      if (previousBlock && shouldMergeWrappedLine(previousBlock, currentBlock)) {
-        mergedBlocks[mergedBlocks.length - 1] = mergeOcrBlocks([previousBlock, currentBlock], previousBlock.index)
+      if (mergeTargetIndex >= 0) {
+        const targetBlock = mergedBlocks[mergeTargetIndex]
+        mergedBlocks[mergeTargetIndex] = mergeOcrBlocks([targetBlock, currentBlock], targetBlock.index)
         return
       }
 
@@ -4235,15 +4620,14 @@ function App() {
       .map((line, index) => {
         const text = cleanOcrText(line.text || '')
         const box = normalizeOcrBbox(line.bbox) || getBboxFromWords(line.words)
+        const clippedBox = clampOcrBboxToImage(box, imageSize)
 
-        if (!text || !box || !isBboxInImage(box, imageSize)) return null
+        if (!text || !clippedBox) return null
 
-        const x0 = clampNumber(box.x0, 0, imageSize.width)
-        const y0 = clampNumber(box.y0, 0, imageSize.height)
-        const x1 = clampNumber(box.x1, 0, imageSize.width)
-        const y1 = clampNumber(box.y1, 0, imageSize.height)
-
-        if (x1 <= x0 || y1 <= y0) return null
+        const x0 = clippedBox.x0
+        const y0 = clippedBox.y0
+        const x1 = clippedBox.x1
+        const y1 = clippedBox.y1
 
         return {
           index,
@@ -4252,16 +4636,17 @@ function App() {
           y: y0,
           width: x1 - x0,
           height: y1 - y0,
+          nearEdge: clippedBox.nearEdge,
           confidence: Number(line.confidence) || 0,
         }
       })
       .filter(Boolean)
   }
 
-  function getOcrTextBlocks(data, imageSize) {
+  function getOcrTextBlocks(data, imageSize, options = {}) {
     const blocks = buildOcrBlocks(data, imageSize)
     const visualBlocks = blocks.length ? blocks : getLineOcrBlocks(data, imageSize)
-    const nextBlocks = mergeWrappedLinesIntoBlocks(visualBlocks)
+    const nextBlocks = mergeWrappedLinesIntoBlocks(visualBlocks, options)
 
     console.log('OCR 图解模式文本块', {
       count: nextBlocks.length,
@@ -4278,7 +4663,7 @@ function App() {
       })),
     })
 
-    return nextBlocks.slice(0, 60)
+    return nextBlocks.slice(0, 100)
   }
 
   function loadImage(imageUrl) {
@@ -4314,6 +4699,296 @@ function App() {
     return lines.length ? lines : [text]
   }
 
+  function getCompareSourceBlocks(block) {
+    return (Array.isArray(block.sourceBlocks) && block.sourceBlocks.length ? block.sourceBlocks : [block])
+      .map((sourceBlock) => ({
+        ...sourceBlock,
+        width: Math.max(1, Number(sourceBlock.width) || 1),
+        height: Math.max(1, Number(sourceBlock.height) || 1),
+      }))
+      .sort((firstBlock, secondBlock) => firstBlock.y - secondBlock.y || firstBlock.x - secondBlock.x)
+  }
+
+  function getCompareModuleRect(segments, canvasWidth, canvasHeight, padding = 0) {
+    const x0 = Math.min(...segments.map((segment) => segment.x))
+    const y0 = Math.min(...segments.map((segment) => segment.y))
+    const x1 = Math.max(...segments.map((segment) => segment.x + segment.width))
+    const y1 = Math.max(...segments.map((segment) => segment.y + segment.height))
+    const x = clampNumber(x0 - padding, 0, canvasWidth - 1)
+    const y = clampNumber(y0 - padding, 0, canvasHeight - 1)
+
+    return {
+      x,
+      y,
+      width: Math.max(12, Math.min(x1 - x0 + padding * 2, canvasWidth - x)),
+      height: Math.max(8, Math.min(y1 - y0 + padding * 2, canvasHeight - y)),
+    }
+  }
+
+  function getCompareLineRects(segments, canvasWidth, canvasHeight, padding = 0) {
+    return segments.map((segment) => {
+      const x = clampNumber(segment.x - padding, 0, canvasWidth - 1)
+      const y = clampNumber(segment.y - padding, 0, canvasHeight - 1)
+      const width = Math.max(8, Math.min(segment.width + padding * 2, canvasWidth - x))
+      const height = Math.max(6, Math.min(segment.height + padding * 2, canvasHeight - y))
+
+      return { x, y, width, height }
+    })
+  }
+
+  function getCompareCanvasFont(fontSize) {
+    return `${fontSize}px "Microsoft YaHei", Arial, sans-serif`
+  }
+
+  function getCompareTextSlots(segments, fontSize, canvasWidth, canvasHeight) {
+    const lineRects = getCompareLineRects(segments, canvasWidth, canvasHeight)
+    const horizontalPadding = clampNumber(fontSize * 0.22, 3, 7)
+    const verticalPadding = clampNumber(fontSize * 0.08, 1, 3)
+
+    return lineRects.map((rect) => {
+      const lineFontSize = clampNumber(Math.floor(Math.min(fontSize, rect.height * 0.92)), 10, fontSize)
+      const minBackgroundHeight = lineFontSize * 1.18
+      const backgroundX = clampNumber(rect.x - horizontalPadding, 0, canvasWidth - 1)
+      const backgroundY = clampNumber(
+        rect.y - verticalPadding,
+        0,
+        Math.max(0, canvasHeight - minBackgroundHeight),
+      )
+      const backgroundWidth = Math.max(
+        10,
+        Math.min(rect.width + horizontalPadding * 2, canvasWidth - backgroundX),
+      )
+      const backgroundHeight = Math.max(
+        minBackgroundHeight,
+        Math.min(rect.height + verticalPadding * 2, canvasHeight - backgroundY),
+      )
+      const textAreaWidth = Math.max(8, backgroundWidth - horizontalPadding * 2)
+
+      return {
+        x: backgroundX + horizontalPadding,
+        slotX: backgroundX + horizontalPadding,
+        y: backgroundY + Math.max(0, (backgroundHeight - lineFontSize) / 2),
+        maxWidth: textAreaWidth,
+        lineHeight: backgroundHeight,
+        fontSize: lineFontSize,
+        backgroundRect: {
+          x: backgroundX,
+          y: backgroundY,
+          width: backgroundWidth,
+          height: backgroundHeight,
+        },
+      }
+    })
+  }
+
+  function trimCanvasTextToWidth(context, text, maxWidth) {
+    const characters = Array.from(text)
+    let nextText = characters.join('')
+
+    while (nextText && context.measureText(`${nextText}…`).width > maxWidth) {
+      characters.pop()
+      nextText = characters.join('')
+    }
+
+    return nextText ? `${nextText}…` : '…'
+  }
+
+  function wrapCanvasTextAcrossSlots(context, text, slots) {
+    const normalizedText = text.replace(/\s+/g, ' ').trim()
+    const characters = Array.from(normalizedText)
+    const lines = []
+    let cursor = 0
+
+    slots.forEach((slot, slotIndex) => {
+      if (cursor >= characters.length) return
+
+      const remainingSlots = slots.slice(slotIndex)
+      const remainingWidth = remainingSlots.reduce((sum, item) => sum + item.maxWidth, 0)
+      const remainingCharacters = characters.length - cursor
+      const targetCount =
+        slotIndex === slots.length - 1
+          ? remainingCharacters
+          : Math.max(1, Math.round(remainingCharacters * (slot.maxWidth / Math.max(remainingWidth, 1))))
+      let lineText = ''
+      let lineCharacters = 0
+
+      context.font = getCompareCanvasFont(slot.fontSize || 12)
+      while (cursor < characters.length) {
+        const remainingSlotsAfterCurrent = slots.length - slotIndex - 1
+        const remainingAfterTakingNextCharacter = characters.length - cursor - 1
+
+        if (
+          lineText &&
+          remainingSlotsAfterCurrent > 0 &&
+          remainingAfterTakingNextCharacter < remainingSlotsAfterCurrent
+        ) {
+          break
+        }
+
+        const nextLine = `${lineText}${characters[cursor]}`
+        if (lineText && context.measureText(nextLine).width > slot.maxWidth) break
+
+        lineText = nextLine
+        cursor += 1
+        lineCharacters += 1
+
+        if (
+          slotIndex < slots.length - 1 &&
+          lineCharacters >= targetCount &&
+          characters.length - cursor >= remainingSlotsAfterCurrent
+        ) {
+          break
+        }
+      }
+
+      if (lineText) {
+        const text = lineText.trim() || lineText
+
+        lines.push({
+          ...slot,
+          x: slot.x,
+          slotX: slot.x,
+          text,
+        })
+      }
+    })
+
+    const truncated = cursor < characters.length
+
+    if (truncated && lines.length) {
+      const lastLine = lines[lines.length - 1]
+      context.font = getCompareCanvasFont(lastLine.fontSize || 12)
+      lastLine.text = trimCanvasTextToWidth(context, `${lastLine.text}${characters.slice(cursor).join('')}`, lastLine.maxWidth)
+      lastLine.x = lastLine.slotX ?? lastLine.x
+    }
+
+    return { lines, truncated }
+  }
+
+  function hasOverlappingCompareLineBackgrounds(slots) {
+    for (let index = 1; index < slots.length; index += 1) {
+      const previousRect = slots[index - 1].backgroundRect
+      const currentRect = slots[index].backgroundRect
+
+      if (!previousRect || !currentRect) continue
+      if (currentRect.y < previousRect.y + previousRect.height - 1) return true
+    }
+
+    return false
+  }
+
+  function shouldUseCompareModuleFallback(segments, slots) {
+    if (segments.length < 2) return false
+
+    const sortedSegments = segments.slice().sort((firstSegment, secondSegment) => firstSegment.y - secondSegment.y)
+    const segmentHeights = sortedSegments.map((segment) => segment.height).filter((height) => height > 0)
+    const averageHeight =
+      segmentHeights.reduce((sum, height) => sum + height, 0) / Math.max(segmentHeights.length, 1)
+    const gaps = sortedSegments.slice(1).map((segment, index) => segment.y - getBlockBottom(sortedSegments[index]))
+    const averageGap = gaps.reduce((sum, gap) => sum + gap, 0) / Math.max(gaps.length, 1)
+    const moduleHeight = Math.max(...sortedSegments.map((segment) => getBlockBottom(segment))) - Math.min(...sortedSegments.map((segment) => segment.y))
+    const tightLineBoxes = averageHeight < 11 || averageGap < Math.max(1, averageHeight * 0.12)
+    const denseModule =
+      sortedSegments.length >= 5 &&
+      averageGap < averageHeight * 0.28 &&
+      averageHeight * sortedSegments.length > moduleHeight * 0.72
+
+    return tightLineBoxes || denseModule || hasOverlappingCompareLineBackgrounds(slots)
+  }
+
+  function getCompareModuleFallbackPlan(context, block, segments, canvasWidth, canvasHeight, maxFontSize, minFontSize) {
+    const modulePadding = clampNumber(maxFontSize * 0.34, 4, 8)
+    const moduleRect = getCompareModuleRect(segments, canvasWidth, canvasHeight, modulePadding)
+    const horizontalPadding = clampNumber(maxFontSize * 0.28, 4, 8)
+    const verticalPadding = clampNumber(maxFontSize * 0.22, 3, 6)
+    let fallback = {
+      lines: [],
+      fontSize: minFontSize,
+      segments,
+      moduleRect,
+      backgroundRects: [moduleRect],
+      mode: 'module-fallback',
+      truncated: true,
+    }
+
+    for (let fontSize = clampNumber(maxFontSize, 11, 20); fontSize >= Math.max(10, minFontSize); fontSize -= 1) {
+      context.font = getCompareCanvasFont(fontSize)
+      const lineHeight = fontSize * 1.22
+      const maxWidth = Math.max(8, moduleRect.width - horizontalPadding * 2)
+      const maxLines = Math.max(1, Math.floor((moduleRect.height - verticalPadding * 2) / lineHeight))
+      const wrappedLines = wrapCanvasText(context, block.translation, maxWidth)
+      const lines = wrappedLines.slice(0, maxLines).map((line, index) => ({
+        text: line,
+        x: moduleRect.x + horizontalPadding,
+        y: moduleRect.y + verticalPadding + index * lineHeight,
+        maxWidth,
+        lineHeight,
+        fontSize,
+      }))
+      const truncated = wrappedLines.length > maxLines
+
+      if (truncated && lines.length) {
+        const lastLine = lines[lines.length - 1]
+        lastLine.text = trimCanvasTextToWidth(context, `${lastLine.text}${wrappedLines.slice(maxLines).join('')}`, maxWidth)
+      }
+
+      fallback = {
+        lines,
+        fontSize,
+        segments,
+        moduleRect,
+        backgroundRects: [moduleRect],
+        mode: 'module-fallback',
+        truncated,
+      }
+
+      if (lines.length && !truncated) return fallback
+    }
+
+    return fallback
+  }
+
+  function getCompareReplacementPlan(context, block, canvasWidth, canvasHeight) {
+    const segments = getCompareSourceBlocks(block)
+    const segmentHeights = segments.map((segment) => segment.height).filter((height) => height > 0)
+    const baseHeight = median(segmentHeights) || block.height || 14
+    const maxFontSize = clampNumber(Math.floor(baseHeight * 0.98), 12, 24)
+    const minFontSize = Math.min(10, maxFontSize)
+    const initialSlots = getCompareTextSlots(segments, maxFontSize, canvasWidth, canvasHeight)
+    let fallback = null
+
+    if (shouldUseCompareModuleFallback(segments, initialSlots)) {
+      return getCompareModuleFallbackPlan(context, block, segments, canvasWidth, canvasHeight, maxFontSize, minFontSize)
+    }
+
+    for (let fontSize = maxFontSize; fontSize >= minFontSize; fontSize -= 1) {
+      const slots = getCompareTextSlots(segments, fontSize, canvasWidth, canvasHeight)
+      const plan = wrapCanvasTextAcrossSlots(context, block.translation, slots)
+      const moduleRect = getCompareModuleRect(segments, canvasWidth, canvasHeight, 0)
+      fallback = {
+        ...plan,
+        fontSize,
+        segments,
+        moduleRect,
+        backgroundRects: slots.map((slot) => slot.backgroundRect),
+      }
+
+      if (plan.lines.length && !plan.truncated) {
+        return fallback
+      }
+    }
+
+    return fallback?.lines?.length
+      ? getCompareModuleFallbackPlan(context, block, segments, canvasWidth, canvasHeight, maxFontSize, minFontSize)
+      : {
+          lines: [],
+          fontSize: minFontSize,
+          segments,
+          moduleRect: getCompareModuleRect(segments, canvasWidth, canvasHeight, 4),
+          backgroundRects: getCompareTextSlots(segments, minFontSize, canvasWidth, canvasHeight).map((slot) => slot.backgroundRect),
+        }
+  }
+
   function getRectOverlapArea(firstRect, secondRect) {
     const left = Math.max(firstRect.x, secondRect.x)
     const right = Math.min(firstRect.x + firstRect.width, secondRect.x + secondRect.width)
@@ -4337,6 +5012,85 @@ function App() {
     return Math.hypot(firstCenter.x - secondCenter.x, firstCenter.y - secondCenter.y)
   }
 
+  function cleanOcrSourceForTranslation(text) {
+    return String(text || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/\baccompusn\b/gi, 'accomplish')
+  }
+
+  function splitOcrTextForTranslation(text, maxLength = 1200) {
+    const normalizedText = String(text || '').replace(/\s+/g, ' ').trim()
+    const sentences = normalizedText.match(/[^.!?。！？]+[.!?。！？]?/g) || [normalizedText]
+    const chunks = []
+    let currentChunk = ''
+
+    sentences.forEach((sentence) => {
+      const nextChunk = `${currentChunk}${currentChunk ? ' ' : ''}${sentence.trim()}`.trim()
+
+      if (currentChunk && nextChunk.length > maxLength) {
+        chunks.push(currentChunk)
+        currentChunk = sentence.trim()
+        return
+      }
+
+      currentChunk = nextChunk
+    })
+
+    if (currentChunk) chunks.push(currentChunk)
+
+    return chunks.length ? chunks : [normalizedText]
+  }
+
+  function protectOcrFormulaTokens(text) {
+    const tokens = []
+    const protectedText = String(text || '').replace(
+      /\b(?:DNA|RNA|ATP|ADP|AMP|NADH|NADPH|FADH2|FAD|CO[₂2]|NH[₃3]|H[₂2]O|HPO[₄4](?:[²2]?[⁻-])?)\b/gi,
+      (match) => {
+        const index = tokens.length
+        tokens.push(match)
+        return `@@OCRF${index}@@`
+      },
+    )
+
+    return { protectedText, tokens }
+  }
+
+  function restoreOcrFormulaTokens(text, tokens) {
+    return String(text || '').replace(/@@\s*OCRF\s*(\d+)\s*@@/gi, (_match, index) => tokens[Number(index)] || _match)
+  }
+
+  async function translateOcrBlockText(text) {
+    const protectedResult = protectOcrFormulaTokens(text)
+    const chunks = splitOcrTextForTranslation(protectedResult.protectedText)
+    const translations = []
+
+    for (const chunk of chunks) {
+      try {
+        const translation = cleanResultText(await requestTranslation(chunk))
+        translations.push(isUselessTranslationResult(translation) ? chunk : translation)
+      } catch (error) {
+        console.warn('OCR 模块分段翻译失败，使用原文兜底', {
+          textLength: chunk.length,
+          error: error.message,
+        })
+        translations.push(chunk)
+      }
+    }
+
+    return restoreOcrFormulaTokens(translations.join('\n').trim(), protectedResult.tokens)
+  }
+
+  function getOcrTranslationFallback(block, sourceText, reason) {
+    return {
+      ...block,
+      sourceText,
+      translation: sourceText || block.text,
+      translationFallback: true,
+      translationError: reason,
+    }
+  }
+
   function clampPlacementRect(candidate, width, height, imageWidth, imageHeight, padding) {
     const safeWidth = Math.min(width, Math.max(40, imageWidth - padding * 2))
     const safeHeight = Math.min(height, Math.max(24, imageHeight - padding * 2))
@@ -4358,9 +5112,9 @@ function App() {
     const centerX = block.x + block.width / 2 - labelWidth / 2
     const candidates = [
       { type: 'right', priority: 0, x: block.x + block.width + gap, y: centerY },
-      { type: 'bottom', priority: 1, x: block.x, y: block.y + block.height + gap },
-      { type: 'top', priority: 2, x: block.x, y: block.y - labelHeight - gap },
-      { type: 'left', priority: 3, x: block.x - labelWidth - gap, y: centerY },
+      { type: 'left', priority: 1, x: block.x - labelWidth - gap, y: centerY },
+      { type: 'bottom', priority: 2, x: block.x, y: block.y + block.height + gap },
+      { type: 'top', priority: 3, x: block.x, y: block.y - labelHeight - gap },
       { type: 'right-top', priority: 4, x: block.x + block.width + gap, y: block.y - labelHeight - gap },
       { type: 'right-bottom', priority: 4, x: block.x + block.width + gap, y: block.y + block.height + gap },
       { type: 'bottom-right', priority: 5, x: block.x + nudge, y: block.y + block.height + gap },
@@ -4447,18 +5201,28 @@ function App() {
     const rectArea = rect.width * rect.height
     const sourceOverlap = sourceRects.reduce((sum, sourceRect) => sum + getRectOverlapArea(rect, sourceRect), 0)
     const placedOverlap = placedRects.reduce((sum, placedRect) => sum + getRectOverlapArea(rect, placedRect), 0)
-    const overlapRatio = (sourceOverlap + placedOverlap * 2.5) / Math.max(rectArea, 1)
+    const sourceOverlapRatio = sourceOverlap / Math.max(rectArea, 1)
+    const placedOverlapRatio = placedOverlap / Math.max(rectArea, 1)
     const distance = getRectDistance(rect, block)
     const maxUsefulDistance = Math.max(80, Math.min(imageWidth, imageHeight) * 0.42)
     const distanceScore = clampNumber(1 - distance / maxUsefulDistance, 0, 1)
     const blankScore = getImageBlankScore(context, rect, imageWidth, imageHeight)
     const isRightSide = rect.x >= block.x + block.width * 0.72
+    const isLeftSide = rect.x + rect.width <= block.x + block.width * 0.28
     const rightSpace =
       imageWidth - (block.x + block.width) > rect.width * 1.05 && Math.abs(getRectCenter(rect).y - getRectCenter(block).y) < block.height * 3
-    const rightBonus = isRightSide && rightSpace ? 0.22 : 0
-    const candidatePriorityPenalty = rect.priority * 0.015
+    const leftSpace = block.x > rect.width * 1.05 && Math.abs(getRectCenter(rect).y - getRectCenter(block).y) < block.height * 3
+    const sideBonus = isRightSide && rightSpace ? 0.24 : isLeftSide && leftSpace ? 0.16 : 0
+    const candidatePriorityPenalty = rect.priority * 0.035
 
-    return blankScore * 0.48 + distanceScore * 0.28 + rightBonus - overlapRatio * 1.4 - candidatePriorityPenalty
+    return (
+      blankScore * 0.42 +
+      distanceScore * 0.34 +
+      sideBonus -
+      sourceOverlapRatio * 4.8 -
+      placedOverlapRatio * 7.2 -
+      candidatePriorityPenalty
+    )
   }
 
   function drawRoundedRect(context, x, y, width, height, radius) {
@@ -4525,66 +5289,96 @@ function App() {
     return scoredCandidates[0].rect
   }
 
-  function chooseCompareLabelRect(block, labelWidth, labelHeight, imageWidth, imageHeight, placedRects) {
-    const padding = 6
-    const gap = Math.max(3, block.height * 0.18)
-    const safeWidth = Math.min(labelWidth, Math.max(50, imageWidth - padding * 2))
-    const safeHeight = Math.min(labelHeight, Math.max(24, imageHeight - padding * 2))
-    const candidates = [
-      { type: 'same', priority: 0, x: block.x, y: block.y },
-      { type: 'right', priority: 1, x: block.x + gap, y: block.y },
-      { type: 'bottom', priority: 2, x: block.x, y: block.y + gap },
-      { type: 'right-bottom', priority: 3, x: block.x + gap, y: block.y + gap },
-      { type: 'right-near', priority: 4, x: block.x + block.width + gap, y: block.y },
-      { type: 'bottom-near', priority: 5, x: block.x, y: block.y + block.height + gap },
-      { type: 'top-near', priority: 6, x: block.x, y: block.y - safeHeight - gap },
-      { type: 'left-near', priority: 7, x: block.x - safeWidth - gap, y: block.y },
-    ]
-    const scoredCandidates = candidates.map((candidate) => {
-      const rect = clampPlacementRect(candidate, safeWidth, safeHeight, imageWidth, imageHeight, padding)
-      const placedOverlap = placedRects.reduce((sum, placedRect) => sum + getRectOverlapArea(rect, placedRect), 0)
-      const overlapRatio = placedOverlap / Math.max(rect.width * rect.height, 1)
-      const distance = getRectDistance(rect, block)
-      const distancePenalty = distance / Math.max(24, block.height * 4)
+  function getDiagramSourceRects(blocks) {
+    return blocks.flatMap((block) => getCompareSourceBlocks(block)).map((block) => ({
+      x: block.x,
+      y: block.y,
+      width: block.width,
+      height: block.height,
+    }))
+  }
 
-      return {
-        rect,
-        score: candidate.priority + overlapRatio * 80 + distancePenalty,
+  function getDiagramLabelPlan(context, block, imageWidth, imageHeight) {
+    const sourceLines = getCompareSourceBlocks(block)
+    const sourceLineHeights = sourceLines.map((line) => line.height).filter((height) => height > 0)
+    const baseLineHeight = median(sourceLineHeights) || block.height || 14
+    const maxFontSize = clampNumber(Math.floor(baseLineHeight * 0.86), 12, 20)
+    const minFontSize = 10
+    const maxLabelWidth = Math.min(
+      imageWidth - 16,
+      Math.max(96, Math.min(imageWidth * 0.46, Math.max(block.width * 1.75, 130))),
+    )
+    const horizontalPadding = 8
+    const verticalPadding = 5
+    let fallback = null
+
+    for (let fontSize = maxFontSize; fontSize >= minFontSize; fontSize -= 1) {
+      context.font = getCompareCanvasFont(fontSize)
+      const lineHeight = fontSize * 1.28
+      const lines = wrapCanvasText(context, block.translation, maxLabelWidth - horizontalPadding * 2)
+      const textWidth = Math.min(
+        maxLabelWidth,
+        Math.max(...lines.map((line) => context.measureText(line).width), 24) + horizontalPadding * 2,
+      )
+      const textHeight = lines.length * lineHeight + verticalPadding * 2
+
+      fallback = {
+        lines,
+        fontSize,
+        lineHeight,
+        width: textWidth,
+        height: textHeight,
+        horizontalPadding,
+        verticalPadding,
       }
-    })
 
-    scoredCandidates.sort((firstCandidate, secondCandidate) => firstCandidate.score - secondCandidate.score)
-    return scoredCandidates[0].rect
+      if (textHeight <= imageHeight - 16) return fallback
+    }
+
+    return fallback
   }
 
   async function translateDiagramBlocks(blocks) {
     const translatedBlocks = []
+    const translatableBlocks = blocks.filter((item) => shouldTranslateOcrBlock(item)).slice(0, 120)
 
-    for (const block of blocks.filter((item) => shouldTranslateOcrBlock(item)).slice(0, 40)) {
+    console.log('OCR 模块翻译统计', {
+      inputCount: blocks.length,
+      translatableCount: translatableBlocks.length,
+      skippedCount: Math.max(0, blocks.length - translatableBlocks.length),
+      moduleTextLengths: translatableBlocks.slice(0, 20).map((block) => block.text.length),
+    })
+
+    for (const block of translatableBlocks) {
+      const sourceText = cleanOcrSourceForTranslation(block.text)
+
       try {
-        const translation = cleanResultText(await requestTranslation(block.text))
+        const translation = cleanResultText(await translateOcrBlockText(sourceText))
 
         if (isUselessTranslationResult(translation)) {
-          console.warn('OCR 图解模式跳过无效译文', { text: block.text, translation })
+          console.warn('OCR 图解/对照模式使用原文兜底', { text: block.text, translation })
+          translatedBlocks.push(getOcrTranslationFallback(block, sourceText, 'empty-translation'))
           continue
         }
 
         translatedBlocks.push({
           ...block,
+          sourceText,
           translation,
         })
       } catch (error) {
-        console.warn('OCR 图解模式单块翻译失败', {
+        console.warn('OCR 图解/对照模式单块翻译失败，使用原文兜底', {
           text: block.text,
           error: error.message,
         })
+        translatedBlocks.push(getOcrTranslationFallback(block, sourceText, error.message))
       }
     }
 
     return translatedBlocks
   }
 
-  async function createDiagramResultImage(imageUrl, imageSize, translatedBlocks) {
+  async function createDiagramResultImage(imageUrl, imageSize, translatedBlocks, sourceBlocks = translatedBlocks) {
     const sourceImage = await loadImage(imageUrl)
     const canvas = document.createElement('canvas')
     const context = canvas.getContext('2d')
@@ -4593,34 +5387,16 @@ function App() {
     canvas.width = imageSize.width || sourceImage.naturalWidth
     canvas.height = imageSize.height || sourceImage.naturalHeight
     context.drawImage(sourceImage, 0, 0, canvas.width, canvas.height)
-    const sourceRects = translatedBlocks.map((block) => ({
-      x: block.x,
-      y: block.y,
-      width: block.width,
-      height: block.height,
-    }))
+    const sourceRects = getDiagramSourceRects(sourceBlocks)
 
     translatedBlocks.forEach((block) => {
-      const fontSize = clampNumber(Math.floor(block.height * 0.72), 11, 18)
-      const maxLabelWidth = Math.min(
-        canvas.width - 16,
-        Math.max(72, Math.min(canvas.width * 0.32, block.width * 1.45)),
-      )
-      const horizontalPadding = 8
-      const verticalPadding = 5
+      const plan = getDiagramLabelPlan(context, block, canvas.width, canvas.height)
+      if (!plan?.lines?.length) return
 
-      context.font = `${fontSize}px "Microsoft YaHei", Arial, sans-serif`
-      const lines = wrapCanvasText(context, block.translation, maxLabelWidth - horizontalPadding * 2).slice(0, 4)
-      const lineHeight = fontSize * 1.35
-      const textWidth = Math.min(
-        maxLabelWidth,
-        Math.max(...lines.map((line) => context.measureText(line).width)) + horizontalPadding * 2,
-      )
-      const textHeight = lines.length * lineHeight + verticalPadding * 2
       const rect = chooseDiagramLabelRect(
         block,
-        textWidth,
-        textHeight,
+        plan.width,
+        plan.height,
         canvas.width,
         canvas.height,
         placedRects,
@@ -4638,6 +5414,8 @@ function App() {
           height: block.height,
         },
         draw: rect,
+        fontSize: plan.fontSize,
+        lines: plan.lines.length,
       })
 
       const overlayStyle = getOverlayStyleForMode('diagram')
@@ -4654,8 +5432,14 @@ function App() {
       context.strokeStyle = overlayStyle.border
       context.stroke()
       context.fillStyle = overlayStyle.text
-      lines.forEach((line, index) => {
-        context.fillText(line, rect.x + horizontalPadding, rect.y + verticalPadding + fontSize + index * lineHeight)
+      context.textBaseline = 'top'
+      context.font = getCompareCanvasFont(plan.fontSize)
+      plan.lines.forEach((line, index) => {
+        context.fillText(
+          line,
+          rect.x + plan.horizontalPadding,
+          rect.y + plan.verticalPadding + index * plan.lineHeight,
+        )
       })
       context.restore()
     })
@@ -4667,47 +5451,27 @@ function App() {
     const sourceImage = await loadImage(imageUrl)
     const canvas = document.createElement('canvas')
     const context = canvas.getContext('2d')
-    const placedRects = []
 
     canvas.width = imageSize.width || sourceImage.naturalWidth
     canvas.height = imageSize.height || sourceImage.naturalHeight
     context.drawImage(sourceImage, 0, 0, canvas.width, canvas.height)
 
     translatedBlocks.forEach((block) => {
-      const fontSize = clampNumber(Math.floor(block.height * 0.96), 13, 26)
-      const maxLabelWidth = Math.min(
-        canvas.width - 12,
-        Math.max(block.width * 1.2, Math.min(canvas.width * 0.46, 120)),
-      )
-      const horizontalPadding = 7
-      const verticalPadding = 4
+      const plan = getCompareReplacementPlan(context, block, canvas.width, canvas.height)
+      if (!plan.lines.length) return
 
-      context.font = `${fontSize}px "Microsoft YaHei", Arial, sans-serif`
-      const lines = wrapCanvasText(context, block.translation, maxLabelWidth - horizontalPadding * 2).slice(0, 4)
-      const lineHeight = fontSize * 1.28
-      const textWidth = Math.min(
-        maxLabelWidth,
-        Math.max(...lines.map((line) => context.measureText(line).width)) + horizontalPadding * 2,
-      )
-      const textHeight = lines.length * lineHeight + verticalPadding * 2
-      const rect = chooseCompareLabelRect(block, textWidth, textHeight, canvas.width, canvas.height, placedRects)
-      const overlayStyle = getOverlayStyleForMode('compare')
-
-      placedRects.push(rect)
       context.save()
-      context.shadowColor = overlayStyle.shadow
-      context.shadowBlur = overlayStyle.shadowBlur
-      context.shadowOffsetY = overlayStyle.shadowOffsetY
-      drawRoundedRect(context, rect.x, rect.y, rect.width, rect.height, 4)
-      context.fillStyle = overlayStyle.background
-      context.fill()
-      context.shadowColor = 'transparent'
-      context.lineWidth = 1
-      context.strokeStyle = overlayStyle.border
-      context.stroke()
-      context.fillStyle = overlayStyle.text
-      lines.forEach((line, index) => {
-        context.fillText(line, rect.x + horizontalPadding, rect.y + verticalPadding + fontSize + index * lineHeight)
+      // 对照模式：每行单独白底，保留轻微透明感（仅影响对照模式，不影响图解模式）。
+      context.fillStyle = 'rgba(255, 255, 255, 0.9)'
+      plan.backgroundRects.forEach((rect) => {
+        context.fillRect(rect.x, rect.y, rect.width, rect.height)
+      })
+
+      context.textBaseline = 'top'
+      context.fillStyle = '#111827'
+      plan.lines.forEach((line) => {
+        context.font = getCompareCanvasFont(line.fontSize || plan.fontSize)
+        context.fillText(line.text, line.x, line.y)
       })
       context.restore()
     })
@@ -4725,18 +5489,23 @@ function App() {
     let worker = null
 
     try {
+      clearOcrCaptureUi()
       const pageBox = getCurrentPageBox()
       const ocrSelectionRect = {
         rect: normalizeViewerRectToPage(rect, pageBox),
         pageWidth: pageBox?.width || 1,
         pageHeight: pageBox?.height || 1,
       }
-      const croppedImage = cropOcrImage(rect)
+      const shouldPadCapture = mode === 'diagram' || mode === 'compare'
+      const croppedImage = cropOcrImage(rect, {
+        padding: shouldPadCapture ? clampNumber(Math.max(rect.width, rect.height) * 0.05, 14, 40) : 0,
+      })
       const { image } = croppedImage
+      const recognitionImage = croppedImage.ocrImage || image
       setOcrResult({
         status: mode === 'diagram' ? 'diagram-recognizing' : mode === 'compare' ? 'compare-recognizing' : 'recognizing',
         mode,
-        image,
+        image: recognitionImage,
         text: '',
         translation: '',
         error: '',
@@ -4748,14 +5517,14 @@ function App() {
         langPath: `${TESSERACT_ASSET_BASE}/lang`,
         cacheMethod: 'none',
       })
-      const { data } = await worker.recognize(image, {}, { text: true, blocks: true })
+      const { data } = await worker.recognize(recognitionImage, {}, { text: true, blocks: true })
       const recognizedText = cleanOcrText(data.text || '')
 
       if (!recognizedText) {
         setOcrResult({
           status: 'error',
           mode,
-          image,
+          image: recognitionImage,
           text: '',
           translation: '',
           error: '未识别到文字',
@@ -4766,15 +5535,26 @@ function App() {
       setOcrResult({
         status: mode === 'diagram' ? 'diagram-translating' : mode === 'compare' ? 'compare-translating' : 'translating',
         mode,
-        image,
+        image: recognitionImage,
         text: recognizedText,
         translation: '',
         error: '',
       })
 
       if (mode === 'diagram' || mode === 'compare') {
-        const textBlocks = getOcrTextBlocks(data, croppedImage)
+        const textBlocks = getOcrTextBlocks(data, croppedImage, {
+          strict: mode === 'compare' || mode === 'diagram',
+          diagram: mode === 'diagram',
+        })
         const validTextBlocks = textBlocks.filter((block) => shouldTranslateOcrBlock(block))
+
+        console.log('OCR 模块流程统计', {
+          mode,
+          rawLineCount: collectOcrLines(data).length,
+          mergedModuleCount: textBlocks.length,
+          validModuleCount: validTextBlocks.length,
+          moduleTextLengths: validTextBlocks.slice(0, 20).map((block) => block.text.length),
+        })
 
         if (!validTextBlocks.length) {
           throw new Error('未识别到可翻译的英文文本')
@@ -4787,7 +5567,7 @@ function App() {
         }
 
         if (mode === 'compare') {
-          const translatedImage = await createCompareResultImage(image, croppedImage, translatedBlocks)
+          const translatedImage = await createCompareResultImage(recognitionImage, croppedImage, translatedBlocks)
           const layout = getCompareLayoutByAspectRatio(croppedImage.width, croppedImage.height)
           const nextCompareResult = {
             originalImage: image,
@@ -4812,12 +5592,12 @@ function App() {
           return
         }
 
-        const resultImage = await createDiagramResultImage(image, croppedImage, translatedBlocks)
+        const resultImage = await createDiagramResultImage(recognitionImage, croppedImage, translatedBlocks, textBlocks)
 
         setSuccessfulRightPanelResult({
           type: 'ocr-diagram',
           title: '图解模式结果',
-          screenshotDataUrl: image,
+          screenshotDataUrl: recognitionImage,
           diagramResultImage: resultImage,
           ocrSelectionRect,
           timestamp: Date.now(),
@@ -4839,7 +5619,7 @@ function App() {
         setOcrResult({
           status: 'error',
           mode,
-          image,
+          image: recognitionImage,
           text: recognizedText,
           translation: '',
           error: '未识别到可翻译的英文文本',
@@ -4853,7 +5633,7 @@ function App() {
         setOcrResult({
           status: 'error',
           mode,
-          image,
+          image: recognitionImage,
           text: recognizedText,
           translation: '',
           error: '未识别到可翻译的英文文本',
@@ -4864,7 +5644,7 @@ function App() {
       setSuccessfulRightPanelResult({
         type: 'ocr-text',
         title: '文本模式结果',
-        screenshotDataUrl: image,
+        screenshotDataUrl: recognitionImage,
         ocrText: recognizedText,
         translation: nextTranslation,
         ocrSelectionRect,
@@ -5034,6 +5814,7 @@ function App() {
       setCompareTranslatedZoom(1)
       setImagePreview(null)
       setImagePreviewZoom(1)
+      setIsImagePreviewFullscreen(false)
       lastTranslatedTextRef.current = ''
       setSelectedText(text)
     }
@@ -5296,11 +6077,12 @@ function App() {
     setIsCompareModalFullscreen(false)
   }
 
-  function openImagePreviewModal(image, title = '框选区域截图') {
+  function openImagePreviewModal(image, title = '框选区域截图', options = {}) {
     if (!image) return
 
     setImagePreview({ image, title })
     setImagePreviewZoom(1)
+    setIsImagePreviewFullscreen(Boolean(options.fullscreen))
   }
 
   async function retranslateOcrText() {
@@ -5385,6 +6167,10 @@ function App() {
     setIsCompareModalFullscreen((isFullscreen) => !isFullscreen)
   }
 
+  function toggleImagePreviewFullscreen() {
+    setIsImagePreviewFullscreen((isFullscreen) => !isFullscreen)
+  }
+
   function closeDiagramModal() {
     setIsDiagramModalFullscreen(false)
     setDiagramResult(null)
@@ -5399,6 +6185,11 @@ function App() {
     event.preventDefault()
     event.stopPropagation()
     const delta = event.deltaY < 0 ? 0.12 : -0.12
+
+    adjustCompareZoom(side, delta)
+  }
+
+  function adjustCompareZoom(side, delta) {
     const updateZoom = (currentZoom) => clampNumber(Number((currentZoom + delta).toFixed(2)), 0.5, 4)
 
     if (side === 'original') {
@@ -5406,6 +6197,25 @@ function App() {
     } else {
       setCompareTranslatedZoom(updateZoom)
     }
+  }
+
+  function resetCompareZoom(side) {
+    if (side === 'original') {
+      setCompareOriginalZoom(1)
+    } else {
+      setCompareTranslatedZoom(1)
+    }
+  }
+
+  function openCompareImagePreview(side) {
+    if (!compareResult) return
+
+    if (side === 'original') {
+      openImagePreviewModal(compareResult.originalImage, 'OCR 对照模式原图', { fullscreen: true })
+      return
+    }
+
+    openImagePreviewModal(compareResult.translatedImage, 'OCR 对照模式译文覆盖图', { fullscreen: true })
   }
 
   function handleImagePreviewWheel(event) {
@@ -7196,9 +8006,18 @@ function App() {
       {noteDialog ? (
         <div className="note-dialog-overlay" role="presentation">
           <section
+            key={noteDialog.dialogId}
             className="note-dialog"
             ref={noteDialogRef}
             aria-label={noteDialog.mode === 'edit' ? '编辑笔记' : '添加笔记'}
+            onPointerDown={(event) => event.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
+            onMouseUp={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+            onBeforeInput={(event) => event.stopPropagation()}
+            onInput={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+            onKeyUp={(event) => event.stopPropagation()}
           >
             <div className="diagram-dialog-header">
               <h2>{noteDialog.mode === 'edit' ? '编辑笔记' : noteDialog.note.type === 'page-note' ? `为第 ${noteDialog.note.pageNumber} 页添加笔记` : '添加到笔记'}</h2>
@@ -7212,9 +8031,7 @@ function App() {
               <input
                 ref={noteTitleInputRef}
                 type="text"
-                value={noteDraft.title}
-                onChange={(event) => setNoteDraft((draft) => ({ ...draft, title: event.target.value }))}
-                onInput={(event) => setNoteDraft((draft) => ({ ...draft, title: event.currentTarget.value }))}
+                defaultValue={noteDialog.draft?.title ?? noteDraft.title}
                 onFocus={() => setNotesStatus('')}
                 placeholder="输入笔记标题"
               />
@@ -7224,9 +8041,7 @@ function App() {
               <span>笔记内容</span>
               <textarea
                 ref={noteTextareaRef}
-                value={noteDraft.noteText}
-                onChange={(event) => setNoteDraft((draft) => ({ ...draft, noteText: event.target.value }))}
-                onInput={(event) => setNoteDraft((draft) => ({ ...draft, noteText: event.currentTarget.value }))}
+                defaultValue={noteDialog.draft?.noteText ?? noteDraft.noteText}
                 onFocus={() => setNotesStatus('')}
                 rows={6}
                 placeholder="输入笔记内容"
@@ -7255,15 +8070,27 @@ function App() {
       ) : null}
 
       {imagePreview ? (
-        <div className="diagram-overlay" role="presentation">
-          <section className="diagram-dialog" aria-label={imagePreview.title}>
+        <div className="diagram-overlay image-preview-overlay" role="presentation">
+          <section
+            className={isImagePreviewFullscreen ? 'diagram-dialog fullscreen' : 'diagram-dialog'}
+            aria-label={imagePreview.title}
+          >
             <div className="diagram-dialog-header">
               <h2>{imagePreview.title}</h2>
               <div className="diagram-dialog-actions">
                 <button type="button" onClick={() => setImagePreviewZoom(1)}>
                   重置缩放
                 </button>
-                <button type="button" onClick={() => setImagePreview(null)}>
+                <button type="button" onClick={toggleImagePreviewFullscreen}>
+                  {isImagePreviewFullscreen ? '退出全屏' : '全屏'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setImagePreview(null)
+                    setIsImagePreviewFullscreen(false)
+                  }}
+                >
                   关闭
                 </button>
               </div>
@@ -7346,7 +8173,23 @@ function App() {
             </div>
             <div className={`compare-stage ${compareResult.layout === 'vertical' ? 'vertical' : 'horizontal'}`}>
               <section className="compare-pane">
-                <h3>原图</h3>
+                <div className="compare-pane-header">
+                  <h3>原图</h3>
+                  <div className="compare-pane-actions">
+                    <button type="button" onClick={() => adjustCompareZoom('original', -0.12)} aria-label="缩小原图">
+                      -
+                    </button>
+                    <button type="button" onClick={() => adjustCompareZoom('original', 0.12)} aria-label="放大原图">
+                      +
+                    </button>
+                    <button type="button" onClick={() => resetCompareZoom('original')}>
+                      重置
+                    </button>
+                    <button type="button" onClick={() => openCompareImagePreview('original')}>
+                      全屏
+                    </button>
+                  </div>
+                </div>
                 <div className="compare-image-stage" onWheel={(event) => handleCompareWheel(event, 'original')}>
                   <img
                     src={compareResult.originalImage}
@@ -7360,7 +8203,23 @@ function App() {
                 </div>
               </section>
               <section className="compare-pane">
-                <h3>译文覆盖图</h3>
+                <div className="compare-pane-header">
+                  <h3>译文覆盖图</h3>
+                  <div className="compare-pane-actions">
+                    <button type="button" onClick={() => adjustCompareZoom('translated', -0.12)} aria-label="缩小译文图">
+                      -
+                    </button>
+                    <button type="button" onClick={() => adjustCompareZoom('translated', 0.12)} aria-label="放大译文图">
+                      +
+                    </button>
+                    <button type="button" onClick={() => resetCompareZoom('translated')}>
+                      重置
+                    </button>
+                    <button type="button" onClick={() => openCompareImagePreview('translated')}>
+                      全屏
+                    </button>
+                  </div>
+                </div>
                 <div className="compare-image-stage" onWheel={(event) => handleCompareWheel(event, 'translated')}>
                   <img
                     src={compareResult.translatedImage}

@@ -2236,6 +2236,10 @@ body.resizing-panel {
   box-sizing: border-box;
 }
 
+.image-preview-overlay {
+  z-index: 70;
+}
+
 .diagram-dialog {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -2354,11 +2358,43 @@ body.resizing-panel {
   min-height: 0;
 }
 
+.compare-pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
 .compare-pane h3 {
   margin: 0;
   color: #344054;
   font-size: 15px;
   line-height: 1.4;
+}
+
+.compare-pane-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.compare-pane-actions button {
+  border: 1px solid #cbd5e1;
+  border-radius: 5px;
+  background: #fff;
+  color: #344054;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 8px;
+}
+
+.compare-pane-actions button:hover {
+  background: #eef4ff;
+  border-color: #9db8e4;
 }
 
 .compare-image-stage {
