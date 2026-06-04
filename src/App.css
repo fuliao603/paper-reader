@@ -6,31 +6,66 @@ body,
 }
 
 :root {
-  --app-bg: #eef2f6;
+  /* Base canvas — a cool, luminous slate rather than flat grey. */
+  --app-bg: #e6ecf4;
+  --app-bg-tint: #f1f6fc;
+
+  /* Surfaces */
   --surface: #ffffff;
   --surface-raised: #ffffff;
-  --surface-soft: #f7f9fc;
-  --surface-pressed: #e9eef5;
-  --border: #d8e0eb;
-  --border-subtle: #e8edf4;
-  --border-strong: #bac7d8;
-  --text: #182230;
-  --text-muted: #667085;
-  --text-soft: #98a2b3;
-  --primary: #1f4f82;
-  --primary-hover: #193f68;
-  --primary-strong: #174a8b;
-  --primary-soft: #e7f0fb;
-  --primary-soft-strong: #d2e4f8;
-  --success: #157347;
-  --danger: #b42318;
-  --focus: rgba(31, 79, 130, 0.24);
-  --shadow-panel: 0 12px 32px rgba(24, 34, 48, 0.08);
-  --shadow-floating: 0 22px 52px rgba(24, 34, 48, 0.18);
-  --radius-panel: 8px;
-  --radius-control: 6px;
+  --surface-soft: #f5f8fc;
+  --surface-2: #eef3f9;
+  --surface-pressed: #e3eaf3;
+
+  /* Borders, layered light to strong */
+  --border: #dde5f0;
+  --border-subtle: #e9eef6;
+  --border-strong: #c1cedd;
+
+  /* Text */
+  --text: #131c2b;
+  --text-muted: #586b82;
+  --text-soft: #93a1b5;
+
+  /* Brand — luminous deep ink-blue (brighter than the old navy so it pops),
+     with a teal accent reserved for small highlights. */
+  --primary: #1d63c9;
+  --primary-hover: #1851a8;
+  --primary-strong: #16498f;
+  --primary-soft: #e7f0fd;
+  --primary-soft-strong: #cbe0fb;
+  --primary-grad: linear-gradient(180deg, #2c76dd 0%, #1656b2 100%);
+  --primary-grad-hover: linear-gradient(180deg, #2569ce 0%, #134a9e 100%);
+  --accent: #0ea5b7;
+
+  --success: #0f8a52;
+  --danger: #d22f25;
+  --focus: rgba(29, 99, 201, 0.32);
+
+  /* Elevation — soft, layered, directional. */
+  --shadow-xs: 0 1px 2px rgba(18, 32, 56, 0.06);
+  --shadow-sm:
+    0 1px 2px rgba(18, 32, 56, 0.05),
+    0 3px 8px -2px rgba(18, 32, 56, 0.08);
+  --shadow-panel:
+    0 1px 2px rgba(18, 32, 56, 0.05),
+    0 12px 30px -14px rgba(18, 32, 56, 0.24);
+  --shadow-raised:
+    0 2px 6px rgba(18, 32, 56, 0.06),
+    0 20px 44px -18px rgba(18, 32, 56, 0.32);
+  --shadow-floating:
+    0 8px 18px -10px rgba(15, 23, 42, 0.28),
+    0 34px 70px -24px rgba(15, 23, 42, 0.46);
+  --shadow-primary: 0 10px 22px -8px rgba(29, 99, 201, 0.5);
+
+  --radius-panel: 12px;
+  --radius-control: 9px;
+  --radius-pill: 999px;
   --control-height: 36px;
-  --transition-fast: 0.16s ease;
+
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --transition-fast: 0.16s cubic-bezier(0.22, 1, 0.36, 1);
+  --transition-med: 0.28s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 body {
@@ -59,8 +94,13 @@ body {
   min-height: 0;
   overflow: hidden;
   padding: 16px;
+  /* Restrained ambient depth: a soft top sheen plus two very faint, large
+     radial tints so the canvas reads as lit rather than flat. Kept subtle on
+     purpose — this is a desktop tool, not a decorative hero. */
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0) 38%),
+    radial-gradient(1200px 520px at 12% -8%, rgba(44, 118, 221, 0.07), transparent 60%),
+    radial-gradient(1000px 600px at 108% 8%, rgba(14, 165, 183, 0.06), transparent 55%),
+    linear-gradient(180deg, var(--app-bg-tint), rgba(241, 246, 252, 0) 36%),
     var(--app-bg);
   box-sizing: border-box;
 }
@@ -71,28 +111,98 @@ body {
   flex: 0 0 176px;
   width: 176px;
   min-height: 0;
-  padding: 14px;
-  background: var(--surface);
+  padding: 14px 12px;
+  background: linear-gradient(180deg, #ffffff, #fafcff);
   border: 1px solid var(--border);
   border-radius: var(--radius-panel);
   box-shadow: var(--shadow-panel);
   box-sizing: border-box;
   transition:
-    flex-basis 0.16s ease,
-    width 0.16s ease,
-    padding 0.16s ease;
+    flex-basis var(--transition-med),
+    width var(--transition-med),
+    padding var(--transition-med);
 }
 
 .sidebar-collapsed .module-sidebar {
   flex-basis: 66px;
   width: 66px;
-  padding: 12px 9px;
+  padding: 14px 9px;
+}
+
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 34px;
+  margin-bottom: 8px;
+}
+
+.sidebar-collapsed .sidebar-head {
+  flex-direction: column-reverse;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.sidebar-collapsed .sidebar-brand {
+  justify-content: center;
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.sidebar-brand-mark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: var(--primary-grad);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  box-shadow: var(--shadow-primary);
+}
+
+.sidebar-brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.05;
+  min-width: 0;
+}
+
+.sidebar-brand-text strong {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.sidebar-brand-text em {
+  color: var(--primary);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.sidebar-collapsed .sidebar-brand-text {
+  display: none;
 }
 
 .module-sidebar-toggle {
   display: grid;
   place-items: center;
-  align-self: flex-end;
+  flex: 0 0 auto;
   width: 30px;
   height: 30px;
   border: 1px solid var(--border);
@@ -120,38 +230,46 @@ body {
 .module-nav-list {
   display: flex;
   flex-direction: column;
-  gap: 28px;
-  margin-top: 46px;
+  gap: 12px;
+  margin-top: 14px;
   min-width: 0;
 }
 
 .module-nav-button {
+  position: relative;
   display: grid;
   grid-template-columns: 24px minmax(0, 1fr);
   align-items: center;
   gap: 12px;
   width: 100%;
-  min-height: 54px;
+  min-height: 50px;
   border: 1px solid transparent;
-  border-radius: var(--radius-panel);
+  border-radius: 11px;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
   font: inherit;
   font-size: 15px;
-  padding: 12px 12px;
+  padding: 11px 12px;
   text-align: left;
+  animation: navIn 0.4s var(--ease-out) backwards;
   transition:
     background var(--transition-fast),
     border-color var(--transition-fast),
     color var(--transition-fast),
+    transform var(--transition-fast),
     box-shadow var(--transition-fast);
 }
+
+.module-nav-button:nth-child(1) { animation-delay: 0.04s; }
+.module-nav-button:nth-child(2) { animation-delay: 0.1s; }
+.module-nav-button:nth-child(3) { animation-delay: 0.16s; }
+.module-nav-button:nth-child(4) { animation-delay: 0.22s; }
 
 .sidebar-collapsed .module-nav-button {
   grid-template-columns: 1fr;
   justify-items: center;
-  min-height: 50px;
+  min-height: 48px;
   padding: 10px 6px;
 }
 
@@ -159,14 +277,42 @@ body {
   border-color: var(--border);
   background: var(--surface-soft);
   color: var(--text);
+  transform: translateX(2px);
+}
+
+.sidebar-collapsed .module-nav-button:hover {
+  transform: translateY(-1px);
 }
 
 .module-nav-button.active {
   border-color: var(--primary-soft-strong);
-  background: linear-gradient(180deg, #f4f8fd, var(--primary-soft));
+  background: linear-gradient(180deg, #f3f8fe, var(--primary-soft));
   color: var(--primary-strong);
   font-weight: 600;
-  box-shadow: inset 3px 0 0 var(--primary);
+  box-shadow:
+    0 6px 16px -8px rgba(29, 99, 201, 0.4),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.6);
+}
+
+/* Accent rail on the active item. */
+.module-nav-button.active::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: 50%;
+  width: 3px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--primary-grad);
+  transform: translateY(-50%);
+}
+
+.sidebar-collapsed .module-nav-button.active::before {
+  height: 18px;
+}
+
+.module-nav-button.active .module-nav-icon {
+  color: var(--primary);
 }
 
 .module-nav-icon {
@@ -175,6 +321,11 @@ body {
   color: inherit;
   font-size: 17px;
   line-height: 1;
+  transition: transform var(--transition-fast);
+}
+
+.module-nav-button:hover .module-nav-icon {
+  transform: scale(1.08);
 }
 
 .module-nav-label {
@@ -203,6 +354,7 @@ body {
 
 .module-page.active {
   display: grid;
+  animation: moduleIn 0.34s var(--ease-out) both;
 }
 
 .reader-module {
@@ -381,13 +533,15 @@ body {
   transition:
     background var(--transition-fast),
     border-color var(--transition-fast),
+    transform var(--transition-fast),
     box-shadow var(--transition-fast);
 }
 
 .library-document-row:hover {
   border-color: var(--primary-soft-strong);
   background: #fbfdff;
-  box-shadow: 0 8px 20px rgba(24, 34, 48, 0.06);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-sm);
 }
 
 .library-document-main {
@@ -560,11 +714,13 @@ body {
   padding: 10px 12px;
   margin-bottom: 0;
   text-align: left;
-  background: rgba(255, 255, 255, 0.82);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0.78));
   border: 1px solid var(--border);
   border-radius: var(--radius-panel);
-  box-shadow: 0 8px 24px rgba(24, 34, 48, 0.06);
-  backdrop-filter: blur(8px);
+  box-shadow:
+    var(--shadow-sm),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(12px) saturate(1.4);
 }
 
 .pdf-tabs-bar {
@@ -588,6 +744,7 @@ body {
 }
 
 .pdf-tab {
+  position: relative;
   display: inline-grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -598,17 +755,23 @@ body {
   height: 32px;
   border: 1px solid var(--border);
   border-bottom-color: var(--border-strong);
-  border-radius: 7px 7px 4px 4px;
-  background: var(--surface-pressed);
+  border-radius: 9px 9px 4px 4px;
+  background: var(--surface-2);
   color: var(--text-muted);
   font: inherit;
   padding: 0 6px 0 0;
   text-align: left;
+  transition:
+    background var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast),
+    box-shadow var(--transition-fast);
 }
 
 .pdf-tab:hover {
   border-color: var(--border-strong);
   background: var(--surface-soft);
+  color: var(--text);
 }
 
 .pdf-tab.active {
@@ -616,7 +779,21 @@ body {
   background: var(--surface);
   color: var(--text);
   font-weight: 600;
-  box-shadow: 0 -1px 0 var(--surface), 0 6px 16px rgba(24, 34, 48, 0.08);
+  box-shadow:
+    0 -1px 0 var(--surface),
+    0 8px 18px -8px rgba(18, 32, 56, 0.22);
+}
+
+/* Active tab gets a thin brand bar along its top edge. */
+.pdf-tab.active::after {
+  content: '';
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 0;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--primary-grad);
 }
 
 .pdf-tab.dragging {
@@ -737,34 +914,48 @@ body {
     background var(--transition-fast),
     border-color var(--transition-fast),
     color var(--transition-fast),
+    transform var(--transition-fast),
     box-shadow var(--transition-fast);
+}
+
+/* Tactile press feedback for all toolbar controls. */
+.upload-button:active,
+.fullscreen-button:active,
+.settings-button:active,
+.secondary-toolbar-button:active,
+.ocr-button:active,
+.toolbar-group button:active:not(:disabled),
+.copy-button:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 .upload-button {
   display: inline-flex;
   flex-shrink: 0;
-  border-color: var(--primary);
-  background: var(--primary);
+  border-color: transparent;
+  background: var(--primary-grad);
   color: #fff;
   padding: 10px 14px;
   font-weight: 600;
+  box-shadow: var(--shadow-primary);
 }
 
 .fullscreen-button,
 .settings-button {
-  border-color: var(--primary);
-  background: var(--primary);
+  border-color: transparent;
+  background: var(--primary-grad);
   color: #fff;
   padding: 10px 13px;
   font-weight: 600;
+  box-shadow: var(--shadow-primary);
 }
 
 .upload-button:hover,
 .fullscreen-button:hover,
 .settings-button:hover {
-  border-color: var(--primary-hover);
-  background: var(--primary-hover);
-  box-shadow: 0 8px 18px rgba(31, 79, 130, 0.18);
+  border-color: transparent;
+  background: var(--primary-grad-hover);
+  box-shadow: 0 12px 26px -8px rgba(29, 99, 201, 0.55);
 }
 
 .secondary-toolbar-button {
@@ -783,8 +974,8 @@ body {
 .toolbar-group .upload-button:hover,
 .toolbar-group .fullscreen-button:hover,
 .toolbar-group .settings-button:hover {
-  border-color: var(--primary-hover);
-  background: var(--primary-hover);
+  border-color: transparent;
+  background: var(--primary-grad-hover);
 }
 
 .ocr-button {
@@ -830,8 +1021,10 @@ body {
   display: grid;
   place-items: center;
   padding: 20px;
-  background: rgba(15, 23, 42, 0.46);
+  background: rgba(13, 22, 41, 0.5);
+  backdrop-filter: blur(3px);
   box-sizing: border-box;
+  animation: overlayIn 0.2s var(--ease-out) both;
 }
 
 .settings-dialog {
@@ -849,6 +1042,7 @@ body {
   border-radius: var(--radius-panel);
   box-shadow: var(--shadow-floating);
   box-sizing: border-box;
+  animation: dialogIn 0.26s var(--ease-out) both;
 }
 
 .module-settings-panel {
@@ -858,6 +1052,7 @@ body {
   height: 100%;
   min-height: 0;
   box-shadow: none;
+  animation: none;
 }
 
 .settings-dialog-header {
@@ -1086,7 +1281,7 @@ body {
 .settings-primary-button,
 .settings-secondary-button,
 .settings-close-button {
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   cursor: pointer;
   font: inherit;
   padding: 10px 14px;
@@ -1094,19 +1289,27 @@ body {
     background var(--transition-fast),
     border-color var(--transition-fast),
     color var(--transition-fast),
+    transform var(--transition-fast),
     box-shadow var(--transition-fast);
 }
 
 .settings-primary-button {
-  border: 1px solid var(--primary);
-  background: var(--primary);
+  border: 1px solid transparent;
+  background: var(--primary-grad);
   color: #fff;
+  box-shadow: var(--shadow-primary);
 }
 
 .settings-primary-button:hover:not(:disabled) {
-  border-color: var(--primary-hover);
-  background: var(--primary-hover);
-  box-shadow: 0 8px 18px rgba(31, 79, 130, 0.18);
+  border-color: transparent;
+  background: var(--primary-grad-hover);
+  box-shadow: 0 12px 26px -8px rgba(29, 99, 201, 0.55);
+}
+
+.settings-primary-button:active:not(:disabled),
+.settings-secondary-button:active:not(:disabled),
+.settings-close-button:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 .settings-primary-button:disabled {
@@ -1639,14 +1842,18 @@ body.resizing-panel {
 .right-panel-tabs {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 11px;
+  background: var(--surface-2);
 }
 
 .right-panel-tab {
   min-width: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: var(--surface-soft);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
   color: var(--text-muted);
   cursor: pointer;
   font: inherit;
@@ -1658,20 +1865,20 @@ body.resizing-panel {
   transition:
     background var(--transition-fast),
     border-color var(--transition-fast),
-    color var(--transition-fast);
+    color var(--transition-fast),
+    box-shadow var(--transition-fast);
 }
 
 .right-panel-tab:hover {
-  border-color: var(--border-strong);
-  background: var(--surface-pressed);
   color: var(--text);
 }
 
 .right-panel-tab.active {
-  border-color: var(--primary-soft-strong);
-  background: var(--primary-soft);
+  border-color: var(--border);
+  background: var(--surface);
   color: var(--primary-strong);
   font-weight: 600;
+  box-shadow: var(--shadow-sm);
 }
 
 .selection-panel-actions {
@@ -1948,13 +2155,15 @@ body.resizing-panel {
   transition:
     background var(--transition-fast),
     border-color var(--transition-fast),
+    transform var(--transition-fast),
     box-shadow var(--transition-fast);
 }
 
 .history-item:hover {
   border-color: var(--primary-soft-strong);
   background: #fbfdff;
-  box-shadow: 0 8px 20px rgba(24, 34, 48, 0.06);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-sm);
 }
 
 .history-item.selectable-history-item {
@@ -2115,8 +2324,10 @@ body.resizing-panel {
   display: grid;
   place-items: center;
   padding: 20px;
-  background: rgba(15, 23, 42, 0.48);
+  background: rgba(13, 22, 41, 0.5);
+  backdrop-filter: blur(3px);
   box-sizing: border-box;
+  animation: overlayIn 0.2s var(--ease-out) both;
 }
 
 .note-dialog {
@@ -2135,6 +2346,7 @@ body.resizing-panel {
   box-shadow: var(--shadow-floating);
   box-sizing: border-box;
   pointer-events: auto;
+  animation: dialogIn 0.26s var(--ease-out) both;
 }
 
 .note-dialog-field {
@@ -2262,13 +2474,15 @@ body.resizing-panel {
   transition:
     background var(--transition-fast),
     border-color var(--transition-fast),
+    transform var(--transition-fast),
     box-shadow var(--transition-fast);
 }
 
 .recent-item:hover {
   border-color: var(--primary-soft-strong);
   background: #fbfdff;
-  box-shadow: 0 8px 20px rgba(24, 34, 48, 0.06);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-sm);
 }
 
 .recent-item-main {
@@ -2471,8 +2685,10 @@ body.resizing-panel {
   display: grid;
   place-items: center;
   padding: 20px;
-  background: rgba(15, 23, 42, 0.62);
+  background: rgba(10, 17, 33, 0.66);
+  backdrop-filter: blur(4px);
   box-sizing: border-box;
+  animation: overlayIn 0.2s var(--ease-out) both;
 }
 
 .image-preview-overlay {
@@ -2492,6 +2708,7 @@ body.resizing-panel {
   border-radius: var(--radius-panel);
   box-shadow: var(--shadow-floating);
   box-sizing: border-box;
+  animation: dialogIn 0.26s var(--ease-out) both;
 }
 
 .compare-dialog {
@@ -2505,8 +2722,9 @@ body.resizing-panel {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-panel);
-  box-shadow: 0 24px 64px rgba(15, 23, 42, 0.32);
+  box-shadow: var(--shadow-floating);
   box-sizing: border-box;
+  animation: dialogIn 0.26s var(--ease-out) both;
 }
 
 .diagram-dialog.fullscreen,
@@ -2770,15 +2988,46 @@ body.fullscreen-reading #root {
   display: grid;
   place-items: center;
   color: var(--text-muted);
-  background: var(--surface);
-  border: 1px dashed var(--border);
+  background:
+    radial-gradient(700px 320px at 50% 18%, rgba(44, 118, 221, 0.06), transparent 60%),
+    var(--surface);
+  border: 1px dashed var(--border-strong);
   border-radius: var(--radius-panel);
 }
 
 .empty-state {
+  gap: 18px;
   min-height: 0;
   height: 100%;
-  font-size: 22px;
+  font-size: 17px;
+}
+
+.empty-state p {
+  margin: 0;
+  color: var(--text-muted);
+  letter-spacing: 0.01em;
+}
+
+/* Ghost document glyph above the prompt — pure CSS, no extra markup.
+   The card body is a solid fill; the four gradient layers are the "text"
+   lines (a brand-tinted title bar plus three grey body rules). */
+.empty-state::before {
+  content: '';
+  width: 78px;
+  height: 92px;
+  border-radius: 12px;
+  background-color: #ffffff;
+  background-image:
+    linear-gradient(var(--primary-soft-strong), var(--primary-soft-strong)),
+    linear-gradient(var(--border-strong), var(--border-strong)),
+    linear-gradient(var(--border-strong), var(--border-strong)),
+    linear-gradient(var(--border-strong), var(--border-strong));
+  background-repeat: no-repeat;
+  background-size: 38px 7px, 46px 4px, 46px 4px, 30px 4px;
+  background-position: 16px 18px, 16px 38px, 16px 50px, 16px 62px;
+  border: 1.5px solid var(--primary-soft-strong);
+  box-shadow: var(--shadow-sm);
+  animation: floatY 4.5s ease-in-out infinite;
 }
 
 .status {
@@ -2834,9 +3083,20 @@ button:disabled:hover {
     width: 58px;
   }
 
+  .sidebar-head {
+    flex-direction: column-reverse;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+  }
+
+  .sidebar-brand-text {
+    display: none;
+  }
+
   .module-nav-list {
-    gap: 18px;
-    margin-top: 30px;
+    gap: 10px;
+    margin-top: 12px;
   }
 
   .module-nav-button {
@@ -2956,5 +3216,60 @@ button:disabled:hover {
   .compare-stage.horizontal {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+/* ── Motion keyframes ─────────────────────────────────────────────────────
+   All are guarded by the prefers-reduced-motion rule above, which collapses
+   their duration to ~0. Keep them subtle: this is a working tool. */
+@keyframes moduleIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes navIn {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes overlayIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes dialogIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes floatY {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
   }
 }

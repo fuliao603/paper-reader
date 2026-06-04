@@ -1,12 +1,13 @@
 :root {
-  color: #182230;
-  background: #eef2f6;
+  color: #131c2b;
+  background: #e7edf5;
   font-family:
     "Microsoft YaHei UI",
     "Segoe UI",
     system-ui,
     sans-serif;
   font-synthesis: none;
+  font-feature-settings: "cv11", "ss01";
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -27,12 +28,53 @@ button {
   letter-spacing: 0;
 }
 
+/* Page numbers, zoom %, counts — keep digits aligned. */
+.page-controls span,
+.zoom-input-control,
+.history-item-meta,
+.library-document-meta,
+.pdf-tabs-bar {
+  font-variant-numeric: tabular-nums;
+}
+
 body {
   margin: 0;
   min-width: 320px;
-  background: #eef2f6;
+  color: #131c2b;
+  background: #e7edf5;
 }
 
 #root {
   min-height: 100svh;
+}
+
+/* Refined text selection that picks up the brand ink-blue. */
+::selection {
+  background: rgba(42, 115, 218, 0.22);
+}
+
+/* Unified slim scrollbars across panels and lists. Intentionally use ONLY the
+   ::-webkit-scrollbar pseudo-elements (no scrollbar-width / scrollbar-color on
+   *), because the PDF viewer's heavier always-visible bars in App.css rely on
+   webkit rules, which Chromium ignores once the standard properties are set on
+   an ancestor. The more specific .pdf-viewer::-webkit-scrollbar still wins. */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(120, 137, 161, 0.45);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(90, 107, 130, 0.7);
+  background-clip: padding-box;
 }

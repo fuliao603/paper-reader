@@ -112,11 +112,58 @@ const DEFAULT_SETTINGS = {
   rightPanelWidth: 420,
   exportDefaultDir: '',
 }
+const navIconProps = {
+  viewBox: '0 0 24 24',
+  width: 20,
+  height: 20,
+  fill: 'none',
+  stroke: 'currentColor',
+  strokeWidth: 1.7,
+  strokeLinecap: 'round',
+  strokeLinejoin: 'round',
+}
 const MODULE_NAV_ITEMS = [
-  { id: 'reader', label: '阅读', icon: '📖' },
-  { id: 'library', label: '文献库', icon: '▦' },
-  { id: 'importExport', label: '历史笔记管理', icon: '⇄' },
-  { id: 'settings', label: '设置', icon: '⚙' },
+  {
+    id: 'reader',
+    label: '阅读',
+    icon: (
+      <svg {...navIconProps}>
+        <path d="M12 6.4C10.4 5 7.6 4.5 4.6 5v12.6c3-.5 5.8 0 7.4 1.4 1.6-1.4 4.4-1.9 7.4-1.4V5c-3-.5-5.8 0-7.4 1.4Z" />
+        <path d="M12 6.4v12.6" />
+      </svg>
+    ),
+  },
+  {
+    id: 'library',
+    label: '文献库',
+    icon: (
+      <svg {...navIconProps}>
+        <rect x="4" y="4" width="7" height="7" rx="1.4" />
+        <rect x="13" y="4" width="7" height="7" rx="1.4" />
+        <rect x="4" y="13" width="7" height="7" rx="1.4" />
+        <rect x="13" y="13" width="7" height="7" rx="1.4" />
+      </svg>
+    ),
+  },
+  {
+    id: 'importExport',
+    label: '历史笔记管理',
+    icon: (
+      <svg {...navIconProps}>
+        <path d="M7 8.5h11l-3-3M17 15.5H6l3 3" />
+      </svg>
+    ),
+  },
+  {
+    id: 'settings',
+    label: '设置',
+    icon: (
+      <svg {...navIconProps}>
+        <circle cx="12" cy="12" r="2.9" />
+        <path d="M19.3 13.4a7.6 7.6 0 0 0 0-2.8l1.8-1.3-1.6-2.8-2.1.8a7.5 7.5 0 0 0-2.4-1.4L14.5 3h-3l-.5 2.1a7.5 7.5 0 0 0-2.4 1.4l-2.1-.8L2.9 8.5l1.8 1.3a7.6 7.6 0 0 0 0 2.8l-1.8 1.3 1.6 2.8 2.1-.8a7.5 7.5 0 0 0 2.4 1.4l.5 2.1h3l.5-2.1a7.5 7.5 0 0 0 2.4-1.4l2.1.8 1.6-2.8-1.8-1.3Z" />
+      </svg>
+    ),
+  },
 ]
 const NOTE_TYPE_LABELS = {
   'page-note': '页面笔记',
@@ -7945,15 +7992,24 @@ function App() {
   return (
     <main className={sidebarCollapsed ? 'app sidebar-collapsed' : 'app'} ref={appRef}>
       <aside className="module-sidebar" aria-label="主模块">
-        <button
-          type="button"
-          className="module-sidebar-toggle"
-          onClick={toggleSidebarCollapsed}
-          aria-label={sidebarCollapsed ? '展开左侧栏' : '折叠左侧栏'}
-          title={sidebarCollapsed ? '展开左侧栏' : '折叠左侧栏'}
-        >
-          {sidebarCollapsed ? '›' : '‹'}
-        </button>
+        <div className="sidebar-head">
+          <div className="sidebar-brand" aria-hidden="true">
+            <span className="sidebar-brand-mark">PR</span>
+            <span className="sidebar-brand-text">
+              <strong>Paper</strong>
+              <em>Reader</em>
+            </span>
+          </div>
+          <button
+            type="button"
+            className="module-sidebar-toggle"
+            onClick={toggleSidebarCollapsed}
+            aria-label={sidebarCollapsed ? '展开左侧栏' : '折叠左侧栏'}
+            title={sidebarCollapsed ? '展开左侧栏' : '折叠左侧栏'}
+          >
+            {sidebarCollapsed ? '›' : '‹'}
+          </button>
+        </div>
         <nav className="module-nav-list" aria-label="页面模块">
           {MODULE_NAV_ITEMS.map((item) => (
             <button
