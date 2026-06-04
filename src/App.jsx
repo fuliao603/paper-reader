@@ -15,6 +15,17 @@ import {
   normalizeHistoryList,
   restoreHistoryItem as restoreHistoryResult,
 } from './utils/history'
+import {
+  buildBatchPdfMarkdown,
+  buildPdfMarkdown,
+  getPdfDisplayName,
+  makeSafeMarkdownFileName,
+} from './utils/markdownExport'
+import {
+  buildBatchPdfReportHtml,
+  buildPdfReportHtml,
+  makeSafePdfReportFileName,
+} from './utils/pdfReportExport'
 
 const UI = {
   choosePdf: '\u9009\u62e9 PDF',
@@ -48,6 +59,16 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001
 const TESSERACT_ASSET_BASE = `${import.meta.env.BASE_URL || '/'}tesseract`
 const DEFAULT_TRANSLATION_PROMPT =
   '你是通用学术翻译助手。请把用户提供的英文学术文本翻译成准确、自然、符合中文学术表达习惯的中文。保留必要的专业术语、英文缩写、公式、指数、上下标、单位、变量名和专有名词。遇到 10^16、10^{-6}、H_2O、CO_2 等表达时，不要改写成普通数字。不要扩写，不要总结，不要添加解释，只输出译文。'
+const DEFAULT_CONTENT_EXPORT_OPTIONS = {
+  exportHistories: true,
+  exportAnnotations: true,
+  exportNotes: true,
+}
+const CONTENT_EXPORT_OPTION_ITEMS = [
+  { key: 'exportHistories', label: '翻译历史' },
+  { key: 'exportAnnotations', label: '批注' },
+  { key: 'exportNotes', label: '笔记' },
+]
 const MIN_ZOOM = 50
 const MAX_ZOOM = 300
 const ZOOM_STEP = 10
@@ -87,9 +108,16 @@ const DEFAULT_SETTINGS = {
   baseUrl: PROVIDERS.deepseek.baseUrl,
   model: PROVIDERS.deepseek.model,
   prompt: DEFAULT_TRANSLATION_PROMPT,
+  enableMultimodalTranslation: false,
   rightPanelWidth: 420,
   exportDefaultDir: '',
 }
+const MODULE_NAV_ITEMS = [
+  { id: 'reader', label: '阅读', icon: '📖' },
+  { id: 'library', label: '文献库', icon: '▦' },
+  { id: 'importExport', label: '历史笔记管理', icon: '⇄' },
+  { id: 'settings', label: '设置', icon: '⚙' },
+]
 const NOTE_TYPE_LABELS = {
   'page-note': '页面笔记',
   'text-selection-note': '划词笔记',
@@ -210,6 +238,12 @@ function App() {
   const [, setIsNotesImportExportBusy] = useState(false)
   const [exportableDocuments, setExportableDocuments] = useState([])
   const [selectedExportDocumentIds, setSelectedExportDocumentIds] = useState([])
+  const [selectedMarkdownDocumentIds, setSelectedMarkdownDocumentIds] = useState([])
+  const [isMarkdownExporting, setIsMarkdownExporting] = useState(false)
+  const [markdownExportOptions, setMarkdownExportOptions] = useState(DEFAULT_CONTENT_EXPORT_OPTIONS)
+  const [selectedPdfReportDocumentIds, setSelectedPdfReportDocumentIds] = useState([])
+  const [isPdfReportExporting, setIsPdfReportExporting] = useState(false)
+  const [pdfReportExportOptions, setPdfReportExportOptions] = useState(DEFAULT_CONTENT_EXPORT_OPTIONS)
   const [batchExportType, setBatchExportType] = useState('full')
   const [batchExportMode, setBatchExportMode] = useState('merged')
   const [batchExportName, setBatchExportName] = useState('')
@@ -1601,6 +1635,8 @@ function App() {
       setExportableDocuments(nextDocuments)
       setExportDefaultDir(defaultDir || '')
       setSelectedExportDocumentIds((currentIds) => currentIds.filter((id) => nextDocuments.some((document) => document.documentId === id)))
+      setSelectedMarkdownDocumentIds((currentIds) => currentIds.filter((id) => nextDocuments.some((document) => document.documentId === id)))
+      setSelectedPdfReportDocumentIds((currentIds) => currentIds.filter((id) => nextDocuments.some((document) => document.documentId === id)))
     } catch (error) {
       setExportStatus(error.message || '读取导入导出数据失败')
     }
@@ -1662,6 +1698,262 @@ function App() {
       }
     } catch (error) {
       setExportStatus(error.message || '批量导出失败')
+    }
+  }
+
+  async function collectMarkdownExportItems(documentIds, featureName = 'Markdown 导出') {
+    if (!window.electronAPI?.getDocumentTranslationHistory || !window.electronAPI?.getDocumentAnnotations || !window.electronAPI?.getDocumentNotes) {
+      throw new Error(`${featureName}仅在桌面版可用`)
+    }
+
+    const uniqueDocumentIds = Array.from(new Set((Array.isArray(documentIds) ? documentIds : []).filter(Boolean)))
+    const documentsById = new Map(exportableDocuments.map((document) => [document.documentId, document]))
+
+    return Promise.all(uniqueDocumentIds.map(async (documentId) => {
+      const pdf = documentsById.get(documentId) || (currentDocument?.documentId === documentId ? currentDocument : { documentId })
+      const [histories, annotations, notes] = await Promise.all([
+        window.electronAPI.getDocumentTranslationHistory(documentId),
+        window.electronAPI.getDocumentAnnotations(documentId),
+        window.electronAPI.getDocumentNotes(documentId),
+      ])
+
+      return {
+        pdf,
+        histories: Array.isArray(histories) ? histories : [],
+        annotations: Array.isArray(annotations) ? annotations : [],
+        notes: Array.isArray(notes) ? notes : [],
+      }
+    }))
+  }
+
+  function hasSelectedContentExportOption(options) {
+    return Boolean(options?.exportHistories || options?.exportAnnotations || options?.exportNotes)
+  }
+
+  function assertContentExportSelection(options) {
+    if (!hasSelectedContentExportOption(options)) {
+      throw new Error('请至少选择一项导出内容')
+    }
+  }
+
+  function toggleContentExportOption(setter, key) {
+    setter((currentOptions) => ({
+      ...currentOptions,
+      [key]: !currentOptions[key],
+    }))
+  }
+
+  async function exportCurrentPdfMarkdown() {
+    if (!currentDocument?.documentId) {
+      setExportStatus('请先打开 PDF')
+      return
+    }
+    if (!window.electronAPI?.saveMarkdownFile) {
+      setExportStatus('Markdown 导出仅在桌面版可用')
+      return
+    }
+
+    setIsMarkdownExporting(true)
+    setExportStatus('')
+    try {
+      assertContentExportSelection(markdownExportOptions)
+      const [item] = await collectMarkdownExportItems([currentDocument.documentId])
+      const result = await window.electronAPI.saveMarkdownFile({
+        markdown: buildPdfMarkdown(item, markdownExportOptions),
+        defaultFileName: makeSafeMarkdownFileName(getPdfDisplayName(item.pdf)),
+      })
+      if (!result?.canceled) {
+        setExportStatus(`已导出 Markdown：${result.filePath}`)
+      }
+    } catch (error) {
+      setExportStatus(error.message || '导出 Markdown 失败')
+    } finally {
+      setIsMarkdownExporting(false)
+    }
+  }
+
+  async function exportMergedMarkdown() {
+    if (!selectedMarkdownDocumentIds.length) {
+      setExportStatus('请先选择要导出的文献')
+      return
+    }
+    if (!window.electronAPI?.saveMarkdownFile) {
+      setExportStatus('Markdown 导出仅在桌面版可用')
+      return
+    }
+
+    setIsMarkdownExporting(true)
+    setExportStatus('')
+    try {
+      assertContentExportSelection(markdownExportOptions)
+      const items = await collectMarkdownExportItems(selectedMarkdownDocumentIds)
+      const result = await window.electronAPI.saveMarkdownFile({
+        markdown: buildBatchPdfMarkdown(items, markdownExportOptions),
+        defaultFileName: makeSafeMarkdownFileName(`Markdown合集_${items.length}篇文献`),
+      })
+      if (!result?.canceled) {
+        setExportStatus(`已合并导出 Markdown：${result.filePath}`)
+      }
+    } catch (error) {
+      setExportStatus(error.message || '合并导出 Markdown 失败')
+    } finally {
+      setIsMarkdownExporting(false)
+    }
+  }
+
+  async function exportBatchMarkdownFiles() {
+    if (!selectedMarkdownDocumentIds.length) {
+      setExportStatus('请先选择要导出的文献')
+      return
+    }
+    if (!window.electronAPI?.saveMarkdownBatchFiles) {
+      setExportStatus('Markdown 导出仅在桌面版可用')
+      return
+    }
+
+    setIsMarkdownExporting(true)
+    setExportStatus('')
+    try {
+      assertContentExportSelection(markdownExportOptions)
+      const items = await collectMarkdownExportItems(selectedMarkdownDocumentIds)
+      const result = await window.electronAPI.saveMarkdownBatchFiles({
+        files: items.map((item) => ({
+          fileName: makeSafeMarkdownFileName(getPdfDisplayName(item.pdf)),
+          markdown: buildPdfMarkdown(item, markdownExportOptions),
+        })),
+      })
+      if (!result?.canceled) {
+        setExportStatus(`已批量导出 ${result.filePaths?.length || 0} 个 Markdown 文件到：${result.outputDir}`)
+      }
+    } catch (error) {
+      setExportStatus(error.message || '批量导出 Markdown 失败')
+    } finally {
+      setIsMarkdownExporting(false)
+    }
+  }
+
+  function formatPdfReportErrors(errors = []) {
+    return errors
+      .map((item) => `${item.fileName || '未命名文件'}：${item.error || '未知错误'}`)
+      .join('；')
+  }
+
+  function showPdfReportError(message) {
+    const text = message || '导出 PDF 报告失败'
+    setExportStatus(text)
+    if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+      window.alert(`导出 PDF 失败：${text}`)
+    }
+  }
+
+  function assertPdfReportHtml(html) {
+    const safeHtml = String(html || '').trim()
+    if (!safeHtml) throw new Error('没有可导出的 PDF HTML 内容')
+    return safeHtml
+  }
+
+  async function exportCurrentPdfReport() {
+    if (!currentDocument?.documentId) {
+      setExportStatus('请先打开 PDF')
+      return
+    }
+    if (!window.electronAPI?.savePdfReport) {
+      setExportStatus('PDF 报告导出仅在桌面版可用')
+      return
+    }
+
+    setIsPdfReportExporting(true)
+    setExportStatus('')
+    try {
+      assertContentExportSelection(pdfReportExportOptions)
+      const [item] = await collectMarkdownExportItems([currentDocument.documentId], 'PDF 报告导出')
+      const html = assertPdfReportHtml(buildPdfReportHtml(item, pdfReportExportOptions))
+      const result = await window.electronAPI.savePdfReport({
+        html,
+        defaultFileName: makeSafePdfReportFileName(getPdfDisplayName(item.pdf)),
+      })
+
+      if (result?.error) {
+        showPdfReportError(result.error)
+      } else if (!result?.canceled) {
+        setExportStatus(`已导出 PDF 报告：${result.filePath}`)
+      }
+    } catch (error) {
+      showPdfReportError(error.message || '导出 PDF 报告失败')
+    } finally {
+      setIsPdfReportExporting(false)
+    }
+  }
+
+  async function exportMergedPdfReport() {
+    if (!selectedPdfReportDocumentIds.length) {
+      setExportStatus('请先选择要导出的文献')
+      return
+    }
+    if (!window.electronAPI?.savePdfReport) {
+      setExportStatus('PDF 报告导出仅在桌面版可用')
+      return
+    }
+
+    setIsPdfReportExporting(true)
+    setExportStatus('')
+    try {
+      assertContentExportSelection(pdfReportExportOptions)
+      const items = await collectMarkdownExportItems(selectedPdfReportDocumentIds, 'PDF 报告导出')
+      const html = assertPdfReportHtml(buildBatchPdfReportHtml(items, pdfReportExportOptions))
+      const result = await window.electronAPI.savePdfReport({
+        html,
+        defaultFileName: makeSafePdfReportFileName(`PDF报告合集_${items.length}篇文献`),
+      })
+
+      if (result?.error) {
+        showPdfReportError(result.error)
+      } else if (!result?.canceled) {
+        setExportStatus(`已合并导出 PDF 报告：${result.filePath}`)
+      }
+    } catch (error) {
+      showPdfReportError(error.message || '合并导出 PDF 报告失败')
+    } finally {
+      setIsPdfReportExporting(false)
+    }
+  }
+
+  async function exportBatchPdfReports() {
+    if (!selectedPdfReportDocumentIds.length) {
+      setExportStatus('请先选择要导出的文献')
+      return
+    }
+    if (!window.electronAPI?.saveBatchPdfReports) {
+      setExportStatus('PDF 报告导出仅在桌面版可用')
+      return
+    }
+
+    setIsPdfReportExporting(true)
+    setExportStatus('')
+    try {
+      assertContentExportSelection(pdfReportExportOptions)
+      const items = await collectMarkdownExportItems(selectedPdfReportDocumentIds, 'PDF 报告导出')
+      const result = await window.electronAPI.saveBatchPdfReports({
+        files: items.map((item) => ({
+          fileName: makeSafePdfReportFileName(getPdfDisplayName(item.pdf)),
+          html: assertPdfReportHtml(buildPdfReportHtml(item, pdfReportExportOptions)),
+        })),
+      })
+
+      if (result?.error || result?.errors?.length) {
+        const detail = formatPdfReportErrors(result.errors || [])
+        const exportedCount = result.filePaths?.length || 0
+        const message = detail
+          ? `已导出 ${exportedCount} 个，失败 ${result.errors.length} 个：${detail}`
+          : result.error
+        showPdfReportError(message)
+      } else if (!result?.canceled) {
+        setExportStatus(`已批量导出 ${result.filePaths?.length || 0} 个 PDF 报告到：${result.outputDir}`)
+      }
+    } catch (error) {
+      showPdfReportError(error.message || '批量导出 PDF 报告失败')
+    } finally {
+      setIsPdfReportExporting(false)
     }
   }
 
@@ -1731,6 +2023,22 @@ function App() {
 
   function toggleExportDocument(documentId) {
     setSelectedExportDocumentIds((currentIds) =>
+      currentIds.includes(documentId)
+        ? currentIds.filter((id) => id !== documentId)
+        : [...currentIds, documentId],
+    )
+  }
+
+  function toggleMarkdownDocument(documentId) {
+    setSelectedMarkdownDocumentIds((currentIds) =>
+      currentIds.includes(documentId)
+        ? currentIds.filter((id) => id !== documentId)
+        : [...currentIds, documentId],
+    )
+  }
+
+  function togglePdfReportDocument(documentId) {
+    setSelectedPdfReportDocumentIds((currentIds) =>
       currentIds.includes(documentId)
         ? currentIds.filter((id) => id !== documentId)
         : [...currentIds, documentId],
@@ -3054,6 +3362,7 @@ function App() {
       baseUrl: config.baseUrl || config.deepseekBaseUrl || providerDefaults.baseUrl,
       model: config.model || config.deepseekModel || providerDefaults.model,
       prompt: config.prompt || DEFAULT_TRANSLATION_PROMPT,
+      enableMultimodalTranslation: config.enableMultimodalTranslation === true,
       rightPanelWidth: clampNumber(
         Number(config.rightPanelWidth) || DEFAULT_SETTINGS.rightPanelWidth,
         MIN_RIGHT_PANEL_WIDTH,
@@ -5378,6 +5687,186 @@ function App() {
     return translatedBlocks
   }
 
+  function normalizeMultimodalCoordinate(value, total) {
+    const number = Number(value)
+    if (!Number.isFinite(number)) return null
+    if (number >= 0 && number <= 1 && total > 1) return number * total
+    return number
+  }
+
+  function normalizeMultimodalRect(item = {}, imageSize = {}) {
+    const imageWidth = Number(imageSize.width) || 0
+    const imageHeight = Number(imageSize.height) || 0
+    const rawX = item.x ?? item.left ?? item.x0
+    const rawY = item.y ?? item.top ?? item.y0
+    const rawWidth = item.width ?? (Number.isFinite(Number(item.x1)) && Number.isFinite(Number(rawX)) ? Number(item.x1) - Number(rawX) : undefined)
+    const rawHeight = item.height ?? (Number.isFinite(Number(item.y1)) && Number.isFinite(Number(rawY)) ? Number(item.y1) - Number(rawY) : undefined)
+    const x = normalizeMultimodalCoordinate(rawX, imageWidth)
+    const y = normalizeMultimodalCoordinate(rawY, imageHeight)
+    const width = normalizeMultimodalCoordinate(rawWidth, imageWidth)
+    const height = normalizeMultimodalCoordinate(rawHeight, imageHeight)
+
+    if (![x, y, width, height].every(Number.isFinite) || width <= 1 || height <= 1) return null
+
+    return {
+      x: clampNumber(x, 0, Math.max(imageWidth - 1, 0)),
+      y: clampNumber(y, 0, Math.max(imageHeight - 1, 0)),
+      width: Math.max(1, Math.min(width, Math.max(imageWidth - x, 1))),
+      height: Math.max(1, Math.min(height, Math.max(imageHeight - y, 1))),
+    }
+  }
+
+  function getMultimodalTextValue(item = {}, fields = []) {
+    for (const field of fields) {
+      const value = item[field]
+      if (value === null || value === undefined) continue
+      const text = String(value).trim()
+      if (text) return text
+    }
+
+    return ''
+  }
+
+  function getMultimodalUnionRect(rects) {
+    if (!rects.length) return null
+
+    const x0 = Math.min(...rects.map((rect) => rect.x))
+    const y0 = Math.min(...rects.map((rect) => rect.y))
+    const x1 = Math.max(...rects.map((rect) => rect.x + rect.width))
+    const y1 = Math.max(...rects.map((rect) => rect.y + rect.height))
+
+    return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }
+  }
+
+  function normalizeMultimodalTranslationBlocks(rawBlocks = [], imageSize = {}) {
+    return (Array.isArray(rawBlocks) ? rawBlocks : [])
+      .map((block, index) => {
+        const sourceBlocks = (Array.isArray(block?.sourceBlocks) && block.sourceBlocks.length
+          ? block.sourceBlocks
+          : Array.isArray(block?.lines)
+            ? block.lines
+            : []
+        )
+          .map((line, lineIndex) => {
+            const rect = normalizeMultimodalRect(line, imageSize)
+            const text = getMultimodalTextValue(line, ['text', 'sourceText', 'originalText', 'lineText'])
+            if (!rect || !text) return null
+
+            return {
+              index: lineIndex,
+              text,
+              ...rect,
+              confidence: Number(line.confidence) || 100,
+            }
+          })
+          .filter(Boolean)
+        const rect = normalizeMultimodalRect(block, imageSize) || getMultimodalUnionRect(sourceBlocks)
+        const text = cleanOcrSourceForTranslation(
+          getMultimodalTextValue(block, ['text', 'sourceText', 'originalText', 'moduleText']) ||
+          sourceBlocks.map((line) => line.text).join(' '),
+        )
+        const translation = cleanResultText(getMultimodalTextValue(block, ['translation', 'translatedText', 'targetText', 'result']))
+
+        if (!rect || !text || !translation || isUselessTranslationResult(translation)) return null
+
+        return {
+          index,
+          text,
+          sourceText: text,
+          translation,
+          ...rect,
+          confidence: Number(block.confidence) || 100,
+          sourceBlocks: sourceBlocks.length
+            ? sourceBlocks
+            : [{ index: 0, text, ...rect, confidence: Number(block.confidence) || 100 }],
+          multimodal: true,
+        }
+      })
+      .filter(Boolean)
+      .slice(0, 120)
+  }
+
+  async function requestMultimodalImageTranslation(image, imageSize, mode) {
+    const response = await fetch(`${API_BASE_URL}/multimodal-translate-image`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        image,
+        mode,
+        imageWidth: imageSize.width,
+        imageHeight: imageSize.height,
+      }),
+    })
+    const data = await response.json()
+
+    if (!response.ok) {
+      throw new Error(data.error || '多模态翻译失败')
+    }
+
+    const blocks = normalizeMultimodalTranslationBlocks(data.blocks || [], imageSize)
+    if (!blocks.length) throw new Error('多模态翻译未返回可用文字模块')
+
+    return blocks
+  }
+
+  async function finishVisualOcrResult({
+    mode,
+    image,
+    recognitionImage,
+    croppedImage,
+    translatedBlocks,
+    sourceBlocks,
+    ocrSelectionRect,
+  }) {
+    if (mode === 'compare') {
+      const translatedImage = await createCompareResultImage(recognitionImage, croppedImage, translatedBlocks)
+      const layout = getCompareLayoutByAspectRatio(croppedImage.width, croppedImage.height)
+      const nextCompareResult = {
+        originalImage: image,
+        translatedImage,
+        layout,
+      }
+
+      setSuccessfulRightPanelResult({
+        type: 'ocr-compare',
+        title: '对照模式结果',
+        compareOriginalImage: image,
+        compareTranslatedImage: translatedImage,
+        compareLayout: layout,
+        ocrSelectionRect,
+        timestamp: Date.now(),
+      })
+      setCompareResult(nextCompareResult)
+      setCompareOriginalZoom(1)
+      setCompareTranslatedZoom(1)
+      setIsCompareModalFullscreen(false)
+      setOcrResult(null)
+      return
+    }
+
+    const resultImage = await createDiagramResultImage(
+      recognitionImage,
+      croppedImage,
+      translatedBlocks,
+      sourceBlocks || translatedBlocks,
+    )
+
+    setSuccessfulRightPanelResult({
+      type: 'ocr-diagram',
+      title: '图解模式结果',
+      screenshotDataUrl: recognitionImage,
+      diagramResultImage: resultImage,
+      ocrSelectionRect,
+      timestamp: Date.now(),
+    })
+    setDiagramResult({ image: resultImage })
+    setDiagramZoom(1)
+    setIsDiagramModalFullscreen(false)
+    setOcrResult(null)
+  }
+
   async function createDiagramResultImage(imageUrl, imageSize, translatedBlocks, sourceBlocks = translatedBlocks) {
     const sourceImage = await loadImage(imageUrl)
     const canvas = document.createElement('canvas')
@@ -5511,6 +6000,57 @@ function App() {
         error: '',
       })
 
+      if ((mode === 'diagram' || mode === 'compare') && settingsFormRef.current.enableMultimodalTranslation) {
+        try {
+          setOcrResult({
+            status: mode === 'diagram' ? 'diagram-translating' : 'compare-translating',
+            mode,
+            image: recognitionImage,
+            text: '',
+            translation: '',
+            error: '',
+          })
+          const translatedBlocks = await requestMultimodalImageTranslation(recognitionImage, croppedImage, mode)
+
+          console.log('多模态图解/对照模式结果', {
+            mode,
+            blockCount: translatedBlocks.length,
+            sample: translatedBlocks.slice(0, 5).map((block) => ({
+              text: block.text,
+              translation: block.translation,
+              x: block.x,
+              y: block.y,
+              width: block.width,
+              height: block.height,
+            })),
+          })
+
+          await finishVisualOcrResult({
+            mode,
+            image,
+            recognitionImage,
+            croppedImage,
+            translatedBlocks,
+            sourceBlocks: translatedBlocks,
+            ocrSelectionRect,
+          })
+          return
+        } catch (error) {
+          console.warn('多模态图解/对照模式失败，回退到原 OCR 流程', {
+            mode,
+            error: error.message,
+          })
+          setOcrResult({
+            status: mode === 'diagram' ? 'diagram-recognizing' : 'compare-recognizing',
+            mode,
+            image: recognitionImage,
+            text: '',
+            translation: '',
+            error: '',
+          })
+        }
+      }
+
       worker = await createWorker('eng', 1, {
         workerPath: `${TESSERACT_ASSET_BASE}/worker.min.js`,
         corePath: `${TESSERACT_ASSET_BASE}/core/tesseract-core-simd-lstm.wasm.js`,
@@ -5567,45 +6107,27 @@ function App() {
         }
 
         if (mode === 'compare') {
-          const translatedImage = await createCompareResultImage(recognitionImage, croppedImage, translatedBlocks)
-          const layout = getCompareLayoutByAspectRatio(croppedImage.width, croppedImage.height)
-          const nextCompareResult = {
-            originalImage: image,
-            translatedImage,
-            layout,
-          }
-
-          setSuccessfulRightPanelResult({
-            type: 'ocr-compare',
-            title: '对照模式结果',
-            compareOriginalImage: image,
-            compareTranslatedImage: translatedImage,
-            compareLayout: layout,
+          await finishVisualOcrResult({
+            mode,
+            image,
+            recognitionImage,
+            croppedImage,
+            translatedBlocks,
+            sourceBlocks: textBlocks,
             ocrSelectionRect,
-            timestamp: Date.now(),
           })
-          setCompareResult(nextCompareResult)
-          setCompareOriginalZoom(1)
-          setCompareTranslatedZoom(1)
-          setIsCompareModalFullscreen(false)
-          setOcrResult(null)
           return
         }
 
-        const resultImage = await createDiagramResultImage(recognitionImage, croppedImage, translatedBlocks, textBlocks)
-
-        setSuccessfulRightPanelResult({
-          type: 'ocr-diagram',
-          title: '图解模式结果',
-          screenshotDataUrl: recognitionImage,
-          diagramResultImage: resultImage,
+        await finishVisualOcrResult({
+          mode,
+          image,
+          recognitionImage,
+          croppedImage,
+          translatedBlocks,
+          sourceBlocks: textBlocks,
           ocrSelectionRect,
-          timestamp: Date.now(),
         })
-        setDiagramResult({ image: resultImage })
-        setDiagramZoom(1)
-        setIsDiagramModalFullscreen(false)
-        setOcrResult(null)
         return
       }
 
@@ -6663,6 +7185,27 @@ function App() {
     )
   }
 
+  function renderContentExportOptions(options, setOptions, disabled = false) {
+    return (
+      <fieldset className="content-export-options">
+        <legend>导出内容</legend>
+        <div className="content-export-option-list">
+          {CONTENT_EXPORT_OPTION_ITEMS.map((item) => (
+            <label className="content-export-option" key={item.key}>
+              <input
+                type="checkbox"
+                checked={Boolean(options[item.key])}
+                disabled={disabled}
+                onChange={() => toggleContentExportOption(setOptions, item.key)}
+              />
+              <span>{item.label}</span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+    )
+  }
+
   function renderImportExportSettings() {
     return (
       <div className="settings-dialog module-settings-panel import-export-settings-panel">
@@ -6681,6 +7224,20 @@ function App() {
             onClick={() => setImportExportTab('mergeSplit')}
           >
             合并与拆分
+          </button>
+          <button
+            type="button"
+            className={importExportTab === 'markdown' ? 'settings-tab active' : 'settings-tab'}
+            onClick={() => setImportExportTab('markdown')}
+          >
+            导出 Markdown
+          </button>
+          <button
+            type="button"
+            className={importExportTab === 'pdfReport' ? 'settings-tab active' : 'settings-tab'}
+            onClick={() => setImportExportTab('pdfReport')}
+          >
+            导出 PDF
           </button>
           </nav>
 
@@ -6822,6 +7379,122 @@ function App() {
               <div className="settings-inline-actions">
                 <button type="button" className="settings-secondary-button" onClick={splitPaperReaderExportFile}>
                   拆分为多个文件
+                </button>
+              </div>
+            </section>
+          </>
+        ) : null}
+
+        {importExportTab === 'markdown' ? (
+          <>
+            <section className="settings-glossary markdown-export-panel">
+              <div className="settings-section-header">
+                <h3>导出 Markdown</h3>
+                <span>{selectedMarkdownDocumentIds.length} / {exportableDocuments.length} 篇</span>
+              </div>
+              <p className="markdown-export-hint">
+                Markdown 会包含文件名、翻译历史、批注、笔记、页数、原句以及对应翻译或笔记内容。
+              </p>
+              {renderContentExportOptions(markdownExportOptions, setMarkdownExportOptions, isMarkdownExporting)}
+
+              <div className="exportable-document-list markdown-document-list">
+                {exportableDocuments.length ? exportableDocuments.map((document) => (
+                  <label className="exportable-document-item" key={document.documentId}>
+                    <input
+                      type="checkbox"
+                      checked={selectedMarkdownDocumentIds.includes(document.documentId)}
+                      onChange={() => toggleMarkdownDocument(document.documentId)}
+                    />
+                    <span>
+                      <strong>{document.fileName || document.documentId}</strong>
+                      <small>历史 {document.historyCount} 条 · 笔记 {document.notesCount} 条 · 批注 {document.annotationsCount} 条 · {formatHistoryTime(document.lastUpdatedAt)}</small>
+                    </span>
+                  </label>
+                )) : <p className="history-empty">暂无可导出的文献数据</p>}
+              </div>
+
+              <div className="settings-inline-actions markdown-export-actions">
+                <button
+                  type="button"
+                  className="settings-secondary-button"
+                  onClick={exportCurrentPdfMarkdown}
+                  disabled={isMarkdownExporting || !currentDocument?.documentId || !hasSelectedContentExportOption(markdownExportOptions)}
+                >
+                  导出当前 PDF
+                </button>
+                <button
+                  type="button"
+                  className="settings-primary-button"
+                  onClick={exportMergedMarkdown}
+                  disabled={isMarkdownExporting || !selectedMarkdownDocumentIds.length || !hasSelectedContentExportOption(markdownExportOptions)}
+                >
+                  选中文件合并导出
+                </button>
+                <button
+                  type="button"
+                  className="settings-secondary-button"
+                  onClick={exportBatchMarkdownFiles}
+                  disabled={isMarkdownExporting || !selectedMarkdownDocumentIds.length || !hasSelectedContentExportOption(markdownExportOptions)}
+                >
+                  选中文件批量导出
+                </button>
+              </div>
+            </section>
+          </>
+        ) : null}
+
+        {importExportTab === 'pdfReport' ? (
+          <>
+            <section className="settings-glossary report-export-panel">
+              <div className="settings-section-header">
+                <h3>导出 PDF 报告</h3>
+                <span>{selectedPdfReportDocumentIds.length} / {exportableDocuments.length} 篇</span>
+              </div>
+              <p className="report-export-hint">
+                PDF 报告会生成新的整理文件，包含文件名、翻译历史、批注、笔记、页数、原句以及对应翻译或笔记内容，不会写回原始 PDF。
+              </p>
+              {renderContentExportOptions(pdfReportExportOptions, setPdfReportExportOptions, isPdfReportExporting)}
+
+              <div className="exportable-document-list report-document-list">
+                {exportableDocuments.length ? exportableDocuments.map((document) => (
+                  <label className="exportable-document-item" key={document.documentId}>
+                    <input
+                      type="checkbox"
+                      checked={selectedPdfReportDocumentIds.includes(document.documentId)}
+                      onChange={() => togglePdfReportDocument(document.documentId)}
+                    />
+                    <span>
+                      <strong>{document.fileName || document.documentId}</strong>
+                      <small>历史 {document.historyCount} 条 · 笔记 {document.notesCount} 条 · 批注 {document.annotationsCount} 条 · {formatHistoryTime(document.lastUpdatedAt)}</small>
+                    </span>
+                  </label>
+                )) : <p className="history-empty">暂无可导出的文献数据</p>}
+              </div>
+
+              <div className="settings-inline-actions report-export-actions">
+                <button
+                  type="button"
+                  className="settings-secondary-button"
+                  onClick={exportCurrentPdfReport}
+                  disabled={isPdfReportExporting || !currentDocument?.documentId || !hasSelectedContentExportOption(pdfReportExportOptions)}
+                >
+                  导出当前 PDF
+                </button>
+                <button
+                  type="button"
+                  className="settings-primary-button"
+                  onClick={exportMergedPdfReport}
+                  disabled={isPdfReportExporting || !selectedPdfReportDocumentIds.length || !hasSelectedContentExportOption(pdfReportExportOptions)}
+                >
+                  选中文件合并导出
+                </button>
+                <button
+                  type="button"
+                  className="settings-secondary-button"
+                  onClick={exportBatchPdfReports}
+                  disabled={isPdfReportExporting || !selectedPdfReportDocumentIds.length || !hasSelectedContentExportOption(pdfReportExportOptions)}
+                >
+                  选中文件批量导出
                 </button>
               </div>
             </section>
@@ -7282,42 +7955,19 @@ function App() {
           {sidebarCollapsed ? '›' : '‹'}
         </button>
         <nav className="module-nav-list" aria-label="页面模块">
-        <button
-          type="button"
-          className={activeModule === 'reader' ? 'module-nav-button active' : 'module-nav-button'}
-          onClick={() => switchModule('reader')}
-          title="阅读"
-        >
-          <span className="module-nav-icon" aria-hidden="true">📖</span>
-          <span className="module-nav-label">阅读</span>
-        </button>
-        <button
-          type="button"
-          className={activeModule === 'library' ? 'module-nav-button active' : 'module-nav-button'}
-          onClick={() => switchModule('library')}
-          title="文献库"
-        >
-          <span className="module-nav-icon" aria-hidden="true">▦</span>
-          <span className="module-nav-label">文献库</span>
-        </button>
-        <button
-          type="button"
-          className={activeModule === 'importExport' ? 'module-nav-button active' : 'module-nav-button'}
-          onClick={() => switchModule('importExport')}
-          title="历史笔记管理"
-        >
-          <span className="module-nav-icon" aria-hidden="true">⇄</span>
-          <span className="module-nav-label">历史笔记管理</span>
-        </button>
-        <button
-          type="button"
-          className={activeModule === 'settings' ? 'module-nav-button active' : 'module-nav-button'}
-          onClick={() => switchModule('settings')}
-          title="设置"
-        >
-          <span className="module-nav-icon" aria-hidden="true">⚙</span>
-          <span className="module-nav-label">设置</span>
-        </button>
+          {MODULE_NAV_ITEMS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={activeModule === item.id ? 'module-nav-button active' : 'module-nav-button'}
+              onClick={() => switchModule(item.id)}
+              title={item.label}
+              aria-current={activeModule === item.id ? 'page' : undefined}
+            >
+              <span className="module-nav-icon" aria-hidden="true">{item.icon}</span>
+              <span className="module-nav-label">{item.label}</span>
+            </button>
+          ))}
         </nav>
       </aside>
 
@@ -7849,6 +8499,17 @@ function App() {
                             </select>
                           ) : null}
                         </div>
+                      </label>
+                      <label className="settings-switch-row">
+                        <span>
+                          <strong>启用多模态翻译</strong>
+                          <small>图解模式和对照模式会优先让支持图片的 AI 直接识别文字坐标并翻译；失败时自动回退到原 OCR 流程。</small>
+                        </span>
+                        <input
+                          type="checkbox"
+                          checked={settingsForm.enableMultimodalTranslation}
+                          onChange={(event) => updateSettingsField('enableMultimodalTranslation', event.target.checked)}
+                        />
                       </label>
                     </section>
                   </section>

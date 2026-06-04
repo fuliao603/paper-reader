@@ -58,4 +58,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setExportDefaultDir: (dirPath) => ipcRenderer.invoke('paperreader-export:set-default-dir', dirPath),
   selectExportDefaultDir: () => ipcRenderer.invoke('paperreader-export:select-default-dir'),
   resetExportDefaultDir: () => ipcRenderer.invoke('paperreader-export:reset-default-dir'),
+  saveMarkdownFile: (payload) => ipcRenderer.invoke('markdown:save-file', payload),
+  saveMarkdownBatchFiles: (payload) => ipcRenderer.invoke('markdown:save-batch-files', payload),
+  savePdfReport: (payload) => ipcRenderer.invoke('pdf-report:save-file', payload),
+  saveBatchPdfReports: (payload) => ipcRenderer.invoke('pdf-report:save-batch-files', payload),
 })

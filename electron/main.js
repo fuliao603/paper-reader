@@ -1,6 +1,6 @@
 /* global process */
 
-import { app, BrowserWindow, Menu, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme } from 'electron'
 import { Buffer } from 'node:buffer'
 import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
@@ -16,6 +16,7 @@ const DEFAULT_CONFIG = {
   baseUrl: 'https://api.deepseek.com',
   model: 'deepseek-v4-flash',
   prompt: '',
+  enableMultimodalTranslation: false,
   rightPanelWidth: 420,
   exportDefaultDir: '',
 }
@@ -114,6 +115,7 @@ function normalizeConfig(config = {}) {
     baseUrl: String(config.baseUrl || config.deepseekBaseUrl || providerDefaults.baseUrl).trim(),
     model: String(config.model || config.deepseekModel || providerDefaults.model).trim(),
     prompt: String(config.prompt || '').trim(),
+    enableMultimodalTranslation: config.enableMultimodalTranslation === true,
     rightPanelWidth: Math.min(700, Math.max(280, Number(config.rightPanelWidth) || 420)),
     exportDefaultDir: String(config.exportDefaultDir || '').trim(),
   }
@@ -1636,6 +1638,334 @@ async function writeExportJsonDirect(exportObject, targetDir) {
   return filePath
 }
 
+function getMarkdownBaseName(value, fallback = 'PaperReader_Markdown') {
+  const stripped = String(value || '')
+    .replace(/\.md$/i, '')
+    .trim()
+
+  return sanitizeExportName(stripped || fallback, fallback)
+}
+
+function ensureMarkdownExtension(filePath) {
+  return String(filePath || '').toLowerCase().endsWith('.md') ? filePath : `${filePath}.md`
+}
+
+async function getAvailableMarkdownPath(outputDir, baseName, usedPaths = new Set()) {
+  let index = 1
+
+  while (true) {
+    const suffix = index === 1 ? '' : `_${index}`
+    const candidate = path.join(outputDir, `${baseName}${suffix}.md`)
+    const key = candidate.toLowerCase()
+
+    if (!usedPaths.has(key)) {
+      try {
+        await fs.access(candidate)
+      } catch {
+        usedPaths.add(key)
+        return candidate
+      }
+    }
+
+    index += 1
+  }
+}
+
+async function saveMarkdownFile(payload = {}) {
+  const markdown = String(payload.markdown || '').trim()
+  if (!markdown) throw new Error('暂无可导出的 Markdown 内容')
+
+  const defaultDir = await getValidExportDefaultDir()
+  const defaultName = getMarkdownBaseName(payload.defaultFileName || 'PaperReader_Markdown')
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: '保存 Markdown 文件',
+    defaultPath: path.join(defaultDir, `${defaultName}.md`),
+    filters: [{ name: 'Markdown', extensions: ['md'] }],
+  })
+
+  if (result.canceled || !result.filePath) return { canceled: true }
+
+  const targetFilePath = ensureMarkdownExtension(result.filePath)
+  await fs.writeFile(targetFilePath, `${markdown}\n`, 'utf8')
+  return { canceled: false, filePath: targetFilePath }
+}
+
+async function saveMarkdownBatchFiles(payload = {}) {
+  const files = Array.isArray(payload.files)
+    ? payload.files
+      .map((file) => ({
+        fileName: getMarkdownBaseName(file?.fileName || file?.defaultFileName || 'PaperReader_Markdown'),
+        markdown: String(file?.markdown || '').trim(),
+      }))
+      .filter((file) => file.markdown)
+    : []
+
+  if (!files.length) throw new Error('暂无可导出的 Markdown 内容')
+
+  const defaultDir = await getValidExportDefaultDir()
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '选择 Markdown 导出目录',
+    defaultPath: defaultDir,
+    properties: ['openDirectory', 'createDirectory'],
+  })
+
+  if (result.canceled || !result.filePaths[0]) return { canceled: true }
+
+  const outputDir = result.filePaths[0]
+  await fs.mkdir(outputDir, { recursive: true })
+
+  const usedPaths = new Set()
+  const filePaths = []
+  for (const file of files) {
+    const targetFilePath = await getAvailableMarkdownPath(outputDir, file.fileName, usedPaths)
+    await fs.writeFile(targetFilePath, `${file.markdown}\n`, 'utf8')
+    filePaths.push(targetFilePath)
+  }
+
+  return { canceled: false, outputDir, filePaths }
+}
+
+function getPdfReportBaseName(value, fallback = 'PaperReader_Report') {
+  const stripped = String(value || '')
+    .replace(/\.pdf$/i, '')
+    .trim()
+
+  return sanitizeExportName(stripped || fallback, fallback)
+}
+
+function ensurePdfExtension(filePath) {
+  return String(filePath || '').toLowerCase().endsWith('.pdf') ? filePath : `${filePath}.pdf`
+}
+
+async function getAvailablePdfReportPath(outputDir, baseName, usedPaths = new Set()) {
+  let index = 1
+
+  while (true) {
+    const suffix = index === 1 ? '' : `_${index}`
+    const candidate = path.join(outputDir, `${baseName}${suffix}.pdf`)
+    const key = candidate.toLowerCase()
+
+    if (!usedPaths.has(key)) {
+      try {
+        await fs.access(candidate)
+      } catch {
+        usedPaths.add(key)
+        return candidate
+      }
+    }
+
+    index += 1
+  }
+}
+
+function getErrorMessage(error) {
+  return error?.message || String(error)
+}
+
+function waitForWindowLoad(win) {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const timeout = setTimeout(() => {
+      finish(new Error('PDF 打印页面加载超时'))
+    }, 15000)
+
+    function cleanup() {
+      clearTimeout(timeout)
+      win.webContents.removeListener('did-finish-load', handleFinish)
+      win.webContents.removeListener('did-fail-load', handleFail)
+      win.webContents.removeListener('render-process-gone', handleGone)
+    }
+
+    function finish(error) {
+      if (settled) return
+      settled = true
+      cleanup()
+      if (error) {
+        reject(error)
+      } else {
+        resolve()
+      }
+    }
+
+    function handleFinish() {
+      finish()
+    }
+
+    function handleFail(_event, errorCode, errorDescription) {
+      finish(new Error(`PDF 打印页面加载失败：${errorCode} ${errorDescription || '未知错误'}`))
+    }
+
+    function handleGone(_event, details) {
+      finish(new Error(`PDF 打印页面进程异常退出：${details?.reason || '未知原因'}`))
+    }
+
+    win.webContents.once('did-finish-load', handleFinish)
+    win.webContents.once('did-fail-load', handleFail)
+    win.webContents.once('render-process-gone', handleGone)
+  })
+}
+
+async function waitForPrintReady(win) {
+  await win.webContents.executeJavaScript(`
+    new Promise((resolve) => {
+      const done = () => requestAnimationFrame(() => resolve(true));
+      if (document.fonts && document.fonts.ready) {
+        document.fonts.ready.then(done, done);
+      } else {
+        done();
+      }
+    })
+  `, true)
+}
+
+async function printHtmlToPdfBuffer(html) {
+  const safeHtml = String(html || '').trim()
+  if (!safeHtml) throw new Error('没有可导出的 PDF HTML 内容')
+
+  const tempDir = await fs.mkdtemp(path.join(app.getPath('temp'), 'paper-reader-pdf-'))
+  const tempFilePath = path.join(tempDir, 'report.html')
+  const printWindow = new BrowserWindow({
+    width: 1024,
+    height: 1365,
+    show: false,
+    paintWhenInitiallyHidden: true,
+    backgroundColor: '#ffffff',
+    autoHideMenuBar: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  })
+
+  try {
+    await fs.writeFile(tempFilePath, safeHtml, 'utf8')
+    const loadPromise = waitForWindowLoad(printWindow)
+    await Promise.all([
+      loadPromise,
+      printWindow.loadFile(tempFilePath),
+    ])
+
+    try {
+      await waitForPrintReady(printWindow)
+    } catch (error) {
+      // Font readiness is a rendering hint; printToPDF still works if the check is unavailable.
+      console.warn('PDF 打印页面字体等待失败：', error)
+    }
+
+    const pdfBuffer = await printWindow.webContents.printToPDF({
+      printBackground: true,
+      preferCSSPageSize: true,
+      pageSize: 'A4',
+      margins: {
+        marginType: 'default',
+      },
+    })
+
+    if (!pdfBuffer?.length) throw new Error('PDF 打印结果为空')
+    return pdfBuffer
+  } finally {
+    if (!printWindow.isDestroyed()) {
+      printWindow.close()
+    }
+    try {
+      await fs.rm(tempDir, { recursive: true, force: true })
+    } catch (error) {
+      console.warn('清理临时 PDF HTML 文件失败：', error)
+    }
+  }
+}
+
+async function renderHtmlToPdfFile(payload = {}) {
+  const html = String(payload.html || '').trim()
+  if (!html) throw new Error('没有可导出的 PDF HTML 内容')
+
+  const defaultDir = await getValidExportDefaultDir()
+  const defaultName = getPdfReportBaseName(payload.defaultFileName || 'PaperReader_Report')
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: '导出 PDF 报告',
+    defaultPath: path.join(defaultDir, `${defaultName}.pdf`),
+    filters: [{ name: 'PDF 文件', extensions: ['pdf'] }],
+  })
+
+  if (result.canceled || !result.filePath) return { canceled: true }
+
+  const targetFilePath = ensurePdfExtension(result.filePath)
+  const pdfBuffer = await printHtmlToPdfBuffer(html)
+  await fs.writeFile(targetFilePath, pdfBuffer)
+  return { canceled: false, filePath: targetFilePath }
+}
+
+async function renderHtmlToPdfFiles(payload = {}) {
+  const files = Array.isArray(payload.files)
+    ? payload.files
+      .map((file) => ({
+        fileName: getPdfReportBaseName(file?.fileName || file?.defaultFileName || 'PaperReader_Report'),
+        html: String(file?.html || '').trim(),
+      }))
+    : []
+
+  if (!files.length) throw new Error('没有可导出的 PDF HTML 内容')
+
+  const defaultDir = await getValidExportDefaultDir()
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: '选择 PDF 报告导出目录',
+    defaultPath: defaultDir,
+    properties: ['openDirectory', 'createDirectory'],
+  })
+
+  if (result.canceled || !result.filePaths[0]) return { canceled: true }
+
+  const outputDir = result.filePaths[0]
+  await fs.mkdir(outputDir, { recursive: true })
+
+  const usedPaths = new Set()
+  const filePaths = []
+  const errors = []
+  for (const file of files) {
+    if (!file.html) {
+      errors.push({ fileName: file.fileName, error: '没有可导出的 PDF HTML 内容' })
+      continue
+    }
+
+    try {
+      const targetFilePath = await getAvailablePdfReportPath(outputDir, file.fileName, usedPaths)
+      const pdfBuffer = await printHtmlToPdfBuffer(file.html)
+      await fs.writeFile(targetFilePath, pdfBuffer)
+      filePaths.push(targetFilePath)
+    } catch (error) {
+      console.error(`导出 PDF 报告失败：${file.fileName}`, error)
+      errors.push({ fileName: file.fileName, error: getErrorMessage(error) })
+    }
+  }
+
+  return {
+    canceled: false,
+    outputDir,
+    filePaths,
+    errors,
+    error: !filePaths.length && errors.length ? '全部 PDF 报告导出失败' : undefined,
+  }
+}
+
+async function savePdfReport(payload = {}) {
+  try {
+    return await renderHtmlToPdfFile(payload)
+  } catch (error) {
+    console.error('导出 PDF 报告失败：', error)
+    return { canceled: false, error: getErrorMessage(error) }
+  }
+}
+
+async function saveBatchPdfReports(payload = {}) {
+  try {
+    return await renderHtmlToPdfFiles(payload)
+  } catch (error) {
+    console.error('批量导出 PDF 报告失败：', error)
+    return { canceled: false, error: getErrorMessage(error), errors: [] }
+  }
+}
+
 function validatePaperReaderExport(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('不是有效的 Paper Reader 导出文件')
@@ -2445,6 +2775,10 @@ function registerIpcHandlers() {
   ipcMain.handle('paperreader-export:set-default-dir', async (_event, dirPath) => setExportDefaultDir(dirPath))
   ipcMain.handle('paperreader-export:select-default-dir', async () => selectExportDefaultDir())
   ipcMain.handle('paperreader-export:reset-default-dir', async () => resetExportDefaultDir())
+  ipcMain.handle('markdown:save-file', async (_event, payload) => saveMarkdownFile(payload))
+  ipcMain.handle('markdown:save-batch-files', async (_event, payload) => saveMarkdownBatchFiles(payload))
+  ipcMain.handle('pdf-report:save-file', async (_event, payload) => savePdfReport(payload))
+  ipcMain.handle('pdf-report:save-batch-files', async (_event, payload) => saveBatchPdfReports(payload))
 }
 
 async function startBackend() {
@@ -2462,8 +2796,10 @@ function createWindow() {
     height: 860,
     minWidth: 960,
     minHeight: 640,
-    title: 'Paper Reader',
+    title: ' ',
     icon: getAppIconPath(),
+    backgroundColor: '#eef2f6',
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(app.getAppPath(), 'electron', 'preload.js'),
       contextIsolation: true,
@@ -2472,11 +2808,17 @@ function createWindow() {
     },
   })
 
+  mainWindow.on('page-title-updated', (event) => {
+    event.preventDefault()
+    mainWindow.setTitle(' ')
+  })
+
   mainWindow.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'))
 }
 
 app.whenReady().then(async () => {
   try {
+    nativeTheme.themeSource = 'light'
     Menu.setApplicationMenu(null)
     registerIpcHandlers()
     await startBackend()
