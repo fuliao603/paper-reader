@@ -4,6 +4,7 @@ import { createWorker } from 'tesseract.js'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
 import './App.css'
+import appIconUrl from '../build/icon.png'
 import {
   HISTORY_LIMIT,
   HISTORY_TYPE_LABELS,
@@ -112,6 +113,7 @@ const DEFAULT_SETTINGS = {
   rightPanelWidth: 420,
   exportDefaultDir: '',
 }
+const APP_ICON_SRC = appIconUrl
 const navIconProps = {
   viewBox: '0 0 24 24',
   width: 20,
@@ -138,10 +140,11 @@ const MODULE_NAV_ITEMS = [
     label: '文献库',
     icon: (
       <svg {...navIconProps}>
-        <rect x="4" y="4" width="7" height="7" rx="1.4" />
-        <rect x="13" y="4" width="7" height="7" rx="1.4" />
-        <rect x="4" y="13" width="7" height="7" rx="1.4" />
-        <rect x="13" y="13" width="7" height="7" rx="1.4" />
+        <rect x="5" y="4.5" width="4" height="14.5" rx="1.1" />
+        <rect x="10" y="4.5" width="4" height="14.5" rx="1.1" />
+        <rect x="15" y="4.5" width="4" height="14.5" rx="1.1" />
+        <path d="M4.5 19.5h15" />
+        <path d="M6.5 8h1M11.5 12h1M16.5 9.5h1" />
       </svg>
     ),
   },
@@ -159,8 +162,9 @@ const MODULE_NAV_ITEMS = [
     label: '设置',
     icon: (
       <svg {...navIconProps}>
-        <circle cx="12" cy="12" r="2.9" />
-        <path d="M19.3 13.4a7.6 7.6 0 0 0 0-2.8l1.8-1.3-1.6-2.8-2.1.8a7.5 7.5 0 0 0-2.4-1.4L14.5 3h-3l-.5 2.1a7.5 7.5 0 0 0-2.4 1.4l-2.1-.8L2.9 8.5l1.8 1.3a7.6 7.6 0 0 0 0 2.8l-1.8 1.3 1.6 2.8 2.1-.8a7.5 7.5 0 0 0 2.4 1.4l.5 2.1h3l.5-2.1a7.5 7.5 0 0 0 2.4-1.4l2.1.8 1.6-2.8-1.8-1.3Z" />
+        <circle cx="12" cy="12" r="3.2" />
+        <path d="M12 3.4v2.2M12 18.4v2.2M5.9 5.9l1.6 1.6M16.5 16.5l1.6 1.6M3.4 12h2.2M18.4 12h2.2M5.9 18.1l1.6-1.6M16.5 7.5l1.6-1.6" />
+        <path d="M8.7 4.7 8 6.8M16 17.2l-.7 2.1M4.7 15.3l2.1.7M17.2 8l2.1.7" />
       </svg>
     ),
   },
@@ -7994,11 +7998,7 @@ function App() {
       <aside className="module-sidebar" aria-label="主模块">
         <div className="sidebar-head">
           <div className="sidebar-brand" aria-hidden="true">
-            <span className="sidebar-brand-mark">PR</span>
-            <span className="sidebar-brand-text">
-              <strong>Paper</strong>
-              <em>Reader</em>
-            </span>
+            <img className="sidebar-brand-mark" src={APP_ICON_SRC} alt="" draggable="false" />
           </div>
           <button
             type="button"

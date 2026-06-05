@@ -152,51 +152,22 @@ body {
 .sidebar-brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: center;
   min-width: 0;
   overflow: hidden;
 }
 
 .sidebar-brand-mark {
-  display: grid;
-  place-items: center;
   flex: 0 0 auto;
-  width: 30px;
-  height: 30px;
-  border-radius: 9px;
-  background: var(--primary-grad);
-  color: #fff;
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: 0.04em;
-  box-shadow: var(--shadow-primary);
-}
-
-.sidebar-brand-text {
-  display: flex;
-  flex-direction: column;
-  line-height: 1.05;
-  min-width: 0;
-}
-
-.sidebar-brand-text strong {
-  color: var(--text);
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: 0.01em;
-}
-
-.sidebar-brand-text em {
-  color: var(--primary);
-  font-size: 11px;
-  font-style: normal;
-  font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-
-.sidebar-collapsed .sidebar-brand-text {
-  display: none;
+  display: block;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 11px;
+  background: transparent;
+  box-shadow: 0 10px 18px -12px rgba(18, 32, 56, 0.42);
+  object-fit: contain;
+  padding: 0;
 }
 
 .module-sidebar-toggle {
@@ -3088,10 +3059,6 @@ button:disabled:hover {
     align-items: center;
     justify-content: center;
     gap: 10px;
-  }
-
-  .sidebar-brand-text {
-    display: none;
   }
 
   .module-nav-list {
