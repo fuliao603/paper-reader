@@ -33,13 +33,23 @@ const PROVIDER_DEFAULTS = {
     baseUrl: 'https://api.deepseek.com',
     model: 'deepseek-v4-flash',
   },
-  openrouter: {
-    baseUrl: 'https://openrouter.ai/api/v1',
-    model: 'openrouter/auto',
+  'openai-compatible': {
+    baseUrl: 'https://api.openai.com/v1',
+    model: 'gpt-4o-mini',
+  },
+  'anthropic-compatible': {
+    baseUrl: 'https://api.anthropic.com',
+    model: 'claude-3-5-sonnet-latest',
   },
   custom: {
     baseUrl: '',
     model: '',
+  },
+}
+const LEGACY_PROVIDER_DEFAULTS = {
+  openrouter: {
+    baseUrl: 'https://openrouter.ai/api/v1',
+    model: 'openrouter/auto',
   },
 }
 
@@ -104,10 +114,13 @@ function createDocumentId(filePath, fileName = '', fileSize = 0) {
 }
 
 function normalizeConfig(config = {}) {
-  const provider = ['deepseek', 'openrouter', 'custom'].includes(config.provider)
-    ? config.provider
-    : 'deepseek'
-  const providerDefaults = PROVIDER_DEFAULTS[provider]
+  const rawProvider = String(config.provider || '').trim()
+  const provider = rawProvider === 'openrouter'
+    ? 'openai-compatible'
+    : ['deepseek', 'openai-compatible', 'anthropic-compatible', 'custom'].includes(rawProvider)
+      ? rawProvider
+      : 'deepseek'
+  const providerDefaults = LEGACY_PROVIDER_DEFAULTS[rawProvider] || PROVIDER_DEFAULTS[provider]
 
   return {
     provider,
@@ -1434,9 +1447,14 @@ function getShortDocumentId(documentId = '') {
 function getExportTypeLabel(exportType) {
   if (exportType === 'translation-history') return '翻译历史'
   if (exportType === 'notes') return '笔记'
+  if (exportType === 'annotations') return '批注'
   if (exportType === 'mixed') return '混合'
   if (exportType === 'merged') return '合并文件'
   return '完整备份'
+}
+
+function normalizeDataExportType(exportType) {
+  return ['translation-history', 'notes', 'annotations', 'full'].includes(exportType) ? exportType : 'full'
 }
 
 function getExportFileBaseName({ exportType, exportMode, fileName, documentId, userExportName, timestamp, merged = false }) {
@@ -1549,9 +1567,13 @@ async function collectDocumentExportData(documentId, exportType = 'full') {
   return {
     document,
     data: {
-      translationHistory: exportType === 'notes' ? [] : historyItems,
-      notes: exportType === 'translation-history' ? [] : noteItems,
-      annotations: exportType === 'translation-history' ? [] : getRelatedAnnotations(noteItems, annotationItems),
+      translationHistory: ['notes', 'annotations'].includes(exportType) ? [] : historyItems,
+      notes: ['translation-history', 'annotations'].includes(exportType) ? [] : noteItems,
+      annotations: exportType === 'translation-history'
+        ? []
+        : exportType === 'notes'
+          ? getRelatedAnnotations(noteItems, annotationItems)
+          : annotationItems,
     },
   }
 }
@@ -2061,6 +2083,7 @@ async function importExportDocuments(documents, forcedDocumentId = null, forcedT
   const histories = await readDocumentTranslationHistories()
   const notesData = await readDocumentNotes()
   const annotationsData = await readDocumentAnnotations()
+  const importType = forcedType ? normalizeDataExportType(forcedType) : null
   const summary = { documents: 0, translationHistory: 0, notes: 0, annotations: 0, skipped: 0 }
   const touchedDocuments = new Set()
 
@@ -2077,13 +2100,13 @@ async function importExportDocuments(documents, forcedDocumentId = null, forcedT
       lastUpdatedAt: Number(sourceDocument.lastUpdatedAt) || Date.now(),
     }
     const data = entry.data || {}
-    const incomingHistory = forcedType === 'notes' ? [] : normalizeHistoryItems(data.translationHistory || [])
+    const incomingHistory = ['notes', 'annotations'].includes(importType) ? [] : normalizeHistoryItems(data.translationHistory || [])
       .map((item) => normalizeDocumentHistoryItem({ ...item, documentId, filePath: document.filePath, fileName: document.fileName }))
       .filter(Boolean)
-    const incomingNotes = forcedType === 'translation-history' ? [] : normalizeNoteItems(data.notes || [])
+    const incomingNotes = ['translation-history', 'annotations'].includes(importType) ? [] : normalizeNoteItems(data.notes || [])
       .map((item) => normalizeNoteItem({ ...item, documentId, filePath: document.filePath, fileName: document.fileName }))
       .filter(Boolean)
-    const incomingAnnotations = forcedType === 'translation-history' ? [] : normalizeAnnotationItems(data.annotations || [])
+    const incomingAnnotations = importType === 'translation-history' ? [] : normalizeAnnotationItems(data.annotations || [])
       .map((item) => normalizeAnnotationItem({ ...item, documentId, filePath: document.filePath, fileName: document.fileName }))
       .filter(Boolean)
 
@@ -2137,14 +2160,18 @@ async function importExportDocuments(documents, forcedDocumentId = null, forcedT
 }
 
 async function exportCurrentDocumentData(documentId, exportType) {
-  const payload = await collectDocumentExportData(documentId, exportType)
-  if (exportType === 'translation-history' && !payload.data.translationHistory.length) {
+  const nextExportType = normalizeDataExportType(exportType)
+  const payload = await collectDocumentExportData(documentId, nextExportType)
+  if (nextExportType === 'translation-history' && !payload.data.translationHistory.length) {
     throw new Error('暂无可导出的翻译历史')
   }
-  if (exportType === 'notes' && !payload.data.notes.length) {
+  if (nextExportType === 'notes' && !payload.data.notes.length) {
     throw new Error('暂无可导出的笔记')
   }
-  const exportObject = buildSingleDocumentExport(documentId, exportType, payload)
+  if (nextExportType === 'annotations' && !payload.data.annotations.length) {
+    throw new Error('暂无可导出的批注')
+  }
+  const exportObject = buildSingleDocumentExport(documentId, nextExportType, payload)
   return writeExportJson(exportObject)
 }
 
@@ -2198,7 +2225,7 @@ async function getExportableDocuments() {
 
 async function batchExportPaperReaderData(options = {}) {
   const documentIds = Array.isArray(options.documentIds) ? options.documentIds : []
-  const exportType = ['translation-history', 'notes', 'full'].includes(options.exportType) ? options.exportType : 'full'
+  const exportType = normalizeDataExportType(options.exportType)
   const exportMode = options.exportMode === 'separate' ? 'separate' : 'merged'
   const defaultDir = await getValidExportDefaultDir()
   const outputDirResult = exportMode === 'separate'
@@ -2250,91 +2277,6 @@ async function batchImportPaperReaderData() {
   }
   const summary = await importExportDocuments(allDocuments)
   return { canceled: false, summary }
-}
-
-function getMergedExportType(documents) {
-  const types = new Set(documents.map((entry) => entry.entryExportType || entry.exportType || 'full'))
-  if (types.size === 1) return Array.from(types)[0]
-  return 'mixed'
-}
-
-async function summarizePaperReaderExportFile(filePath) {
-  const exportObject = await readExportFile(filePath)
-  const documents = getExportDocuments(exportObject)
-  return {
-    filePath,
-    fileName: path.basename(filePath),
-    exportType: exportObject.exportType,
-    exportMode: exportObject.exportMode,
-    exportName: exportObject.exportName,
-    documentCount: documents.length,
-  }
-}
-
-async function selectPaperReaderExportFileForMerge() {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: '选择 Paper Reader 导出文件',
-    properties: ['openFile'],
-    filters: [{ name: 'Paper Reader 导出文件', extensions: ['paperreader.json', 'json'] }],
-  })
-  if (result.canceled || !result.filePaths[0]) return { canceled: true }
-
-  return { canceled: false, file: await summarizePaperReaderExportFile(result.filePaths[0]) }
-}
-
-async function mergePaperReaderExportFiles(filePaths = [], userExportName = '未命名合集') {
-  const selectedFilePaths = Array.isArray(filePaths) ? filePaths.filter(Boolean) : []
-  if (!selectedFilePaths.length) throw new Error('请先添加要合并的导出文件')
-  const documents = []
-  for (const filePath of selectedFilePaths) {
-    const exportObject = await readExportFile(filePath)
-    documents.push(...getExportDocuments(exportObject).map((entry) => ({
-      ...entry,
-      entryExportType: entry.entryExportType || exportObject.exportType,
-      entryExportName: entry.entryExportName || entry.exportName || exportObject.exportName,
-      sourceExportName: entry.sourceExportName || entry.exportName || exportObject.exportName,
-    })))
-  }
-
-  if (!documents.length) throw new Error('所选导出文件中没有可合并的数据')
-
-  const merged = buildMultiDocumentExport(documents, getMergedExportType(documents), userExportName, true)
-  const saved = await writeExportJson(merged)
-  return { ...saved, documentCount: documents.length }
-}
-
-async function splitPaperReaderExportFile() {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: '选择要拆分的 Paper Reader 合并文件',
-    properties: ['openFile'],
-    filters: [{ name: 'Paper Reader 导出文件', extensions: ['paperreader.json', 'json'] }],
-  })
-  if (result.canceled || !result.filePaths[0]) return { canceled: true }
-
-  const exportObject = await readExportFile(result.filePaths[0])
-  const documents = getExportDocuments(exportObject)
-  const defaultDir = await getValidExportDefaultDir()
-  const outputDirResult = await dialog.showOpenDialog(mainWindow, {
-    title: '选择拆分输出目录',
-    defaultPath: defaultDir,
-    properties: ['openDirectory', 'createDirectory'],
-  })
-  if (outputDirResult.canceled || !outputDirResult.filePaths[0]) return { canceled: true }
-
-  const filePaths = []
-  for (const entry of documents) {
-    const exportType = ['translation-history', 'notes', 'full'].includes(entry.entryExportType)
-      ? entry.entryExportType
-      : (['translation-history', 'notes', 'full'].includes(exportObject.exportType) ? exportObject.exportType : 'full')
-    const single = buildSingleDocumentExport(entry.document.documentId, exportType, {
-      document: entry.document,
-      data: entry.data || {},
-    })
-    single.sourceExportName = entry.sourceExportName || entry.exportName || exportObject.exportName
-    filePaths.push(await writeExportJsonDirect(single, outputDirResult.filePaths[0]))
-  }
-
-  return { canceled: false, filePaths, outputDir: outputDirResult.filePaths[0] }
 }
 
 function hexToPdfRgb(color = '#FFFF00') {
@@ -2717,9 +2659,33 @@ async function openPdfDialog() {
   }
 }
 
+function getBackendBaseUrl() {
+  return `http://localhost:${process.env.PORT || 3001}`
+}
+
+async function postBackendJson(route, payload = {}) {
+  const response = await fetch(`${getBackendBaseUrl()}${route}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
+  const data = await response.json().catch(() => ({}))
+
+  if (!response.ok) {
+    throw new Error(data.error || `Local AI request failed: ${response.status}`)
+  }
+
+  return data
+}
+
 function registerIpcHandlers() {
   ipcMain.handle('config:get', async () => readConfig())
   ipcMain.handle('config:save', async (_event, config) => saveConfig(config))
+  ipcMain.handle('ai:translate-text', async (_event, payload) => postBackendJson('/ai/translate-text', payload))
+  ipcMain.handle('ai:translate-image-ocr', async (_event, payload) => postBackendJson('/ai/translate-image-ocr', payload))
+  ipcMain.handle('ai:translate-image-diagram', async (_event, payload) => postBackendJson('/ai/translate-image-diagram', payload))
   ipcMain.handle('glossary:import', async () => importGlossary())
   ipcMain.handle('glossary:get', async () => readGlossary())
   ipcMain.handle('glossary:clear', async () => clearGlossary())
@@ -2768,9 +2734,6 @@ function registerIpcHandlers() {
   ipcMain.handle('paperreader-export:get-documents', async () => getExportableDocuments())
   ipcMain.handle('paperreader-export:batch-export', async (_event, options) => batchExportPaperReaderData(options))
   ipcMain.handle('paperreader-export:batch-import', async () => batchImportPaperReaderData())
-  ipcMain.handle('paperreader-export:select-merge-file', async () => selectPaperReaderExportFileForMerge())
-  ipcMain.handle('paperreader-export:merge-files', async (_event, filePaths, userExportName) => mergePaperReaderExportFiles(filePaths, userExportName))
-  ipcMain.handle('paperreader-export:split-file', async () => splitPaperReaderExportFile())
   ipcMain.handle('paperreader-export:get-default-dir', async () => getValidExportDefaultDir())
   ipcMain.handle('paperreader-export:set-default-dir', async (_event, dirPath) => setExportDefaultDir(dirPath))
   ipcMain.handle('paperreader-export:select-default-dir', async () => selectExportDefaultDir())

@@ -1,6 +1,6 @@
 # Paper Reader
 
-当前版本：0.7.0
+当前版本：0.8.0
 
 Paper Reader 是一个本地运行的 PDF 学术阅读与翻译桌面工具，面向英文论文、教材章节、课程讲义、技术文档、扫描件和截图型资料。它把 PDF 阅读、文献库、滑词翻译、区域 OCR、图解翻译、对照翻译、批注高亮、笔记、历史数据管理和整理导出放在同一个桌面应用里，方便在阅读过程中持续积累翻译结果和笔记，并把这些内容整理成 Markdown 或 PDF 报告。
 
@@ -27,7 +27,7 @@ npm run electron:dev
 桌面端推荐直接在应用内配置：
 
 1. 打开左侧“设置”。
-2. 在“模型设置”里选择 DeepSeek、OpenRouter 或 OpenAI-compatible 自定义接口。
+2. 在“模型设置”里选择 DeepSeek、OpenAI-compatible、Anthropic-compatible 或自定义接口。
 3. 填写 API Key、Base URL 和模型名称。
 4. 保存设置后进行滑词翻译或 OCR 翻译。
 
@@ -40,6 +40,8 @@ npm run electron:dev
 - 导入本地 PDF，在桌面端阅读。
 - 支持多 PDF 标签页、标签页切换、关闭和拖拽排序。
 - 支持上一页、下一页、页码跳转、缩放比例输入和全屏阅读。
+- 支持当前 PDF 搜索，可按全部、文献、翻译、批注和笔记筛选结果。
+- 点击文献搜索结果会跳转到对应页，并用临时蓝色选区标记搜索关键词本身。
 - 鼠标滚轮会优先滚动当前页，滚到顶部或底部后再翻页。
 - 大缩放比例下支持横向滚动条、触控板横向滑动和 `Shift + 鼠标滚轮`。
 - 自动记录最近打开、阅读页码、缩放比例、右侧栏宽度和右侧栏显示状态。
@@ -48,10 +50,11 @@ npm run electron:dev
 ### 文献库与项目文件夹
 
 - 左侧“文献库”集中管理已导入 PDF。
-- 支持单文件导入、批量导入、按文件名搜索和排序。
+- 支持单文件导入、批量导入、文件名搜索、全局搜索和排序。
 - 支持创建项目文件夹，把文献移动到不同文件夹。
 - 支持单篇或批量移动、删除文献。
-- 文献列表展示导入日期、最近阅读日期、阅读进度、笔记数和批注数。
+- 文献列表保持简洁，只展示文件名、阅读进度、导入时间和最后更新时间。
+- 全局搜索可按全部、文献、翻译、批注和笔记筛选，超过 10 条结果时只显示前 10 条并提示结果过多。
 - 文献移动文件夹不会改变它关联的翻译历史、笔记、高亮、OCR 结果和阅读进度。
 
 ### 滑词翻译
@@ -74,7 +77,7 @@ npm run electron:dev
 
 图解模式和对照模式会尽量保留箭头、边框、编号、化学式、短标签和图形结构。结果图片可以在弹窗中缩放、拖动和全屏查看，关闭弹窗后仍可从右侧结果重新打开。
 
-在“设置”中启用“多模态翻译”后，图解模式和对照模式会优先把框选区域交给支持图片输入的 AI 模型识别文字坐标并翻译；如果多模态调用失败，程序会自动回退到原来的本地 OCR 流程。
+在“设置”中启用“多模态翻译”后，图解模式和对照模式会优先把框选区域交给支持图片输入的 AI 模型识别文字坐标并翻译；如果模型不支持多模态或多模态调用失败，程序会自动回退到原来的本地 OCR 流程。
 
 ### 翻译历史、笔记和批注
 
@@ -91,13 +94,12 @@ npm run electron:dev
 
 ### 历史笔记管理
 
-左侧“历史笔记管理”负责翻译历史、笔记和批注数据的导入导出。
+左侧“历史笔记管理”负责翻译历史、笔记和批注数据的统一导入、导出和整理。
 
-- 支持导出或导入当前 PDF 的翻译历史。
-- 支持导出或导入当前 PDF 的笔记和相关 annotations。
-- 支持批量导入多个 `.paperreader.json` 文件。
-- 支持按 PDF 自选导出翻译历史、笔记或完整备份。
-- 支持多篇合并导出，也支持把合并文件拆分回单篇文件。
+- 支持导出或导入当前 PDF 的翻译历史、笔记和批注。
+- 支持批量导入多个 `.paperreader.json` 备份文件并合并去重。
+- 支持按 PDF 自选导出翻译历史、笔记、批注或完整备份。
+- 支持单篇、选中文献批量、合并文件和拆分文件形式的数据备份。
 - 导入采用合并去重策略，不会默认覆盖已有数据。
 
 ### Markdown 与 PDF 报告导出
@@ -117,8 +119,9 @@ npm run electron:dev
 桌面端优先使用应用内“设置”页面。当前支持：
 
 - DeepSeek；
-- OpenRouter；
-- OpenAI-compatible 自定义接口；
+- OpenAI-compatible；
+- Anthropic-compatible；
+- 自定义接口；
 - 自定义 Base URL；
 - 自定义 API Key；
 - 自定义模型名称；
@@ -133,7 +136,8 @@ npm run electron:dev
 | Provider | Base URL | 默认模型 |
 | --- | --- | --- |
 | DeepSeek | `https://api.deepseek.com` | `deepseek-v4-flash` |
-| OpenRouter | `https://openrouter.ai/api/v1` | `openrouter/auto` |
+| OpenAI-compatible | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| Anthropic-compatible | `https://api.anthropic.com` | `claude-3-5-sonnet-latest` |
 | Custom | 自行填写 | 自行填写 |
 
 模型名称、Base URL 和账号权限会随服务商变化。若接口不可用，请到对应平台确认最新可用配置。
@@ -158,6 +162,8 @@ AI_BASE_URL=https://api.deepseek.com
 AI_MODEL=deepseek-v4-flash
 AI_TRANSLATION_PROMPT=
 ```
+
+`AI_PROVIDER` 可设置为 `deepseek`、`openai-compatible`、`anthropic-compatible` 或 `custom`。OpenRouter 等中转站通常按 OpenAI-compatible 格式接入，并通过 `AI_BASE_URL` 和 `AI_MODEL` 指向对应服务。
 
 桌面端运行时，Electron 会把 `userData/config.json` 路径传给后端，应用内设置优先于 `.env`。
 
@@ -214,6 +220,7 @@ paper-reader/
 │  ├─ main.js
 │  └─ preload.js
 ├─ server/                 # 本地 Express 翻译接口
+│  ├─ aiProviders.js
 │  └─ index.js
 ├─ src/                    # React 前端
 │  ├─ App.jsx              # 主界面和核心交互逻辑
@@ -241,7 +248,7 @@ paper-reader/
 - react-pdf：PDF 渲染、文本层和 annotation layer。
 - tesseract.js：本地 OCR。
 - Express：本地翻译接口。
-- OpenAI SDK：连接 DeepSeek、OpenRouter 或 OpenAI-compatible 接口，支持文本翻译和可选的多模态图片翻译。
+- OpenAI SDK：连接 DeepSeek、OpenAI-compatible、Anthropic-compatible 或自定义中转站接口，支持文本翻译和可选的多模态图片翻译。
 - Electron：桌面窗口、本地文件读写、配置持久化和打包。
 - pdf-lib：PDF 高亮写入和 annotation 处理。
 
@@ -254,7 +261,7 @@ paper-reader/
 - 滑词翻译和右侧结果保留；
 - 翻译历史、笔记、高亮和 OCR 小便签；
 - Markdown 与 PDF 报告导出；
-- 文献库中的阅读进度、笔记数和批注数；
+- 文献库中的阅读进度、导入时间、最后更新时间和搜索结果跳转；
 - Electron `userData` 数据读写。
 
 ### 推荐验证

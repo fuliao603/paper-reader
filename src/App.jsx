@@ -58,6 +58,7 @@ const UI = {
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001'
 const TESSERACT_ASSET_BASE = `${import.meta.env.BASE_URL || '/'}tesseract`
+const MULTIMODAL_OCR_DEBUG = import.meta.env.VITE_MULTIMODAL_OCR_DEBUG === 'true'
 const DEFAULT_TRANSLATION_PROMPT =
   '你是通用学术翻译助手。请把用户提供的英文学术文本翻译成准确、自然、符合中文学术表达习惯的中文。保留必要的专业术语、英文缩写、公式、指数、上下标、单位、变量名和专有名词。遇到 10^16、10^{-6}、H_2O、CO_2 等表达时，不要改写成普通数字。不要扩写，不要总结，不要添加解释，只输出译文。'
 const DEFAULT_CONTENT_EXPORT_OPTIONS = {
@@ -70,6 +71,51 @@ const CONTENT_EXPORT_OPTION_ITEMS = [
   { key: 'exportAnnotations', label: '批注' },
   { key: 'exportNotes', label: '笔记' },
 ]
+const SEARCH_SCOPE_OPTIONS = [
+  { value: 'all', label: '全部' },
+  { value: 'document', label: '文献' },
+  { value: 'translation', label: '翻译' },
+  { value: 'annotation', label: '批注' },
+  { value: 'note', label: '笔记' },
+]
+const SEARCH_RESULT_TYPE_LABELS = {
+  document: '文献',
+  translation: '翻译',
+  annotation: '批注',
+  note: '笔记',
+}
+const SEARCH_RESULT_LIMIT = 10
+const SEARCH_DEBOUNCE_MS = 180
+const SEARCH_TEXT_FIELDS = [
+  'title',
+  'fileName',
+  'selectedText',
+  'highlightText',
+  'ocrText',
+  'sourceText',
+  'originalText',
+  'translation',
+  'translatedText',
+  'targetText',
+  'result',
+  'noteText',
+  'text',
+  'content',
+  'comment',
+]
+const EXPORT_DETAIL_PREVIEW_LIMIT = 120
+const EXPORT_DETAIL_TEXT_FIELDS = [
+  'selectedText',
+  'highlightText',
+  'ocrText',
+  'sourceText',
+  'originalText',
+  'text',
+  'source',
+  'original',
+]
+const EXPORT_DETAIL_NOTE_FIELDS = ['noteText', 'note', 'content', 'comment', 'memo', 'remark']
+const EXPORT_DETAIL_TRANSLATION_FIELDS = ['translation', 'translatedText', 'targetText', 'result', 'translated', 'target']
 const MIN_ZOOM = 50
 const MAX_ZOOM = 300
 const ZOOM_STEP = 10
@@ -81,12 +127,16 @@ const PROVIDERS = {
     baseUrl: 'https://api.deepseek.com',
     model: 'deepseek-v4-flash',
     presets: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+    supportsMultimodal: true,
   },
-  openrouter: {
-    label: 'OpenRouter',
-    baseUrl: 'https://openrouter.ai/api/v1',
-    model: 'openrouter/auto',
+  'openai-compatible': {
+    label: 'OpenAI-compatible',
+    baseUrl: 'https://api.openai.com/v1',
+    model: 'gpt-4o-mini',
     presets: [
+      'gpt-4o-mini',
+      'gpt-4.1-mini',
+      'gpt-5-mini',
       'openrouter/auto',
       'openai/gpt-5.2',
       'google/gemini-2.5-pro',
@@ -95,12 +145,33 @@ const PROVIDERS = {
       'qwen/qwen3',
       'deepseek/deepseek-v4-flash',
     ],
+    supportsMultimodal: true,
+  },
+  'anthropic-compatible': {
+    label: 'Anthropic-compatible',
+    baseUrl: 'https://api.anthropic.com',
+    model: 'claude-3-5-sonnet-latest',
+    presets: [
+      'claude-3-5-sonnet-latest',
+      'claude-3-5-haiku-latest',
+      'claude-sonnet-4-5',
+      'anthropic/claude-sonnet-4.5',
+    ],
+    supportsMultimodal: true,
   },
   custom: {
-    label: 'OpenAI-compatible \u81ea\u5b9a\u4e49\u63a5\u53e3',
+    label: '自定义',
     baseUrl: '',
     model: '',
     presets: [],
+    supportsMultimodal: true,
+  },
+}
+const LEGACY_PROVIDER_DEFAULTS = {
+  openrouter: {
+    provider: 'openai-compatible',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    model: 'openrouter/auto',
   },
 }
 const DEFAULT_SETTINGS = {
@@ -113,6 +184,300 @@ const DEFAULT_SETTINGS = {
   rightPanelWidth: 420,
   exportDefaultDir: '',
 }
+
+function normalizeProviderKey(provider) {
+  if (provider === 'openrouter') return 'openai-compatible'
+  return Object.hasOwn(PROVIDERS, provider) ? provider : 'deepseek'
+}
+
+function modelNameLooksMultimodal(model) {
+  const normalizedModel = String(model || '').toLowerCase()
+  if (!normalizedModel) return false
+
+  return [
+    '4o',
+    '4.1',
+    'gpt-5',
+    'o3',
+    'o4',
+    'vision',
+    'vl',
+    'gemini',
+    'claude-3',
+    'claude-sonnet',
+    'claude-opus',
+    'claude-haiku',
+    'llama-4',
+    'qwen-vl',
+    'kimi-vl',
+    'openrouter/auto',
+  ].some((token) => normalizedModel.includes(token))
+}
+
+function settingsCanEnableMultimodal(settings) {
+  const provider = normalizeProviderKey(settings?.provider)
+  if (!PROVIDERS[provider].supportsMultimodal) return false
+  if (provider === 'deepseek' || provider === 'custom') return true
+
+  return modelNameLooksMultimodal(settings?.model) || !settings?.model
+}
+
+function settingsSupportMultimodal(settings) {
+  return settings?.enableMultimodalTranslation === true && settingsCanEnableMultimodal(settings)
+}
+
+function debugMultimodalOcr(label, payload) {
+  if (!MULTIMODAL_OCR_DEBUG) return
+  console.log(`[PaperReader multimodal OCR] ${label}`, payload)
+}
+
+function getFirstExportDetailText(source, fields) {
+  if (!source || typeof source !== 'object') return ''
+
+  for (const field of fields) {
+    const value = source[field]
+    if (value === null || value === undefined) continue
+
+    const text = Array.isArray(value) ? value.join('\n') : String(value)
+    if (text.trim()) return text.trim()
+  }
+
+  return ''
+}
+
+function getExportDetailTime(record = {}) {
+  return Number(record.updatedAt || record.createdAt || record.timestamp) || 0
+}
+
+function sortExportDetailRecords(records) {
+  return (Array.isArray(records) ? records : [])
+    .filter(Boolean)
+    .slice()
+    .sort((firstRecord, secondRecord) => getExportDetailTime(secondRecord) - getExportDetailTime(firstRecord))
+}
+
+function normalizeDocumentNoteList(notes) {
+  return sortExportDetailRecords(notes)
+}
+
+function normalizeDocumentAnnotationList(annotations) {
+  return sortExportDetailRecords(annotations)
+}
+
+function getExportDocumentDisplayName(document = {}) {
+  return getPdfDisplayName(document)
+}
+
+function getExportDetailPageText(record = {}) {
+  const pageNumber = Number(record.pageNumber ?? record.page ?? record.pageNo ?? record.targetPage)
+  if (Number.isFinite(pageNumber) && pageNumber > 0) return `第 ${Math.floor(pageNumber)} 页`
+
+  const pageIndex = Number(record.pageIndex)
+  if (Number.isFinite(pageIndex) && pageIndex >= 0) return `第 ${Math.floor(pageIndex) + 1} 页`
+
+  return '页数未知'
+}
+
+function trimExportDetailPreview(value, fallback) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim()
+  if (!text) return fallback
+  return text.length > EXPORT_DETAIL_PREVIEW_LIMIT ? `${text.slice(0, EXPORT_DETAIL_PREVIEW_LIMIT)}...` : text
+}
+
+function getExportHistoryDetailPreview(item = {}) {
+  return trimExportDetailPreview(
+    getFirstExportDetailText(item, EXPORT_DETAIL_TEXT_FIELDS) ||
+      getFirstExportDetailText(item, EXPORT_DETAIL_TRANSLATION_FIELDS) ||
+      getHistoryPreview(item),
+    '历史记录',
+  )
+}
+
+function getExportNoteDetailPreview(note = {}) {
+  const title = getFirstExportDetailText(note, ['title'])
+  const body = getFirstExportDetailText(note, EXPORT_DETAIL_NOTE_FIELDS) ||
+    getFirstExportDetailText(note, EXPORT_DETAIL_TEXT_FIELDS) ||
+    getFirstExportDetailText(note, EXPORT_DETAIL_TRANSLATION_FIELDS)
+
+  return trimExportDetailPreview([title, body].filter(Boolean).join('：'), '笔记')
+}
+
+function getExportAnnotationDetailPreview(annotation = {}) {
+  return trimExportDetailPreview(
+    getFirstExportDetailText(annotation, EXPORT_DETAIL_TEXT_FIELDS),
+    '高亮批注',
+  )
+}
+
+async function readExportDocumentDetail(electronAPI, documentId) {
+  if (!documentId) return null
+  if (
+    !electronAPI?.getDocumentTranslationHistory ||
+    !electronAPI?.getDocumentAnnotations ||
+    !electronAPI?.getDocumentNotes
+  ) {
+    throw new Error('文献详情仅在桌面版可用')
+  }
+
+  const [histories, annotations, notes] = await Promise.all([
+    electronAPI.getDocumentTranslationHistory(documentId),
+    electronAPI.getDocumentAnnotations(documentId),
+    electronAPI.getDocumentNotes(documentId),
+  ])
+
+  return {
+    documentId,
+    histories: sortExportDetailRecords(histories),
+    annotations: normalizeDocumentAnnotationList(annotations).filter((item) => item?.type !== 'ocr-note-tag'),
+    notes: normalizeDocumentNoteList(notes),
+  }
+}
+
+function normalizeSearchText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim()
+}
+
+function buildSearchHitTextStream(spanRecords, includeSeparators) {
+  const chars = []
+  const map = []
+
+  spanRecords.forEach((record, spanIndex) => {
+    if (includeSeparators && chars.length > 0) {
+      chars.push(' ')
+      map.push(null)
+    }
+
+    record.chars.forEach((char, charIndex) => {
+      chars.push(char)
+      map.push({ spanIndex, charIndex })
+    })
+  })
+
+  return { text: chars.join('').toLowerCase(), map }
+}
+
+function appendSearchHitRangesFromStream(stream, query, seenRanges, ranges) {
+  let searchIndex = 0
+
+  while (searchIndex < stream.text.length) {
+    const matchStart = stream.text.indexOf(query, searchIndex)
+    if (matchStart === -1) break
+
+    const matchEnd = matchStart + query.length
+    const segments = []
+    let activeSegment = null
+
+    for (let index = matchStart; index < matchEnd; index += 1) {
+      const entry = stream.map[index]
+
+      if (!entry) {
+        if (activeSegment) {
+          segments.push(activeSegment)
+          activeSegment = null
+        }
+        continue
+      }
+
+      if (
+        !activeSegment ||
+        activeSegment.spanIndex !== entry.spanIndex ||
+        activeSegment.end !== entry.charIndex
+      ) {
+        if (activeSegment) segments.push(activeSegment)
+        activeSegment = {
+          spanIndex: entry.spanIndex,
+          start: entry.charIndex,
+          end: entry.charIndex + 1,
+        }
+        continue
+      }
+
+      activeSegment.end = entry.charIndex + 1
+    }
+
+    if (activeSegment) segments.push(activeSegment)
+
+    segments.forEach((segment) => {
+      if (segment.end <= segment.start) return
+
+      const key = `${segment.spanIndex}:${segment.start}:${segment.end}`
+      if (seenRanges.has(key)) return
+
+      seenRanges.add(key)
+      ranges.push(segment)
+    })
+
+    searchIndex = matchStart + Math.max(1, query.length)
+  }
+}
+
+function getSearchHitRanges(spanRecords, query) {
+  const normalizedQuery = normalizeSearchText(query).toLowerCase()
+  if (!spanRecords.length || !normalizedQuery) return []
+
+  const seenRanges = new Set()
+  const ranges = []
+
+  appendSearchHitRangesFromStream(
+    buildSearchHitTextStream(spanRecords, true),
+    normalizedQuery,
+    seenRanges,
+    ranges,
+  )
+  appendSearchHitRangesFromStream(
+    buildSearchHitTextStream(spanRecords, false),
+    normalizedQuery,
+    seenRanges,
+    ranges,
+  )
+
+  return ranges.sort((firstRange, secondRange) => (
+    firstRange.spanIndex - secondRange.spanIndex ||
+    firstRange.start - secondRange.start ||
+    firstRange.end - secondRange.end
+  ))
+}
+
+function collectSearchTexts(source, fields = SEARCH_TEXT_FIELDS) {
+  if (!source || typeof source !== 'object') return []
+
+  return fields
+    .map((field) => source[field])
+    .flatMap((value) => (Array.isArray(value) ? value : [value]))
+    .map(normalizeSearchText)
+    .filter(Boolean)
+}
+
+function getSearchPageNumber(record = {}) {
+  const pageNumber = Number(record.pageNumber ?? record.page ?? record.pageNo ?? record.targetPage)
+  if (Number.isFinite(pageNumber) && pageNumber > 0) return Math.floor(pageNumber)
+
+  const pageIndex = Number(record.pageIndex)
+  if (Number.isFinite(pageIndex) && pageIndex >= 0) return Math.floor(pageIndex) + 1
+
+  return null
+}
+
+function getSearchMatchSnippet(texts, query) {
+  const normalizedQuery = normalizeSearchText(query).toLowerCase()
+  if (!normalizedQuery) return ''
+
+  const matchedText = texts.find((text) => text.toLowerCase().includes(normalizedQuery))
+  if (!matchedText) return ''
+
+  const matchIndex = matchedText.toLowerCase().indexOf(normalizedQuery)
+  const start = Math.max(0, matchIndex - 42)
+  const end = Math.min(matchedText.length, matchIndex + normalizedQuery.length + 78)
+  const prefix = start > 0 ? '...' : ''
+  const suffix = end < matchedText.length ? '...' : ''
+
+  return `${prefix}${matchedText.slice(start, end)}${suffix}`
+}
+
+function canSearchScope(scope, type) {
+  return scope === 'all' || scope === type
+}
+
 const APP_ICON_SRC = appIconUrl
 const navIconProps = {
   viewBox: '0 0 24 24',
@@ -233,9 +598,12 @@ function App() {
   const noteDialogRef = useRef(null)
   const noteTitleInputRef = useRef(null)
   const noteTextareaRef = useRef(null)
-  const mergeNameInputRef = useRef(null)
   const libraryFolderNameInputRef = useRef(null)
   const retainedRightPanelActionsRef = useRef(null)
+  const searchDialogInputRef = useRef(null)
+  const pdfTextSearchCacheRef = useRef({ key: '', pages: [] })
+  const librarySearchCacheRef = useRef({ key: '', data: null })
+  const libraryDocumentTextCacheRef = useRef(new Map())
 
   const [pdfUrl, setPdfUrl] = useState('')
   const [currentDocument, setCurrentDocument] = useState(null)
@@ -252,6 +620,7 @@ function App() {
   const [libraryDocuments, setLibraryDocuments] = useState([])
   const [selectedLibraryFolderId, setSelectedLibraryFolderId] = useState('all')
   const [librarySearch, setLibrarySearch] = useState('')
+  const [librarySearchMode, setLibrarySearchMode] = useState('filename')
   const [librarySort, setLibrarySort] = useState('recent')
   const [selectedLibraryDocumentIds, setSelectedLibraryDocumentIds] = useState([])
   const [libraryStatus, setLibraryStatus] = useState('')
@@ -277,6 +646,13 @@ function App() {
   const [ocrRetranslateStatus, setOcrRetranslateStatus] = useState('idle')
   const [ocrRetranslateError, setOcrRetranslateError] = useState('')
   const [translationHistory, setTranslationHistory] = useState([])
+  const [readerSearchInput, setReaderSearchInput] = useState('')
+  const [searchDialog, setSearchDialog] = useState({ open: false, source: 'reader', query: '', scope: 'all' })
+  const [searchResults, setSearchResults] = useState([])
+  const [searchStatus, setSearchStatus] = useState('')
+  const [libraryGlobalSearchData, setLibraryGlobalSearchData] = useState(null)
+  const [searchHitMarkers, setSearchHitMarkers] = useState([])
+  const [searchHitMarkerRequest, setSearchHitMarkerRequest] = useState(null)
   const [rightPanelTab, setRightPanelTab] = useState('result')
   const [documentNotes, setDocumentNotes] = useState([])
   const [selectedNoteId, setSelectedNoteId] = useState('')
@@ -289,18 +665,17 @@ function App() {
   const [, setIsNotesImportExportBusy] = useState(false)
   const [exportableDocuments, setExportableDocuments] = useState([])
   const [selectedExportDocumentIds, setSelectedExportDocumentIds] = useState([])
+  const [selectedExportDetailDocumentId, setSelectedExportDetailDocumentId] = useState('')
+  const [exportDocumentDetail, setExportDocumentDetail] = useState(null)
+  const [exportDocumentDetailStatus, setExportDocumentDetailStatus] = useState('')
   const [selectedMarkdownDocumentIds, setSelectedMarkdownDocumentIds] = useState([])
   const [isMarkdownExporting, setIsMarkdownExporting] = useState(false)
   const [markdownExportOptions, setMarkdownExportOptions] = useState(DEFAULT_CONTENT_EXPORT_OPTIONS)
   const [selectedPdfReportDocumentIds, setSelectedPdfReportDocumentIds] = useState([])
   const [isPdfReportExporting, setIsPdfReportExporting] = useState(false)
   const [pdfReportExportOptions, setPdfReportExportOptions] = useState(DEFAULT_CONTENT_EXPORT_OPTIONS)
-  const [batchExportType, setBatchExportType] = useState('full')
   const [batchExportMode, setBatchExportMode] = useState('merged')
   const [batchExportName, setBatchExportName] = useState('')
-  const [mergeExportFiles, setMergeExportFiles] = useState([])
-  const [mergeNameDialog, setMergeNameDialog] = useState(null)
-  const [mergeNameDraft, setMergeNameDraft] = useState('我的合集')
   const [exportDefaultDir, setExportDefaultDir] = useState('')
   const [isAnnotationToolbarOpen, setIsAnnotationToolbarOpen] = useState(false)
   const [annotationColor, setAnnotationColor] = useState(null)
@@ -450,6 +825,8 @@ function App() {
     clearRightPanelResult()
     setPdfUrl('')
     setCurrentDocument(null)
+    setSearchHitMarkers([])
+    setSearchHitMarkerRequest(null)
     setActiveTabId('')
     setPageNumber(1)
     setNumPages(null)
@@ -689,6 +1066,8 @@ function App() {
     if (!tab?.pdfUrl || !tab.document) return
 
     pendingReadingRestoreRef.current = null
+    setSearchHitMarkers([])
+    setSearchHitMarkerRequest(null)
     setActiveTabId(tab.id)
     setCurrentDocument(tab.document)
     setPdfUrl(tab.pdfUrl)
@@ -920,11 +1299,7 @@ function App() {
   }
 
   function normalizeNoteList(notes) {
-    if (!Array.isArray(notes)) return []
-
-    return notes
-      .filter(Boolean)
-      .sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0))
+    return normalizeDocumentNoteList(notes)
   }
 
   function getResultNoteType(result) {
@@ -1244,11 +1619,7 @@ function App() {
   }
 
   function normalizeAnnotationList(annotations) {
-    if (!Array.isArray(annotations)) return []
-
-    return annotations
-      .filter(Boolean)
-      .sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0))
+    return normalizeDocumentAnnotationList(annotations)
   }
 
   async function saveAnnotation(annotation) {
@@ -1682,12 +2053,21 @@ function App() {
         window.electronAPI.getExportableDocuments?.() || [],
         window.electronAPI.getExportDefaultDir?.() || '',
       ])
-      const nextDocuments = Array.isArray(documents) ? documents : []
+      const nextDocuments = (Array.isArray(documents) ? documents : [])
+        .slice()
+        .sort((firstDocument, secondDocument) =>
+          (Number(secondDocument.lastUpdatedAt) || 0) - (Number(firstDocument.lastUpdatedAt) || 0),
+        )
       setExportableDocuments(nextDocuments)
       setExportDefaultDir(defaultDir || '')
       setSelectedExportDocumentIds((currentIds) => currentIds.filter((id) => nextDocuments.some((document) => document.documentId === id)))
       setSelectedMarkdownDocumentIds((currentIds) => currentIds.filter((id) => nextDocuments.some((document) => document.documentId === id)))
       setSelectedPdfReportDocumentIds((currentIds) => currentIds.filter((id) => nextDocuments.some((document) => document.documentId === id)))
+      setSelectedExportDetailDocumentId((currentId) => (
+        nextDocuments.some((document) => document.documentId === currentId)
+          ? currentId
+          : nextDocuments[0]?.documentId || ''
+      ))
     } catch (error) {
       setExportStatus(error.message || '读取导入导出数据失败')
     }
@@ -1740,7 +2120,7 @@ function App() {
     try {
       const result = await window.electronAPI.batchExportPaperReaderData({
         documentIds: selectedExportDocumentIds,
-        exportType: batchExportType,
+        exportType: 'full',
         exportMode: batchExportMode,
         userExportName: batchExportMode === 'merged' ? batchExportName : '',
       })
@@ -2008,71 +2388,8 @@ function App() {
     }
   }
 
-  async function addMergeExportFile() {
-    setExportStatus('')
-    try {
-      const result = await window.electronAPI.selectPaperReaderExportFileForMerge()
-      if (!result?.canceled && result.file) {
-        setMergeExportFiles((currentFiles) => {
-          if (currentFiles.some((file) => file.filePath === result.file.filePath)) {
-            setExportStatus('该文件已添加')
-            return currentFiles
-          }
-          return [...currentFiles, result.file]
-        })
-      }
-    } catch (error) {
-      setExportStatus(error.message || '添加待合并文件失败')
-    }
-  }
-
-  async function mergePaperReaderExportFiles() {
-    if (!mergeExportFiles.length) {
-      setExportStatus('请先添加要合并的导出文件')
-      return
-    }
-
-    setMergeNameDraft('我的合集')
-    setMergeNameDialog({
-      filePaths: mergeExportFiles.map((file) => file.filePath).filter(Boolean),
-      documentCount: mergeExportFiles.reduce((count, file) => count + (Number(file.documentCount) || 0), 0),
-    })
-  }
-
-  async function confirmMergePaperReaderExportFiles() {
-    const filePaths = Array.isArray(mergeNameDialog?.filePaths) ? mergeNameDialog.filePaths.filter(Boolean) : []
-    if (!filePaths.length) {
-      setMergeNameDialog(null)
-      setExportStatus('请先添加要合并的导出文件')
-      return
-    }
-
-    const userExportName = mergeNameDraft.trim() || '我的合集'
-    setExportStatus('')
-    try {
-      const result = await window.electronAPI.mergePaperReaderExportFiles(filePaths, userExportName)
-      if (!result?.canceled) {
-        setExportStatus(`已合并 ${result.documentCount || 0} 份数据：${result.filePath}`)
-      }
-      setMergeNameDialog(null)
-    } catch (error) {
-      setExportStatus(error.message || '合并导出文件失败')
-    }
-  }
-
-  async function splitPaperReaderExportFile() {
-    setExportStatus('')
-    try {
-      const result = await window.electronAPI.splitPaperReaderExportFile()
-      if (!result?.canceled) {
-        setExportStatus(`已拆分 ${result.filePaths?.length || 0} 个文件到：${result.outputDir}`)
-      }
-    } catch (error) {
-      setExportStatus(error.message || '拆分导出文件失败')
-    }
-  }
-
   function toggleExportDocument(documentId) {
+    setSelectedExportDetailDocumentId(documentId)
     setSelectedExportDocumentIds((currentIds) =>
       currentIds.includes(documentId)
         ? currentIds.filter((id) => id !== documentId)
@@ -2081,6 +2398,7 @@ function App() {
   }
 
   function toggleMarkdownDocument(documentId) {
+    setSelectedExportDetailDocumentId(documentId)
     setSelectedMarkdownDocumentIds((currentIds) =>
       currentIds.includes(documentId)
         ? currentIds.filter((id) => id !== documentId)
@@ -2089,15 +2407,12 @@ function App() {
   }
 
   function togglePdfReportDocument(documentId) {
+    setSelectedExportDetailDocumentId(documentId)
     setSelectedPdfReportDocumentIds((currentIds) =>
       currentIds.includes(documentId)
         ? currentIds.filter((id) => id !== documentId)
         : [...currentIds, documentId],
     )
-  }
-
-  function getMergeExportFileDisplayName(file) {
-    return file?.fileName || file?.exportName || '未命名文件'
   }
 
   useEffect(() => {
@@ -2110,6 +2425,153 @@ function App() {
       void loadExportSettingsData()
     }
   }, [settingsTab])
+
+  useEffect(() => {
+    if (activeModule !== 'importExport' || !selectedExportDetailDocumentId) {
+      setExportDocumentDetail(null)
+      setExportDocumentDetailStatus('')
+      return undefined
+    }
+
+    let isCanceled = false
+    setExportDocumentDetailStatus('正在读取文件详情...')
+
+    readExportDocumentDetail(window.electronAPI, selectedExportDetailDocumentId)
+      .then((detail) => {
+        if (isCanceled) return
+        setExportDocumentDetail(detail)
+        setExportDocumentDetailStatus('')
+      })
+      .catch((error) => {
+        if (isCanceled) return
+        setExportDocumentDetail(null)
+        setExportDocumentDetailStatus(error.message || '读取文件详情失败')
+      })
+
+    return () => {
+      isCanceled = true
+    }
+  }, [activeModule, selectedExportDetailDocumentId, exportableDocuments])
+
+  useEffect(() => {
+    if (!searchDialog.open) return undefined
+
+    const frameId = requestAnimationFrame(() => {
+      searchDialogInputRef.current?.focus()
+      searchDialogInputRef.current?.select?.()
+    })
+
+    return () => cancelAnimationFrame(frameId)
+  }, [searchDialog.open])
+
+  useEffect(() => {
+    if (!searchDialog.open) {
+      setSearchResults([])
+      setSearchStatus('')
+      return undefined
+    }
+
+    const query = normalizeSearchText(searchDialog.query)
+    if (!query) {
+      setSearchResults([])
+      setSearchStatus('')
+      return undefined
+    }
+
+    let isCanceled = false
+    const timerId = window.setTimeout(async () => {
+      try {
+        if (searchDialog.source === 'reader') {
+          if (!pdfUrl && canSearchScope(searchDialog.scope, 'document')) {
+            setSearchResults([])
+            setSearchStatus('请先打开 PDF')
+            return
+          }
+
+          setSearchStatus(canSearchScope(searchDialog.scope, 'document') ? '正在搜索当前 PDF...' : '')
+          const pdfPages = canSearchScope(searchDialog.scope, 'document')
+            ? await getCurrentPdfTextPages()
+            : []
+          if (isCanceled) return
+
+          const nextResults = buildReaderSearchResults(query, searchDialog.scope, pdfPages)
+          setSearchResults(nextResults)
+          setSearchStatus(nextResults.length ? '' : '没有找到匹配结果')
+          return
+        }
+
+        setSearchStatus('正在搜索文献库...')
+        const data = await loadLibraryGlobalSearchData(canSearchScope(searchDialog.scope, 'document'))
+        if (isCanceled) return
+
+        const nextResults = buildLibrarySearchResults(query, searchDialog.scope, data)
+        setSearchResults(nextResults.slice(0, SEARCH_RESULT_LIMIT))
+        setSearchStatus(
+          nextResults.length > SEARCH_RESULT_LIMIT
+            ? '结果数量过多'
+            : nextResults.length
+              ? ''
+              : '没有找到匹配结果',
+        )
+      } catch (error) {
+        if (isCanceled) return
+        setSearchResults([])
+        setSearchStatus(error.message || '搜索失败')
+      }
+    }, SEARCH_DEBOUNCE_MS)
+
+    return () => {
+      isCanceled = true
+      window.clearTimeout(timerId)
+    }
+  // Search runs are debounced and canceled manually; the state dependencies below are the result-changing inputs.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    searchDialog,
+    pdfUrl,
+    currentDocument,
+    translationHistory,
+    documentAnnotations,
+    documentNotes,
+    libraryDocuments,
+    libraryGlobalSearchData,
+  ])
+
+  useEffect(() => {
+    if (!searchHitMarkerRequest || !pdfUrl || searchHitMarkerRequest.pageNumber !== pageNumber) return undefined
+
+    let isCanceled = false
+    let timerId = 0
+    let attempts = 0
+
+    const syncMarks = () => {
+      if (isCanceled) return
+
+      const markers = getSearchTextLayerHitMarkers(searchHitMarkerRequest.query)
+      if (markers.length || attempts >= 8) {
+        setSearchHitMarkers(markers)
+        return
+      }
+
+      attempts += 1
+      timerId = window.setTimeout(syncMarks, 120)
+    }
+
+    timerId = window.setTimeout(syncMarks, 120)
+
+    return () => {
+      isCanceled = true
+      window.clearTimeout(timerId)
+    }
+  // Marker geometry is recomputed from the current PDF textLayer; the state below is the render-changing input set.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchHitMarkerRequest, pdfUrl, pageNumber, pageWidth, zoomPercent])
+
+  useEffect(() => {
+    if (searchHitMarkerRequest && searchHitMarkerRequest.pageNumber !== pageNumber) {
+      setSearchHitMarkers([])
+    }
+  }, [pageNumber, searchHitMarkerRequest])
 
   useEffect(() => {
     if (!isPageJumpFocused) {
@@ -2444,17 +2906,6 @@ function App() {
     isResizingPanel,
     noteDialog,
   ])
-
-  useEffect(() => {
-    if (!mergeNameDialog) return undefined
-
-    const focusTimer = window.setTimeout(() => {
-      mergeNameInputRef.current?.focus({ preventScroll: true })
-      mergeNameInputRef.current?.select()
-    }, 0)
-
-    return () => window.clearTimeout(focusTimer)
-  }, [mergeNameDialog])
 
   useEffect(() => {
     if (!isAnnotationToolbarOpen) return undefined
@@ -2991,6 +3442,36 @@ function App() {
     }
   }, [isOcrDragging, isOcrMode, numPages, pageNumber, pdfUrl])
 
+  const requestBackendJson = useCallback(async (endpoint, payload) => {
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    })
+    const data = await response.json().catch(() => ({}))
+
+    if (!response.ok) {
+      throw new Error(data.error || UI.translateError)
+    }
+
+    return data
+  }, [])
+
+  const requestTranslation = useCallback(async (text) => {
+    const payload = { text }
+    const data = window.electronAPI?.translateText
+      ? await window.electronAPI.translateText(payload)
+      : await requestBackendJson('/ai/translate-text', payload)
+
+    if (!data.translation) {
+      throw new Error('AI provider returned an empty translation.')
+    }
+
+    return data.translation
+  }, [requestBackendJson])
+
   useEffect(() => {
     const text = selectedText.trim()
 
@@ -3033,25 +3514,7 @@ function App() {
     }, 300)
 
     return () => clearTimeout(timerId)
-  }, [selectedText, setSuccessfulRightPanelResult])
-
-  async function requestTranslation(text) {
-    const response = await fetch(`${API_BASE_URL}/translate`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ text }),
-    })
-
-    const data = await response.json()
-
-    if (!response.ok) {
-      throw new Error(data.error || UI.translateError)
-    }
-
-    return data.translation
-  }
+  }, [selectedText, setSuccessfulRightPanelResult, requestTranslation])
 
   function applyOpenedPdf(pdfFile, restoreRecord = null) {
     if (!pdfFile?.dataUrl && !pdfFile?.url) return
@@ -3070,6 +3533,8 @@ function App() {
       tab.documentId === nextDocument.documentId ||
       (nextDocument.filePath && tab.filePath === nextDocument.filePath),
     )
+    setSearchHitMarkers([])
+    setSearchHitMarkerRequest(null)
 
     if (existingTab) {
       const nextTabs = pdfTabs.map((tab) => (
@@ -3235,8 +3700,458 @@ function App() {
     return Math.min(100, Math.max(0, Math.round(((Number(document.lastPage) || 1) / document.totalPages) * 100)))
   }
 
+  function openSearchDialog(source, query = '') {
+    setSearchDialog((currentDialog) => ({
+      open: true,
+      source,
+      query,
+      scope: currentDialog.source === source ? currentDialog.scope : 'all',
+    }))
+    setSearchStatus('')
+  }
+
+  function closeSearchDialog() {
+    setSearchDialog((currentDialog) => ({ ...currentDialog, open: false }))
+    setSearchStatus('')
+  }
+
+  function updateSearchDialogQuery(query) {
+    setSearchDialog((currentDialog) => ({ ...currentDialog, query }))
+    if (searchDialog.source === 'reader') {
+      setReaderSearchInput(query)
+    } else {
+      setLibrarySearch(query)
+    }
+  }
+
+  function updateSearchDialogScope(scope) {
+    setSearchDialog((currentDialog) => ({ ...currentDialog, scope }))
+  }
+
+  function handleReaderSearchInputChange(event) {
+    const query = event.target.value
+    setReaderSearchInput(query)
+    openSearchDialog('reader', query)
+  }
+
+  function handleReaderSearchKeyDown(event) {
+    if (event.key === 'Enter') {
+      openSearchDialog('reader', readerSearchInput)
+    }
+  }
+
+  function handleLibrarySearchInputChange(event) {
+    const query = event.target.value
+    setLibrarySearch(query)
+    if (librarySearchMode === 'global') {
+      openSearchDialog('library', query)
+    }
+  }
+
+  function updateLibrarySearchMode(mode) {
+    setLibrarySearchMode(mode)
+    if (mode === 'global') {
+      openSearchDialog('library', librarySearch)
+    }
+  }
+
+  function getPdfSearchCacheKey() {
+    return `${currentDocument?.documentId || ''}|${pdfUrl}`
+  }
+
+  async function extractPdfTextPages(pdfSource) {
+    if (!pdfSource) return []
+    let pdfDocument = null
+    const loadingTask = pdfjs.getDocument(pdfSource)
+
+    try {
+      pdfDocument = await loadingTask.promise
+      const pages = []
+
+      for (let pageIndex = 1; pageIndex <= pdfDocument.numPages; pageIndex += 1) {
+        const page = await pdfDocument.getPage(pageIndex)
+        const textContent = await page.getTextContent()
+        const text = normalizeSearchText(textContent.items.map((item) => item.str).join(' '))
+        pages.push({ pageNumber: pageIndex, text })
+      }
+
+      return pages
+    } finally {
+      if (pdfDocument?.destroy) {
+        try {
+          await pdfDocument.destroy()
+        } catch {
+          // Ignore cleanup failures from PDF.js worker teardown.
+        }
+      }
+    }
+  }
+
+  async function getCurrentPdfTextPages() {
+    if (!pdfUrl) return []
+
+    const cacheKey = getPdfSearchCacheKey()
+    if (pdfTextSearchCacheRef.current.key === cacheKey) {
+      return pdfTextSearchCacheRef.current.pages
+    }
+
+    const pages = await extractPdfTextPages(pdfUrl)
+    pdfTextSearchCacheRef.current = { key: cacheKey, pages }
+    return pages
+  }
+
+  async function getLibraryDocumentTextPages(document) {
+    if (!document?.documentId || !document.filePath || !window.electronAPI?.openPdfFromPath) return []
+
+    const cacheKey = `${document.documentId}|${document.filePath}|${document.updatedAt || 0}|${document.fileSize || 0}`
+    if (libraryDocumentTextCacheRef.current.has(cacheKey)) {
+      return libraryDocumentTextCacheRef.current.get(cacheKey)
+    }
+
+    const pdfFile = await window.electronAPI.openPdfFromPath(document.filePath)
+    const pages = await extractPdfTextPages(pdfFile.dataUrl || pdfFile.url)
+    libraryDocumentTextCacheRef.current.set(cacheKey, pages)
+    return pages
+  }
+
+  function createSearchResult({ source, type, document, item = null, pageNumber = null, title, subtitle = '', snippet, query = '' }) {
+    return {
+      id: `${source}-${type}-${document?.documentId || currentDocument?.documentId || 'current'}-${item?.id || pageNumber || title}`,
+      source,
+      type,
+      document,
+      item,
+      pageNumber,
+      title,
+      subtitle,
+      snippet,
+      query,
+    }
+  }
+
+  function appendRecordSearchResult(results, { source, type, document, item, title, fallbackTitle, query }) {
+    const texts = collectSearchTexts(item)
+    const snippet = getSearchMatchSnippet(texts, query)
+    if (!snippet) return
+
+    const page = getSearchPageNumber(item)
+    results.push(createSearchResult({
+      source,
+      type,
+      document,
+      item,
+      pageNumber: page,
+      title: title || fallbackTitle,
+      subtitle: [document?.fileName, page ? `第 ${page} 页` : ''].filter(Boolean).join(' · '),
+      snippet,
+      query,
+    }))
+  }
+
+  function buildReaderSearchResults(query, scope, pdfPages = []) {
+    const results = []
+
+    if (canSearchScope(scope, 'document')) {
+      pdfPages.forEach((page) => {
+        const snippet = getSearchMatchSnippet([page.text], query)
+        if (!snippet) return
+
+        results.push(createSearchResult({
+          source: 'reader',
+          type: 'document',
+          document: currentDocument,
+          pageNumber: page.pageNumber,
+          title: `第 ${page.pageNumber} 页`,
+          subtitle: currentDocument?.fileName || '当前文献',
+          snippet,
+          query,
+        }))
+      })
+    }
+
+    if (canSearchScope(scope, 'translation')) {
+      translationHistory.forEach((item) => appendRecordSearchResult(results, {
+        source: 'reader',
+        type: 'translation',
+        document: currentDocument,
+        item,
+        query,
+        title: item.title || HISTORY_TYPE_LABELS[item.type] || '翻译结果',
+        fallbackTitle: '翻译结果',
+      }))
+    }
+
+    if (canSearchScope(scope, 'annotation')) {
+      documentAnnotations
+        .filter((item) => item?.type !== 'ocr-note-tag')
+        .forEach((item) => appendRecordSearchResult(results, {
+          source: 'reader',
+          type: 'annotation',
+          document: currentDocument,
+          item,
+          query,
+          title: '批注',
+          fallbackTitle: '批注',
+        }))
+    }
+
+    if (canSearchScope(scope, 'note')) {
+      documentNotes.forEach((item) => appendRecordSearchResult(results, {
+        source: 'reader',
+        type: 'note',
+        document: currentDocument,
+        item,
+        query,
+        title: item.title || NOTE_TYPE_LABELS[item.type] || '笔记',
+        fallbackTitle: '笔记',
+      }))
+    }
+
+    return results
+  }
+
+  function getLibraryGlobalSearchCacheKey(includeDocumentText = false) {
+    const libraryKey = libraryDocuments
+      .map((document) => `${document.documentId}:${document.updatedAt || 0}:${document.lastOpenedAt || 0}:${document.notesCount || 0}:${document.annotationsCount || 0}`)
+      .join('|')
+    return `${libraryKey}|pdf:${includeDocumentText ? '1' : '0'}`
+  }
+
+  async function loadLibraryGlobalSearchData(includeDocumentText = false) {
+    const cacheKey = getLibraryGlobalSearchCacheKey(includeDocumentText)
+    if (librarySearchCacheRef.current.key === cacheKey && librarySearchCacheRef.current.data) {
+      return librarySearchCacheRef.current.data
+    }
+
+    const data = {
+      documents: libraryDocuments.slice(),
+      documentPages: [],
+      histories: [],
+      annotations: [],
+      notes: [],
+    }
+
+    if (
+      window.electronAPI?.getDocumentTranslationHistory &&
+      window.electronAPI?.getDocumentAnnotations &&
+      window.electronAPI?.getDocumentNotes
+    ) {
+      const rows = await Promise.all(libraryDocuments.map(async (document) => {
+        try {
+          const [histories, annotations, notes] = await Promise.all([
+            window.electronAPI.getDocumentTranslationHistory(document.documentId),
+            window.electronAPI.getDocumentAnnotations(document.documentId),
+            window.electronAPI.getDocumentNotes(document.documentId),
+          ])
+
+          return { document, histories, annotations, notes }
+        } catch {
+          return { document, histories: [], annotations: [], notes: [] }
+        }
+      }))
+
+      rows.forEach((row) => {
+        sortExportDetailRecords(row.histories).forEach((item) => data.histories.push({ document: row.document, item }))
+        normalizeDocumentAnnotationList(row.annotations)
+          .filter((item) => item?.type !== 'ocr-note-tag')
+          .forEach((item) => data.annotations.push({ document: row.document, item }))
+        normalizeDocumentNoteList(row.notes).forEach((item) => data.notes.push({ document: row.document, item }))
+      })
+    }
+
+    if (includeDocumentText) {
+      for (const document of libraryDocuments) {
+        try {
+          const pages = await getLibraryDocumentTextPages(document)
+          pages.forEach((page) => {
+            if (page.text) data.documentPages.push({ document, page })
+          })
+        } catch {
+          // Some library entries may point to moved files; keep global search usable for the rest.
+        }
+      }
+    }
+
+    librarySearchCacheRef.current = { key: cacheKey, data }
+    setLibraryGlobalSearchData(data)
+    return data
+  }
+
+  function buildLibrarySearchResults(query, scope, data) {
+    const results = []
+    const searchData = data || libraryGlobalSearchData || { documents: [], documentPages: [], histories: [], annotations: [], notes: [] }
+
+    if (canSearchScope(scope, 'document')) {
+      searchData.documentPages.forEach(({ document, page }) => {
+        const snippet = getSearchMatchSnippet([page.text], query)
+        if (!snippet) return
+
+        results.push(createSearchResult({
+          source: 'library',
+          type: 'document',
+          document,
+          pageNumber: page.pageNumber,
+          title: `第 ${page.pageNumber} 页`,
+          subtitle: document.fileName,
+          snippet,
+          query,
+        }))
+      })
+    }
+
+    if (canSearchScope(scope, 'translation')) {
+      searchData.histories.forEach(({ document, item }) => appendRecordSearchResult(results, {
+        source: 'library',
+        type: 'translation',
+        document,
+        item,
+        query,
+        title: item.title || HISTORY_TYPE_LABELS[item.type] || '翻译结果',
+        fallbackTitle: '翻译结果',
+      }))
+    }
+
+    if (canSearchScope(scope, 'annotation')) {
+      searchData.annotations.forEach(({ document, item }) => appendRecordSearchResult(results, {
+        source: 'library',
+        type: 'annotation',
+        document,
+        item,
+        query,
+        title: '批注',
+        fallbackTitle: '批注',
+      }))
+    }
+
+    if (canSearchScope(scope, 'note')) {
+      searchData.notes.forEach(({ document, item }) => appendRecordSearchResult(results, {
+        source: 'library',
+        type: 'note',
+        document,
+        item,
+        query,
+        title: item.title || NOTE_TYPE_LABELS[item.type] || '笔记',
+        fallbackTitle: '笔记',
+      }))
+    }
+
+    return results
+  }
+
+  function getSearchTextLayerHitMarkers(query) {
+    const viewer = pdfViewerRef.current
+    const normalizedQuery = normalizeSearchText(query).toLowerCase()
+    if (!viewer || !normalizedQuery) return []
+
+    const viewerRect = viewer.getBoundingClientRect()
+    const textSpans = Array.from(viewer.querySelectorAll('.react-pdf__Page__textContent span, .textLayer span'))
+    const spanRecords = textSpans
+      .map((span, index) => {
+        const text = normalizeSearchText(span.textContent)
+        const chars = Array.from(text)
+        if (!chars.length) return null
+
+        const rect = span.getBoundingClientRect()
+        if (rect.width < 2 || rect.height < 2) return null
+
+        return { index, text, chars, rect }
+      })
+      .filter(Boolean)
+
+    return getSearchHitRanges(spanRecords, normalizedQuery).slice(0, 24).map((range, index) => {
+      const record = spanRecords[range.spanIndex]
+      const rect = record.rect
+      const charCount = record.chars.length
+      const startRatio = range.start / charCount
+      const endRatio = range.end / charCount
+      const verticalInset = Math.min(2, rect.height * 0.12)
+      const left = rect.left - viewerRect.left + viewer.scrollLeft + (rect.width * startRatio)
+      const width = rect.width * Math.max(0.01, endRatio - startRatio)
+
+      return {
+        id: `${searchHitMarkerRequest?.id || 'hit'}-${record.index}-${range.start}-${range.end}-${index}`,
+        left,
+        top: rect.top - viewerRect.top + viewer.scrollTop + verticalInset,
+        width: Math.max(3, width),
+        height: Math.max(8, rect.height - (verticalInset * 2)),
+      }
+    })
+  }
+
+  function requestSearchHitMarker(result) {
+    const query = normalizeSearchText(result?.query || searchDialog.query)
+    if (!query || !result?.pageNumber) {
+      setSearchHitMarkers([])
+      setSearchHitMarkerRequest(null)
+      return
+    }
+
+    setSearchHitMarkers([])
+    setSearchHitMarkerRequest({
+      id: Date.now(),
+      query,
+      pageNumber: result.pageNumber,
+    })
+  }
+
+  function clearSearchHitMarkers() {
+    if (!searchHitMarkerRequest && searchHitMarkers.length === 0) return
+
+    setSearchHitMarkerRequest(null)
+    setSearchHitMarkers([])
+  }
+
+  async function openSearchResult(result) {
+    closeSearchDialog()
+
+    if (result.source === 'library' && result.document) {
+      const opened = await openLibraryDocument(result.document)
+      if (!opened) return
+    } else {
+      setActiveModule('reader')
+    }
+
+    if (result.pageNumber) {
+      setPageNumber(result.pageNumber)
+      setPageJumpInput(String(result.pageNumber))
+    }
+    requestSearchHitMarker(result)
+
+    if (result.type === 'translation') {
+      const restoredResult = restoreHistoryResult(result.item)
+      if (restoredResult) {
+        setRightPanelResult(restoredResult)
+      }
+      setRightPanelVisible(true)
+      setRightPanelTab('result')
+      return
+    }
+
+    if (result.type === 'note') {
+      setSelectedNoteId(result.item?.id || '')
+      setRightPanelVisible(true)
+      setRightPanelTab('notes')
+      return
+    }
+
+    if (result.type === 'annotation') {
+      setActiveAnnotationId(result.item?.id || '')
+    }
+  }
+
+  function handleSearchDialogKeyDown(event) {
+    if (event.key === 'Enter' && searchResults[0]) {
+      event.preventDefault()
+      void openSearchResult(searchResults[0])
+    }
+
+    if (event.key === 'Escape') {
+      closeSearchDialog()
+    }
+  }
+
   function getVisibleLibraryDocuments() {
-    const query = librarySearch.trim().toLowerCase()
+    const query = librarySearchMode === 'filename' ? librarySearch.trim().toLowerCase() : ''
 
     return libraryDocuments
       .filter((document) => (
@@ -3359,7 +4274,7 @@ function App() {
   }
 
   async function openLibraryDocument(document) {
-    if (!document?.filePath) return
+    if (!document?.filePath) return false
 
     const existingTab = pdfTabs.find((tab) =>
       tab.documentId === document.documentId ||
@@ -3369,12 +4284,12 @@ function App() {
     if (existingTab) {
       setActiveModule('reader')
       activatePdfTab(existingTab.id)
-      return
+      return true
     }
 
     if (!window.electronAPI?.openPdfFromPath) {
       setLibraryStatus('当前环境无法从路径打开 PDF')
-      return
+      return false
     }
 
     try {
@@ -3388,8 +4303,10 @@ function App() {
         scale: document.scale || zoomPercent,
         lastOpenedAt: document.lastOpenedAt || Date.now(),
       })
+      return true
     } catch (error) {
       setLibraryStatus(error.message || '文件不存在或已移动')
+      return false
     }
   }
 
@@ -3404,8 +4321,10 @@ function App() {
   }
 
   function normalizeSettings(config = {}) {
-    const provider = Object.hasOwn(PROVIDERS, config.provider) ? config.provider : 'deepseek'
-    const providerDefaults = PROVIDERS[provider]
+    const rawProvider = String(config.provider || '').trim()
+    const legacyDefaults = LEGACY_PROVIDER_DEFAULTS[rawProvider]
+    const provider = legacyDefaults?.provider || normalizeProviderKey(rawProvider)
+    const providerDefaults = legacyDefaults || PROVIDERS[provider]
 
     return {
       provider,
@@ -3478,11 +4397,15 @@ function App() {
   }
 
   function updateSettingsProvider(provider) {
+    const nextProvider = normalizeProviderKey(provider)
+
     setSettingsForm((currentSettings) => ({
       ...currentSettings,
-      provider,
-      baseUrl: PROVIDERS[provider].baseUrl,
-      model: PROVIDERS[provider].model,
+      provider: nextProvider,
+      baseUrl: PROVIDERS[nextProvider].baseUrl,
+      model: PROVIDERS[nextProvider].model,
+      enableMultimodalTranslation:
+        currentSettings.enableMultimodalTranslation && PROVIDERS[nextProvider].supportsMultimodal,
     }))
   }
 
@@ -3535,7 +4458,12 @@ function App() {
     setSettingsStatus('')
 
     try {
-      const savedConfig = await window.electronAPI.saveConfig({ ...settingsForm, rightPanelWidth })
+      const savedConfig = await window.electronAPI.saveConfig({
+        ...settingsForm,
+        provider: normalizeProviderKey(settingsForm.provider),
+        enableMultimodalTranslation: settingsSupportMultimodal(settingsForm),
+        rightPanelWidth,
+      })
       setSettingsForm(normalizeSettings(savedConfig))
       setSettingsStatus(UI.settingsSaved)
     } catch (error) {
@@ -4281,6 +5209,14 @@ function App() {
       ocrImage: suppressHighlightTintOnCanvas(cleanedCanvas) || image,
       width: outputCanvas.width,
       height: outputCanvas.height,
+      originalImageWidth: outputCanvas.width,
+      originalImageHeight: outputCanvas.height,
+      sourceX,
+      sourceY,
+      sourceWidth,
+      sourceHeight,
+      scaleX,
+      scaleY,
     }
   }
 
@@ -4497,15 +5433,25 @@ function App() {
       '请提供需要翻译的英文文本',
       '请提供要翻译的文本',
       '请提供需要翻译',
+      '请提供完整句子',
+      '请提供完整英文文本',
+      '请重新上传',
       '无法翻译',
       '无法进行翻译',
+      '无法识别',
       '不是英文',
       '不是英文学术文本',
       'provide the english text',
+      'provide the complete',
+      'provide complete',
       'please provide',
+      'please upload',
       'no translatable text',
       'cannot translate',
+      'cannot identify',
+      'cannot recognize',
       'unable to translate',
+      'unable to recognize',
       'provided text is not english',
       'the provided text is not english',
       'not english academic text',
@@ -5153,6 +6099,96 @@ function App() {
     return nextText ? `${nextText}…` : '…'
   }
 
+  function getPaddedLineBox(segment, canvasWidth, canvasHeight) {
+    const paddingX = clampNumber(segment.height * 0.18, 3, 6)
+    const paddingY = clampNumber(segment.height * 0.1, 2, 4)
+    const x = clampNumber(segment.x - paddingX, 0, canvasWidth - 1)
+    const y = clampNumber(segment.y - paddingY, 0, canvasHeight - 1)
+
+    return {
+      x,
+      y,
+      width: Math.max(8, Math.min(segment.width + paddingX * 2, canvasWidth - x)),
+      height: Math.max(6, Math.min(segment.height + paddingY * 2, canvasHeight - y)),
+      paddingX,
+      paddingY,
+    }
+  }
+
+  function drawTextInBox(context, text, box, options = {}) {
+    const color = options.color || '#111827'
+    const minFontSize = Number(options.minFontSize) || 10
+    const maxFontSize = Number(options.maxFontSize) || 18
+    const initialFontSize = clampNumber(
+      Number(options.fontSize) || Math.floor(box.height * 0.75),
+      minFontSize,
+      maxFontSize,
+    )
+    let fallback = null
+
+    for (let fontSize = initialFontSize; fontSize >= minFontSize; fontSize -= 1) {
+      context.font = getCompareCanvasFont(fontSize)
+      const lineHeight = fontSize * 1.16
+      const maxLines = Math.max(1, Math.floor(box.height / lineHeight))
+      const wrappedLines = wrapCanvasText(context, text, box.width)
+      const visibleLines = wrappedLines.slice(0, maxLines)
+      const truncated = wrappedLines.length > maxLines
+
+      fallback = { fontSize, lineHeight, lines: visibleLines, wrappedLines, maxLines, truncated }
+
+      if (!truncated) break
+    }
+
+    if (!fallback?.lines?.length) return { lines: [], truncated: true }
+
+    const lines = fallback.lines.slice()
+    if (fallback.truncated && lines.length) {
+      const lastLine = lines[lines.length - 1]
+      context.font = getCompareCanvasFont(fallback.fontSize)
+      lines[lines.length - 1] = trimCanvasTextToWidth(context, `${lastLine}${fallback.wrappedLines.slice(fallback.maxLines).join('')}`, box.width)
+    }
+
+    context.save()
+    context.fillStyle = color
+    context.textBaseline = 'top'
+    context.font = getCompareCanvasFont(fallback.fontSize)
+    lines.forEach((line, index) => {
+      context.fillText(line, box.x, box.y + index * fallback.lineHeight)
+    })
+    context.restore()
+
+    return {
+      lines,
+      fontSize: fallback.fontSize,
+      lineHeight: fallback.lineHeight,
+      truncated: fallback.truncated,
+    }
+  }
+
+  function hasLineLevelMultimodalTranslations(block) {
+    return Boolean(
+      block?.multimodal &&
+      Array.isArray(block.sourceBlocks) &&
+      block.sourceBlocks.some((line) => line.translation && !isUselessTranslationResult(line.translation)),
+    )
+  }
+
+  function drawDebugLayoutBoxes(context, blocks, canvasWidth, canvasHeight) {
+    if (!MULTIMODAL_OCR_DEBUG) return
+
+    context.save()
+    context.lineWidth = 1.5
+    blocks.forEach((block) => {
+      context.strokeStyle = 'rgba(37, 99, 235, 0.9)'
+      context.strokeRect(block.x, block.y, Math.min(block.width, canvasWidth - block.x), Math.min(block.height, canvasHeight - block.y))
+      context.strokeStyle = 'rgba(220, 38, 38, 0.92)'
+      getCompareSourceBlocks(block).forEach((line) => {
+        context.strokeRect(line.x, line.y, Math.min(line.width, canvasWidth - line.x), Math.min(line.height, canvasHeight - line.y))
+      })
+    })
+    context.restore()
+  }
+
   function wrapCanvasTextAcrossSlots(context, text, slots) {
     const normalizedText = text.replace(/\s+/g, ' ').trim()
     const characters = Array.from(normalizedText)
@@ -5748,22 +6784,27 @@ function App() {
   function normalizeMultimodalRect(item = {}, imageSize = {}) {
     const imageWidth = Number(imageSize.width) || 0
     const imageHeight = Number(imageSize.height) || 0
-    const rawX = item.x ?? item.left ?? item.x0
-    const rawY = item.y ?? item.top ?? item.y0
-    const rawWidth = item.width ?? (Number.isFinite(Number(item.x1)) && Number.isFinite(Number(rawX)) ? Number(item.x1) - Number(rawX) : undefined)
-    const rawHeight = item.height ?? (Number.isFinite(Number(item.y1)) && Number.isFinite(Number(rawY)) ? Number(item.y1) - Number(rawY) : undefined)
+    const bbox = Array.isArray(item.bbox)
+      ? { x: item.bbox[0], y: item.bbox[1], width: item.bbox[2], height: item.bbox[3] }
+      : item.bbox || item.box || item.boundingBox || item.rect || item
+    const rawX = bbox.x ?? bbox.left ?? bbox.x0
+    const rawY = bbox.y ?? bbox.top ?? bbox.y0
+    const rawWidth = bbox.width ?? (Number.isFinite(Number(bbox.x1)) && Number.isFinite(Number(rawX)) ? Number(bbox.x1) - Number(rawX) : undefined)
+    const rawHeight = bbox.height ?? (Number.isFinite(Number(bbox.y1)) && Number.isFinite(Number(rawY)) ? Number(bbox.y1) - Number(rawY) : undefined)
     const x = normalizeMultimodalCoordinate(rawX, imageWidth)
     const y = normalizeMultimodalCoordinate(rawY, imageHeight)
     const width = normalizeMultimodalCoordinate(rawWidth, imageWidth)
     const height = normalizeMultimodalCoordinate(rawHeight, imageHeight)
 
     if (![x, y, width, height].every(Number.isFinite) || width <= 1 || height <= 1) return null
+    const nextX = clampNumber(x, 0, Math.max(imageWidth - 1, 0))
+    const nextY = clampNumber(y, 0, Math.max(imageHeight - 1, 0))
 
     return {
-      x: clampNumber(x, 0, Math.max(imageWidth - 1, 0)),
-      y: clampNumber(y, 0, Math.max(imageHeight - 1, 0)),
-      width: Math.max(1, Math.min(width, Math.max(imageWidth - x, 1))),
-      height: Math.max(1, Math.min(height, Math.max(imageHeight - y, 1))),
+      x: nextX,
+      y: nextY,
+      width: Math.max(1, Math.min(width, Math.max(imageWidth - nextX, 1))),
+      height: Math.max(1, Math.min(height, Math.max(imageHeight - nextY, 1))),
     }
   }
 
@@ -5800,12 +6841,16 @@ function App() {
         )
           .map((line, lineIndex) => {
             const rect = normalizeMultimodalRect(line, imageSize)
-            const text = getMultimodalTextValue(line, ['text', 'sourceText', 'originalText', 'lineText'])
+            const text = cleanOcrSourceForTranslation(getMultimodalTextValue(line, ['original', 'text', 'sourceText', 'originalText', 'lineText']))
+            const translation = cleanResultText(getMultimodalTextValue(line, ['translation', 'translatedText', 'targetText', 'result']))
             if (!rect || !text) return null
 
             return {
               index: lineIndex,
+              lineId: line.lineId || line.id || `${index}-${lineIndex}`,
               text,
+              sourceText: text,
+              translation: isUselessTranslationResult(translation) ? '' : translation,
               ...rect,
               confidence: Number(line.confidence) || 100,
             }
@@ -5813,15 +6858,19 @@ function App() {
           .filter(Boolean)
         const rect = normalizeMultimodalRect(block, imageSize) || getMultimodalUnionRect(sourceBlocks)
         const text = cleanOcrSourceForTranslation(
-          getMultimodalTextValue(block, ['text', 'sourceText', 'originalText', 'moduleText']) ||
+          getMultimodalTextValue(block, ['original', 'text', 'sourceText', 'originalText', 'moduleText']) ||
           sourceBlocks.map((line) => line.text).join(' '),
         )
-        const translation = cleanResultText(getMultimodalTextValue(block, ['translation', 'translatedText', 'targetText', 'result']))
+        const translation = cleanResultText(
+          getMultimodalTextValue(block, ['translation', 'translatedText', 'targetText', 'result']) ||
+          sourceBlocks.map((line) => line.translation).filter(Boolean).join('\n'),
+        )
 
         if (!rect || !text || !translation || isUselessTranslationResult(translation)) return null
 
         return {
           index,
+          moduleId: block.moduleId || block.id || `m${index + 1}`,
           text,
           sourceText: text,
           translation,
@@ -5838,26 +6887,41 @@ function App() {
   }
 
   async function requestMultimodalImageTranslation(image, imageSize, mode) {
-    const response = await fetch(`${API_BASE_URL}/multimodal-translate-image`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        image,
-        mode,
-        imageWidth: imageSize.width,
-        imageHeight: imageSize.height,
-      }),
-    })
-    const data = await response.json()
-
-    if (!response.ok) {
-      throw new Error(data.error || '多模态翻译失败')
+    const payload = {
+      image,
+      mode,
+      imageWidth: imageSize.originalImageWidth || imageSize.width,
+      imageHeight: imageSize.originalImageHeight || imageSize.height,
     }
+    const isDiagramMode = mode === 'diagram'
+    debugMultimodalOcr('request image', {
+      mode,
+      originalImageWidth: payload.imageWidth,
+      originalImageHeight: payload.imageHeight,
+      imageSize,
+    })
+    const data = window.electronAPI?.translateImageDiagram && window.electronAPI?.translateImageOCR
+      ? await (isDiagramMode
+          ? window.electronAPI.translateImageDiagram(payload)
+          : window.electronAPI.translateImageOCR(payload))
+      : await requestBackendJson(isDiagramMode ? '/ai/translate-image-diagram' : '/ai/translate-image-ocr', payload)
 
     const blocks = normalizeMultimodalTranslationBlocks(data.blocks || [], imageSize)
     if (!blocks.length) throw new Error('多模态翻译未返回可用文字模块')
+
+    debugMultimodalOcr('provider layout', {
+      raw: data.raw,
+      layout: data.layout,
+      normalizedBlocks: blocks,
+      lineBboxes: blocks.flatMap((block) => block.sourceBlocks || []).map((line) => ({
+        text: line.text,
+        translation: line.translation,
+        x: line.x,
+        y: line.y,
+        width: line.width,
+        height: line.height,
+      })),
+    })
 
     return blocks
   }
@@ -5870,6 +6934,7 @@ function App() {
     translatedBlocks,
     sourceBlocks,
     ocrSelectionRect,
+    fallbackNotice = '',
   }) {
     if (mode === 'compare') {
       const translatedImage = await createCompareResultImage(recognitionImage, croppedImage, translatedBlocks)
@@ -5882,7 +6947,7 @@ function App() {
 
       setSuccessfulRightPanelResult({
         type: 'ocr-compare',
-        title: '对照模式结果',
+        title: fallbackNotice ? `对照模式结果（${fallbackNotice}）` : '对照模式结果',
         compareOriginalImage: image,
         compareTranslatedImage: translatedImage,
         compareLayout: layout,
@@ -5906,7 +6971,7 @@ function App() {
 
     setSuccessfulRightPanelResult({
       type: 'ocr-diagram',
-      title: '图解模式结果',
+      title: fallbackNotice ? `图解模式结果（${fallbackNotice}）` : '图解模式结果',
       screenshotDataUrl: recognitionImage,
       diagramResultImage: resultImage,
       ocrSelectionRect,
@@ -5924,10 +6989,19 @@ function App() {
     const context = canvas.getContext('2d')
     const placedRects = []
 
-    canvas.width = imageSize.width || sourceImage.naturalWidth
-    canvas.height = imageSize.height || sourceImage.naturalHeight
+    canvas.width = imageSize.originalImageWidth || imageSize.width || sourceImage.naturalWidth
+    canvas.height = imageSize.originalImageHeight || imageSize.height || sourceImage.naturalHeight
     context.drawImage(sourceImage, 0, 0, canvas.width, canvas.height)
     const sourceRects = getDiagramSourceRects(sourceBlocks)
+
+    debugMultimodalOcr('diagram canvas', {
+      canvasWidth: canvas.width,
+      canvasHeight: canvas.height,
+      originalImageWidth: imageSize.originalImageWidth || imageSize.width,
+      originalImageHeight: imageSize.originalImageHeight || imageSize.height,
+      scaleX: canvas.width / Math.max(imageSize.originalImageWidth || imageSize.width || canvas.width, 1),
+      scaleY: canvas.height / Math.max(imageSize.originalImageHeight || imageSize.height || canvas.height, 1),
+    })
 
     translatedBlocks.forEach((block) => {
       const plan = getDiagramLabelPlan(context, block, canvas.width, canvas.height)
@@ -5944,7 +7018,7 @@ function App() {
         context,
       )
 
-      console.log('OCR 图解模式译文位置', {
+      debugMultimodalOcr('diagram label draw', {
         text: block.text,
         translation: block.translation,
         source: {
@@ -5961,6 +7035,12 @@ function App() {
       const overlayStyle = getOverlayStyleForMode('diagram')
       placedRects.push(rect)
       context.save()
+      context.strokeStyle = 'rgba(37, 99, 235, 0.5)'
+      context.lineWidth = 1
+      context.beginPath()
+      context.moveTo(block.x + block.width / 2, block.y + block.height / 2)
+      context.lineTo(rect.x + rect.width / 2, rect.y + rect.height / 2)
+      context.stroke()
       context.shadowColor = overlayStyle.shadow
       context.shadowBlur = overlayStyle.shadowBlur
       context.shadowOffsetY = overlayStyle.shadowOffsetY
@@ -5984,6 +7064,8 @@ function App() {
       context.restore()
     })
 
+    drawDebugLayoutBoxes(context, translatedBlocks, canvas.width, canvas.height)
+
     return canvas.toDataURL('image/png')
   }
 
@@ -5992,11 +7074,53 @@ function App() {
     const canvas = document.createElement('canvas')
     const context = canvas.getContext('2d')
 
-    canvas.width = imageSize.width || sourceImage.naturalWidth
-    canvas.height = imageSize.height || sourceImage.naturalHeight
+    canvas.width = imageSize.originalImageWidth || imageSize.width || sourceImage.naturalWidth
+    canvas.height = imageSize.originalImageHeight || imageSize.height || sourceImage.naturalHeight
     context.drawImage(sourceImage, 0, 0, canvas.width, canvas.height)
 
+    debugMultimodalOcr('compare canvas', {
+      canvasWidth: canvas.width,
+      canvasHeight: canvas.height,
+      originalImageWidth: imageSize.originalImageWidth || imageSize.width,
+      originalImageHeight: imageSize.originalImageHeight || imageSize.height,
+      scaleX: canvas.width / Math.max(imageSize.originalImageWidth || imageSize.width || canvas.width, 1),
+      scaleY: canvas.height / Math.max(imageSize.originalImageHeight || imageSize.height || canvas.height, 1),
+    })
+
     translatedBlocks.forEach((block) => {
+      if (hasLineLevelMultimodalTranslations(block)) {
+        getCompareSourceBlocks(block).forEach((line) => {
+          const translation = cleanResultText(line.translation || '')
+          if (!translation || isUselessTranslationResult(translation)) return
+
+          const backgroundBox = getPaddedLineBox(line, canvas.width, canvas.height)
+          const textBox = {
+            x: backgroundBox.x + backgroundBox.paddingX,
+            y: backgroundBox.y + backgroundBox.paddingY,
+            width: Math.max(6, backgroundBox.width - backgroundBox.paddingX * 2),
+            height: Math.max(6, backgroundBox.height - backgroundBox.paddingY * 2),
+          }
+
+          context.save()
+          context.fillStyle = 'rgba(255, 255, 255, 0.88)'
+          context.fillRect(backgroundBox.x, backgroundBox.y, backgroundBox.width, backgroundBox.height)
+          context.restore()
+          drawTextInBox(context, translation, textBox, {
+            fontSize: clampNumber(line.height * 0.75, 10, 18),
+            minFontSize: 10,
+            maxFontSize: 18,
+          })
+
+          debugMultimodalOcr('compare line draw', {
+            text: line.text,
+            translation,
+            bbox: { x: line.x, y: line.y, width: line.width, height: line.height },
+            backgroundBox,
+          })
+        })
+        return
+      }
+
       const plan = getCompareReplacementPlan(context, block, canvas.width, canvas.height)
       if (!plan.lines.length) return
 
@@ -6016,6 +7140,8 @@ function App() {
       context.restore()
     })
 
+    drawDebugLayoutBoxes(context, translatedBlocks, canvas.width, canvas.height)
+
     return canvas.toDataURL('image/png')
   }
 
@@ -6027,6 +7153,7 @@ function App() {
 
   async function runOcrTranslation(rect, mode = 'sidebar') {
     let worker = null
+    let multimodalFallbackNotice = ''
 
     try {
       clearOcrCaptureUi()
@@ -6042,28 +7169,41 @@ function App() {
       })
       const { image } = croppedImage
       const recognitionImage = croppedImage.ocrImage || image
+      debugMultimodalOcr('cropped original image', {
+        mode,
+        width: croppedImage.width,
+        height: croppedImage.height,
+        originalImageWidth: croppedImage.originalImageWidth,
+        originalImageHeight: croppedImage.originalImageHeight,
+        sourceX: croppedImage.sourceX,
+        sourceY: croppedImage.sourceY,
+        sourceWidth: croppedImage.sourceWidth,
+        sourceHeight: croppedImage.sourceHeight,
+        scaleX: croppedImage.scaleX,
+        scaleY: croppedImage.scaleY,
+      })
       setOcrResult({
         status: mode === 'diagram' ? 'diagram-recognizing' : mode === 'compare' ? 'compare-recognizing' : 'recognizing',
         mode,
-        image: recognitionImage,
+        image,
         text: '',
         translation: '',
         error: '',
       })
 
-      if ((mode === 'diagram' || mode === 'compare') && settingsFormRef.current.enableMultimodalTranslation) {
+      if ((mode === 'diagram' || mode === 'compare') && settingsSupportMultimodal(settingsFormRef.current)) {
         try {
           setOcrResult({
             status: mode === 'diagram' ? 'diagram-translating' : 'compare-translating',
             mode,
-            image: recognitionImage,
+            image,
             text: '',
             translation: '',
             error: '',
           })
-          const translatedBlocks = await requestMultimodalImageTranslation(recognitionImage, croppedImage, mode)
+          const translatedBlocks = await requestMultimodalImageTranslation(image, croppedImage, mode)
 
-          console.log('多模态图解/对照模式结果', {
+          debugMultimodalOcr('multimodal result', {
             mode,
             blockCount: translatedBlocks.length,
             sample: translatedBlocks.slice(0, 5).map((block) => ({
@@ -6079,7 +7219,7 @@ function App() {
           await finishVisualOcrResult({
             mode,
             image,
-            recognitionImage,
+            recognitionImage: image,
             croppedImage,
             translatedBlocks,
             sourceBlocks: translatedBlocks,
@@ -6091,13 +7231,14 @@ function App() {
             mode,
             error: error.message,
           })
+          multimodalFallbackNotice = '多模态识别失败，已回退到普通 OCR 流程。'
           setOcrResult({
             status: mode === 'diagram' ? 'diagram-recognizing' : 'compare-recognizing',
             mode,
             image: recognitionImage,
             text: '',
             translation: '',
-            error: '',
+            error: multimodalFallbackNotice,
           })
         }
       }
@@ -6166,6 +7307,7 @@ function App() {
             translatedBlocks,
             sourceBlocks: textBlocks,
             ocrSelectionRect,
+            fallbackNotice: multimodalFallbackNotice,
           })
           return
         }
@@ -6178,6 +7320,7 @@ function App() {
           translatedBlocks,
           sourceBlocks: textBlocks,
           ocrSelectionRect,
+          fallbackNotice: multimodalFallbackNotice,
         })
         return
       }
@@ -7238,8 +8381,7 @@ function App() {
 
   function renderContentExportOptions(options, setOptions, disabled = false) {
     return (
-      <fieldset className="content-export-options">
-        <legend>导出内容</legend>
+      <fieldset className="content-export-options" aria-label="选择导出内容">
         <div className="content-export-option-list">
           {CONTENT_EXPORT_OPTION_ITEMS.map((item) => (
             <label className="content-export-option" key={item.key}>
@@ -7257,24 +8399,172 @@ function App() {
     )
   }
 
+  function renderExportDocumentList({ selectedIds = [], onToggle, className = '', disabled = false, emptyText = '暂无可导出的文献数据' }) {
+    const selectedIdSet = new Set(selectedIds)
+    const listClassName = ['exportable-document-list', className].filter(Boolean).join(' ')
+
+    return (
+      <div className={listClassName}>
+        {exportableDocuments.length ? exportableDocuments.map((document) => {
+          const documentName = getExportDocumentDisplayName(document)
+          const isActive = selectedExportDetailDocumentId === document.documentId
+
+          return (
+            <article
+              className={isActive ? 'exportable-document-item active' : 'exportable-document-item'}
+              key={document.documentId}
+            >
+              <input
+                type="checkbox"
+                checked={selectedIdSet.has(document.documentId)}
+                disabled={disabled}
+                aria-label={`选择 ${documentName}`}
+                onChange={() => onToggle(document.documentId)}
+              />
+              <button
+                type="button"
+                className="exportable-document-name-button"
+                onClick={() => setSelectedExportDetailDocumentId(document.documentId)}
+              >
+                {documentName}
+              </button>
+            </article>
+          )
+        }) : <p className="history-empty">{emptyText}</p>}
+      </div>
+    )
+  }
+
+  function renderExportDetailGroup(title, records, previewGetter) {
+    const visibleRecords = records.slice(0, 6)
+
+    return (
+      <section className="export-detail-group">
+        <header>
+          <h4>{title}</h4>
+          <span>{records.length} 条</span>
+        </header>
+        {visibleRecords.length ? (
+          <div className="export-detail-list">
+            {visibleRecords.map((record, index) => (
+              <article className="export-detail-item" key={record.id || `${title}-${index}`}>
+                <span className="export-detail-page">{getExportDetailPageText(record)}</span>
+                <p>{previewGetter(record)}</p>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="export-detail-empty">暂无内容</p>
+        )}
+        {records.length > visibleRecords.length ? (
+          <p className="export-detail-more">还有 {records.length - visibleRecords.length} 条未在预览中显示</p>
+        ) : null}
+      </section>
+    )
+  }
+
+  function renderExportDocumentDetail() {
+    const document = exportableDocuments.find((item) => item.documentId === selectedExportDetailDocumentId)
+    if (!document) return null
+
+    const detail = exportDocumentDetail?.documentId === selectedExportDetailDocumentId
+      ? exportDocumentDetail
+      : null
+
+    return (
+      <section className="export-document-detail">
+        <div className="export-document-detail-header">
+          <h3>{getExportDocumentDisplayName(document)}</h3>
+          <span>文件详情</span>
+        </div>
+        {exportDocumentDetailStatus ? (
+          <p className="export-detail-empty">{exportDocumentDetailStatus}</p>
+        ) : (
+          <div className="export-detail-grid">
+            {renderExportDetailGroup('笔记', detail?.notes || [], getExportNoteDetailPreview)}
+            {renderExportDetailGroup('翻译历史', detail?.histories || [], getExportHistoryDetailPreview)}
+            {renderExportDetailGroup('批注', detail?.annotations || [], getExportAnnotationDetailPreview)}
+          </div>
+        )}
+      </section>
+    )
+  }
+
+  function renderSearchDialog() {
+    if (!searchDialog.open) return null
+
+    const dialogTitle = searchDialog.source === 'reader' ? '搜索当前 PDF' : '全局搜索'
+
+    return (
+      <div
+        className="search-overlay"
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget) closeSearchDialog()
+        }}
+      >
+        <section className="search-dialog" role="dialog" aria-modal="true" aria-label={dialogTitle}>
+          <header className="search-dialog-header">
+            <h2>{dialogTitle}</h2>
+            <button type="button" className="search-dialog-close" onClick={closeSearchDialog} aria-label="关闭搜索">
+              ×
+            </button>
+          </header>
+          <div className="search-dialog-controls">
+            <label className="search-dialog-input">
+              <span aria-hidden="true">⌕</span>
+              <input
+                ref={searchDialogInputRef}
+                type="search"
+                value={searchDialog.query}
+                onChange={(event) => updateSearchDialogQuery(event.target.value)}
+                onKeyDown={handleSearchDialogKeyDown}
+                aria-label={dialogTitle}
+              />
+            </label>
+            <select
+              className="search-scope-select"
+              value={searchDialog.scope}
+              onChange={(event) => updateSearchDialogScope(event.target.value)}
+              aria-label="搜索范围"
+            >
+              {SEARCH_SCOPE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="search-result-list">
+            {searchResults.map((result) => (
+              <button
+                type="button"
+                className="search-result-item"
+                key={result.id}
+                onClick={() => void openSearchResult(result)}
+              >
+                <span className="search-result-type">{SEARCH_RESULT_TYPE_LABELS[result.type] || result.type}</span>
+                <strong>{result.title}</strong>
+                {result.subtitle ? <span>{result.subtitle}</span> : null}
+                <p>{result.snippet}</p>
+              </button>
+            ))}
+            {searchStatus ? <p className="search-status">{searchStatus}</p> : null}
+          </div>
+        </section>
+      </div>
+    )
+  }
+
   function renderImportExportSettings() {
     return (
       <div className="settings-dialog module-settings-panel import-export-settings-panel">
         <div className="settings-dialog-body">
-          <nav className="settings-tabs" aria-label="导入与导出分类">
+          <nav className="settings-tabs" aria-label="导出数据分类">
           <button
             type="button"
             className={importExportTab === 'importExport' ? 'settings-tab active' : 'settings-tab'}
             onClick={() => setImportExportTab('importExport')}
           >
-            导入与导出
-          </button>
-          <button
-            type="button"
-            className={importExportTab === 'mergeSplit' ? 'settings-tab active' : 'settings-tab'}
-            onClick={() => setImportExportTab('mergeSplit')}
-          >
-            合并与拆分
+            导出数据
           </button>
           <button
             type="button"
@@ -7314,19 +8604,14 @@ function App() {
 
             <section className="settings-glossary">
               <div className="settings-section-header">
-                <h3>批量自选导出</h3>
+                <h3>数据备份</h3>
                 <span>{selectedExportDocumentIds.length} / {exportableDocuments.length} 篇</span>
               </div>
+              <p className="markdown-export-hint">
+                完整备份包含翻译历史、笔记和批注；导入多个备份文件时会自动合并并跳过重复数据。
+              </p>
 
               <div className="export-options-grid">
-                <label className="settings-field">
-                  <span>导出内容</span>
-                  <select value={batchExportType} onChange={(event) => setBatchExportType(event.target.value)}>
-                    <option value="translation-history">只导出翻译历史</option>
-                    <option value="notes">只导出笔记</option>
-                    <option value="full">同时导出翻译历史和笔记</option>
-                  </select>
-                </label>
                 <label className="settings-field">
                   <span>导出方式</span>
                   <select value={batchExportMode} onChange={(event) => setBatchExportMode(event.target.value)}>
@@ -7346,21 +8631,11 @@ function App() {
                 </label>
               </div>
 
-              <div className="exportable-document-list">
-                {exportableDocuments.length ? exportableDocuments.map((document) => (
-                  <label className="exportable-document-item" key={document.documentId}>
-                    <input
-                      type="checkbox"
-                      checked={selectedExportDocumentIds.includes(document.documentId)}
-                      onChange={() => toggleExportDocument(document.documentId)}
-                    />
-                    <span>
-                      <strong>{document.fileName || document.documentId}</strong>
-                      <small>历史 {document.historyCount} 条 · 笔记 {document.notesCount} 条 · 批注 {document.annotationsCount} 条 · {formatHistoryTime(document.lastUpdatedAt)}</small>
-                    </span>
-                  </label>
-                )) : <p className="history-empty">暂无可导出的文献数据</p>}
-              </div>
+              {renderExportDocumentList({
+                selectedIds: selectedExportDocumentIds,
+                onToggle: toggleExportDocument,
+              })}
+              {renderExportDocumentDetail()}
 
               <div className="settings-inline-actions">
                 <button type="button" className="settings-primary-button" onClick={batchExportPaperReaderData}>
@@ -7371,65 +8646,11 @@ function App() {
 
             <section className="settings-glossary">
               <div className="settings-section-header">
-                <h3>批量导入</h3>
-                <span>支持单篇、合集和完整备份</span>
+                <h3>批量导入并合并</h3>
               </div>
               <div className="settings-inline-actions">
                 <button type="button" className="settings-primary-button" onClick={batchImportPaperReaderData}>
                   选择导入文件
-                </button>
-              </div>
-            </section>
-          </>
-        ) : null}
-
-        {importExportTab === 'mergeSplit' ? (
-          <>
-            <section className="settings-glossary">
-              <div className="settings-section-header">
-                <h3>合并导出文件</h3>
-                <span>逐个添加导出文件后再合并</span>
-              </div>
-              <div className="settings-inline-actions">
-                <button type="button" className="settings-secondary-button merge-add-button" onClick={addMergeExportFile}>
-                  +
-                </button>
-              </div>
-              {mergeExportFiles.length ? (
-                <div className="merge-export-file-list">
-                  {mergeExportFiles.map((file) => (
-                    <article key={file.filePath} className="merge-export-file-item">
-                      <div>
-                        <strong>{getMergeExportFileDisplayName(file)}</strong>
-                      </div>
-                      <button
-                        type="button"
-                        className="history-delete-button"
-                        onClick={() => setMergeExportFiles((currentFiles) => currentFiles.filter((item) => item.filePath !== file.filePath))}
-                      >
-                        移除
-                      </button>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <p className="history-empty">暂无待合并文件</p>
-              )}
-              <div className="settings-inline-actions">
-                <button type="button" className="settings-secondary-button" onClick={mergePaperReaderExportFiles}>
-                  合并
-                </button>
-              </div>
-            </section>
-
-            <section className="settings-glossary">
-              <div className="settings-section-header">
-                <h3>拆分导出文件</h3>
-                <span>将合并文件拆成多个单篇文件</span>
-              </div>
-              <div className="settings-inline-actions">
-                <button type="button" className="settings-secondary-button" onClick={splitPaperReaderExportFile}>
-                  拆分为多个文件
                 </button>
               </div>
             </section>
@@ -7444,25 +8665,17 @@ function App() {
                 <span>{selectedMarkdownDocumentIds.length} / {exportableDocuments.length} 篇</span>
               </div>
               <p className="markdown-export-hint">
-                Markdown 会包含文件名、翻译历史、批注、笔记、页数、原句以及对应翻译或笔记内容。
+                Markdown 用于可编辑整理；可导出全部或单独导出笔记、翻译历史、批注，批注只包含高亮内容。
               </p>
               {renderContentExportOptions(markdownExportOptions, setMarkdownExportOptions, isMarkdownExporting)}
 
-              <div className="exportable-document-list markdown-document-list">
-                {exportableDocuments.length ? exportableDocuments.map((document) => (
-                  <label className="exportable-document-item" key={document.documentId}>
-                    <input
-                      type="checkbox"
-                      checked={selectedMarkdownDocumentIds.includes(document.documentId)}
-                      onChange={() => toggleMarkdownDocument(document.documentId)}
-                    />
-                    <span>
-                      <strong>{document.fileName || document.documentId}</strong>
-                      <small>历史 {document.historyCount} 条 · 笔记 {document.notesCount} 条 · 批注 {document.annotationsCount} 条 · {formatHistoryTime(document.lastUpdatedAt)}</small>
-                    </span>
-                  </label>
-                )) : <p className="history-empty">暂无可导出的文献数据</p>}
-              </div>
+              {renderExportDocumentList({
+                selectedIds: selectedMarkdownDocumentIds,
+                onToggle: toggleMarkdownDocument,
+                className: 'markdown-document-list',
+                disabled: isMarkdownExporting,
+              })}
+              {renderExportDocumentDetail()}
 
               <div className="settings-inline-actions markdown-export-actions">
                 <button
@@ -7502,25 +8715,17 @@ function App() {
                 <span>{selectedPdfReportDocumentIds.length} / {exportableDocuments.length} 篇</span>
               </div>
               <p className="report-export-hint">
-                PDF 报告会生成新的整理文件，包含文件名、翻译历史、批注、笔记、页数、原句以及对应翻译或笔记内容，不会写回原始 PDF。
+                PDF 用于阅读整理；可导出全部或单独导出笔记、翻译历史、批注，批注只包含高亮内容，不会写回原始 PDF。
               </p>
               {renderContentExportOptions(pdfReportExportOptions, setPdfReportExportOptions, isPdfReportExporting)}
 
-              <div className="exportable-document-list report-document-list">
-                {exportableDocuments.length ? exportableDocuments.map((document) => (
-                  <label className="exportable-document-item" key={document.documentId}>
-                    <input
-                      type="checkbox"
-                      checked={selectedPdfReportDocumentIds.includes(document.documentId)}
-                      onChange={() => togglePdfReportDocument(document.documentId)}
-                    />
-                    <span>
-                      <strong>{document.fileName || document.documentId}</strong>
-                      <small>历史 {document.historyCount} 条 · 笔记 {document.notesCount} 条 · 批注 {document.annotationsCount} 条 · {formatHistoryTime(document.lastUpdatedAt)}</small>
-                    </span>
-                  </label>
-                )) : <p className="history-empty">暂无可导出的文献数据</p>}
-              </div>
+              {renderExportDocumentList({
+                selectedIds: selectedPdfReportDocumentIds,
+                onToggle: togglePdfReportDocument,
+                className: 'report-document-list',
+                disabled: isPdfReportExporting,
+              })}
+              {renderExportDocumentDetail()}
 
               <div className="settings-inline-actions report-export-actions">
                 <button
@@ -7608,18 +8813,38 @@ function App() {
 
         <section className="library-main-panel">
           <div className="library-toolbar">
-            <label className="library-search">
-              <span>搜索文献</span>
+            <div className="library-search">
               <input
                 type="search"
+                aria-label="搜索文献"
                 value={librarySearch}
-                onChange={(event) => setLibrarySearch(event.target.value)}
-                placeholder="按文件名搜索"
+                onFocus={() => {
+                  if (librarySearchMode === 'global') openSearchDialog('library', librarySearch)
+                }}
+                onChange={handleLibrarySearchInputChange}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && librarySearchMode === 'global') {
+                    openSearchDialog('library', librarySearch)
+                  }
+                }}
+                placeholder={librarySearchMode === 'global' ? '全局搜索' : '按文件名搜索'}
               />
-            </label>
+              <select
+                className="library-search-mode"
+                value={librarySearchMode}
+                onChange={(event) => updateLibrarySearchMode(event.target.value)}
+                aria-label="文献库搜索模式"
+              >
+                <option value="filename">文件名搜索</option>
+                <option value="global">全局搜索</option>
+              </select>
+            </div>
             <label className="library-sort">
-              <span>排序</span>
-              <select value={librarySort} onChange={(event) => setLibrarySort(event.target.value)}>
+              <select
+                value={librarySort}
+                aria-label="排序"
+                onChange={(event) => setLibrarySort(event.target.value)}
+              >
                 <option value="recent">最近阅读</option>
                 <option value="progress">阅读进度</option>
                 <option value="notes">笔记数量</option>
@@ -7667,17 +8892,14 @@ function App() {
                 />
                 <button type="button" className="library-document-main" onClick={() => openLibraryDocument(document)}>
                   <strong>{document.fileName}</strong>
-                  <span>{document.filePath}</span>
                   <div className="library-progress">
                     <i style={{ width: `${getLibraryProgressPercent(document)}%` }} />
                   </div>
                 </button>
                 <div className="library-document-meta">
                   <span>导入 {formatHistoryTime(document.importedAt)}</span>
-                  <span>最近 {document.lastOpenedAt ? formatHistoryTime(document.lastOpenedAt) : '未阅读'}</span>
-                  <span>进度 {getLibraryProgress(document)}</span>
-                  <span>笔记 {document.notesCount || 0}</span>
-                  <span>批注 {document.annotationsCount || 0}</span>
+                  <span>更新 {formatHistoryTime(document.updatedAt || document.lastOpenedAt || document.importedAt)}</span>
+                  <span>阅读 {getLibraryProgress(document)}</span>
                 </div>
               </article>
             )) : (
@@ -8162,6 +9384,18 @@ function App() {
         </section>
 
         <section className="toolbar-group toolbar-actions view-controls" aria-label="工具与设置">
+          <label className="toolbar-search-control">
+            <span aria-hidden="true">⌕</span>
+            <input
+              type="search"
+              value={readerSearchInput}
+              onFocus={() => openSearchDialog('reader', readerSearchInput)}
+              onChange={handleReaderSearchInputChange}
+              onKeyDown={handleReaderSearchKeyDown}
+              disabled={!pdfUrl}
+              aria-label="搜索当前 PDF"
+            />
+          </label>
           <div className="ocr-menu-wrap">
             <button
               type="button"
@@ -8229,62 +9463,6 @@ function App() {
         </div>
       ) : null}
 
-      {mergeNameDialog ? (
-        <div
-          className="note-dialog-overlay"
-          role="presentation"
-          onPointerDown={(event) => event.stopPropagation()}
-          onMouseDown={(event) => event.stopPropagation()}
-          onClick={(event) => event.stopPropagation()}
-        >
-          <section
-            className="note-dialog"
-            aria-label="命名合并文件"
-            onPointerDown={(event) => event.stopPropagation()}
-            onMouseDown={(event) => event.stopPropagation()}
-            onMouseUp={(event) => event.stopPropagation()}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="diagram-dialog-header">
-              <h2>命名合并文件</h2>
-              <button type="button" onClick={() => setMergeNameDialog(null)}>
-                取消
-              </button>
-            </div>
-
-            <label className="note-dialog-field">
-              <span>合并文件名称</span>
-              <input
-                ref={mergeNameInputRef}
-                type="text"
-                value={mergeNameDraft}
-                onChange={(event) => setMergeNameDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.preventDefault()
-                    void confirmMergePaperReaderExportFiles()
-                  }
-                }}
-              />
-            </label>
-
-            <div className="note-dialog-source">
-              <strong>待合并文件</strong>
-              <span>{mergeNameDialog.filePaths?.length || 0} 个文件，约 {mergeNameDialog.documentCount || 0} 份数据</span>
-            </div>
-
-            <div className="settings-actions">
-              <button type="button" className="settings-secondary-button" onClick={() => setMergeNameDialog(null)}>
-                取消
-              </button>
-              <button type="button" className="settings-primary-button" onClick={confirmMergePaperReaderExportFiles}>
-                合并
-              </button>
-            </div>
-          </section>
-        </div>
-      ) : null}
-
       {pdfUrl ? (
         <div className="reader-layout" ref={readerLayoutRef}>
           <section
@@ -8293,6 +9471,7 @@ function App() {
             onMouseDown={handleSelectionStart}
             onMouseMove={handleSelectionMove}
             onMouseUp={handleTextSelection}
+            onClickCapture={clearSearchHitMarkers}
           >
             <div className="selection-highlight-layer" aria-hidden="true">
               {!annotationColor ? highlightRects.map((rect, index) => (
@@ -8307,6 +9486,23 @@ function App() {
                   }}
                 />
               )) : null}
+            </div>
+            <div className="search-hit-selection-layer">
+              {searchHitMarkers.map((marker) => (
+                <button
+                  type="button"
+                  key={marker.id}
+                  className="search-hit-selection-marker"
+                  style={{
+                    left: `${marker.left}px`,
+                    top: `${marker.top}px`,
+                    width: `${marker.width}px`,
+                    height: `${marker.height}px`,
+                  }}
+                  onClick={clearSearchHitMarkers}
+                  aria-label="清除搜索命中标记"
+                />
+              ))}
             </div>
             {renderAnnotationOverlay()}
             {ocrRect ? (
@@ -8563,7 +9759,8 @@ function App() {
                         </span>
                         <input
                           type="checkbox"
-                          checked={settingsForm.enableMultimodalTranslation}
+                          checked={settingsSupportMultimodal(settingsForm)}
+                          disabled={!settingsCanEnableMultimodal(settingsForm)}
                           onChange={(event) => updateSettingsField('enableMultimodalTranslation', event.target.checked)}
                         />
                       </label>
@@ -8648,61 +9845,7 @@ function App() {
           </form>
         </section>
 
-        {activeModule !== 'reader' && mergeNameDialog ? (
-          <div
-            className="note-dialog-overlay"
-            role="presentation"
-            onPointerDown={(event) => event.stopPropagation()}
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <section
-              className="note-dialog"
-              aria-label="命名合并文件"
-              onPointerDown={(event) => event.stopPropagation()}
-              onMouseDown={(event) => event.stopPropagation()}
-              onMouseUp={(event) => event.stopPropagation()}
-              onClick={(event) => event.stopPropagation()}
-            >
-              <div className="diagram-dialog-header">
-                <h2>命名合并文件</h2>
-                <button type="button" onClick={() => setMergeNameDialog(null)}>
-                  取消
-                </button>
-              </div>
-
-              <label className="note-dialog-field">
-                <span>合并文件名称</span>
-                <input
-                  ref={mergeNameInputRef}
-                  type="text"
-                  value={mergeNameDraft}
-                  onChange={(event) => setMergeNameDraft(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') {
-                      event.preventDefault()
-                      void confirmMergePaperReaderExportFiles()
-                    }
-                  }}
-                />
-              </label>
-
-              <div className="note-dialog-source">
-                <strong>待合并文件</strong>
-                <span>{mergeNameDialog.filePaths?.length || 0} 个文件，约 {mergeNameDialog.documentCount || 0} 份数据</span>
-              </div>
-
-              <div className="settings-actions">
-                <button type="button" className="settings-secondary-button" onClick={() => setMergeNameDialog(null)}>
-                  取消
-                </button>
-                <button type="button" className="settings-primary-button" onClick={confirmMergePaperReaderExportFiles}>
-                  合并
-                </button>
-              </div>
-            </section>
-          </div>
-        ) : null}
+      {renderSearchDialog()}
 
       {highlightContextMenu ? (
         <div

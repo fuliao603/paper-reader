@@ -87,27 +87,17 @@ function getFileNameFromPath(filePath) {
   return segments.at(-1) || ''
 }
 
-function getLinkedNote(annotation, notes = []) {
-  if (!annotation || !Array.isArray(notes)) return null
-
-  return notes.find((note) => (
-    note?.id && annotation.noteId && note.id === annotation.noteId
-  ) || (
-    note?.highlightId && annotation.id && note.highlightId === annotation.id
-  ) || (
-    note?.highlightId && annotation.highlightId && note.highlightId === annotation.highlightId
-  )) || null
-}
-
-function appendRecordSection(lines, index, { page, original, bodyLabel, body }) {
+function appendRecordSection(lines, index, { page, original, bodyLabel, body, hideOriginal = false }) {
   lines.push(`### 第 ${index + 1} 条`)
   lines.push('')
   lines.push(`* 页数：${page || '未知'}`)
   lines.push('')
-  lines.push('**原句：**')
-  lines.push('')
-  lines.push(markdownQuote(original))
-  lines.push('')
+  if (!hideOriginal) {
+    lines.push('**原句：**')
+    lines.push('')
+    lines.push(markdownQuote(original))
+    lines.push('')
+  }
   lines.push(`**${bodyLabel}：**`)
   lines.push('')
   lines.push(markdownQuote(body))
@@ -161,16 +151,13 @@ export function getPdfExportSections({ histories = [], annotations = [], notes =
     {
       key: 'annotations',
       title: '批注',
-      bodyLabel: '批注 / 笔记',
-      records: exportAnnotations.map((item) => {
-        const linkedNote = getLinkedNote(item, safeNotes)
-
-        return {
-          page: getPageNumber(item),
-          original: firstTextValue(item, ORIGINAL_FIELDS),
-          body: firstTextValue(item, NOTE_FIELDS) || firstTextValue(linkedNote, NOTE_FIELDS),
-        }
-      }),
+      bodyLabel: '高亮内容',
+      hideOriginal: true,
+      records: exportAnnotations.map((item) => ({
+        page: getPageNumber(item),
+        original: '',
+        body: firstTextValue(item, ORIGINAL_FIELDS),
+      })),
     },
     {
       key: 'notes',
@@ -217,6 +204,7 @@ export function buildPdfMarkdown({ pdf = {}, histories = [], annotations = [], n
           original: record.original,
           bodyLabel: section.bodyLabel,
           body: record.body,
+          hideOriginal: Boolean(section.hideOriginal),
         })
       })
     } else {

@@ -62,10 +62,10 @@ function renderRecord(section, record, index) {
         <h3>第 ${index + 1} 条</h3>
         <span>页数：${escapeHtml(record.page || '未知')}</span>
       </div>
-      <div class="record-block">
+      ${section.hideOriginal ? '' : `<div class="record-block">
         <h4>原句</h4>
         ${renderTextBlock(record.original)}
-      </div>
+      </div>`}
       <div class="record-block">
         <h4>${escapeHtml(section.bodyLabel)}</h4>
         ${renderTextBlock(record.body)}
