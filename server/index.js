@@ -17,6 +17,17 @@ const defaultTranslationPrompt =
   '你是通用学术翻译助手。请把用户提供的英文学术文本翻译成准确、自然、符合中文学术表达习惯的中文。保留必要的专业术语、英文缩写、公式、指数、上下标、单位、变量名和专有名词。遇到 10^16、10^{-6}、H_2O、CO_2 等表达时，不要改写成普通数字。不要扩写，不要总结，不要添加解释，只输出译文。'
 const maxGlossaryEntries = 200
 const maxGlossaryPromptLength = 8000
+const maxTocRecognitionCandidates = 180
+const maxTocRecognitionTextLength = 60000
+const tocRecognitionPrompt = `You clean and organize pre-extracted table-of-contents candidates for academic papers, books, and textbooks.
+The input is JSON with documentType and candidates. Each candidate is extracted from the PDF and includes its exact title, pageNumber, pageIndex, score, and evidence.
+Return JSON only, using this exact shape:
+{"documentType":"paper","items":[{"title":"Introduction","level":1,"pageNumber":3,"pageIndex":2,"confidence":0.95,"children":[{"title":"1.1 Background","level":2,"pageNumber":4,"pageIndex":3,"confidence":0.9,"children":[]}]}]}
+Delete candidates that are captions, running headers, footers, page numbers, reference entries, DOI/URL/email lines, copyright text, or ordinary paragraph sentences.
+Use numbering before typography for levels: 1 is level 1, 1.1 is level 2, 1.1.1 is level 3, Chapter/Part/第X章 is level 1, Section/第X节 is level 2.
+Common paper headings such as Abstract, Keywords, Introduction, Methods, Results, Discussion, Conclusion, References, and Appendix are normally level 1.
+Do not invent a title. Do not translate, rewrite, combine, or correct title text. Do not change pageNumber or pageIndex. Every output item must correspond to one exact input candidate.
+Return strict JSON without markdown fences or commentary.`
 
 dotenv.config({ path: envPath })
 
@@ -185,6 +196,50 @@ async function handleImageTranslation(req, res, targetMode) {
   }
 }
 
+async function handleRecognizeToc(req, res) {
+  const documentType = ['paper', 'book', 'unknown'].includes(req.body?.documentType)
+    ? req.body.documentType
+    : 'unknown'
+  const candidates = (Array.isArray(req.body?.candidates) ? req.body.candidates : [])
+    .slice(0, maxTocRecognitionCandidates)
+    .map((candidate) => ({
+      text: String(candidate?.text || candidate?.title || '').replace(/\s+/g, ' ').trim().slice(0, 180),
+      pageNumber: Math.max(1, Math.floor(Number(candidate?.pageNumber) || 1)),
+      pageIndex: Math.max(0, Math.floor(Number(candidate?.pageIndex) || 0)),
+      fontSize: Math.max(0, Number(candidate?.fontSize) || 0),
+      level: Math.max(1, Math.min(3, Math.floor(Number(candidate?.level) || 1))),
+      score: Number(candidate?.score) || 0,
+      reasons: Array.isArray(candidate?.reasons) ? candidate.reasons.slice(0, 8).map(String) : [],
+      penalties: Array.isArray(candidate?.penalties) ? candidate.penalties.slice(0, 8).map(String) : [],
+    }))
+    .filter((candidate) => candidate.text)
+  let limitedCandidates = candidates
+  let text = JSON.stringify({ documentType, candidates: limitedCandidates })
+  while (text.length > maxTocRecognitionTextLength && limitedCandidates.length > 20) {
+    limitedCandidates = limitedCandidates.slice(0, -10)
+    text = JSON.stringify({ documentType, candidates: limitedCandidates })
+  }
+
+  if (!candidates.length) {
+    return res.status(400).json({ error: 'No table-of-contents candidates are available for cleanup.' })
+  }
+
+  try {
+    const { config, provider } = getProviderFromConfig()
+    const result = await provider.translateText(text, {
+      systemPrompt: tocRecognitionPrompt,
+    })
+
+    return res.json({
+      toc: result.translation,
+      provider: config.provider,
+    })
+  } catch (error) {
+    console.error('Table of contents recognition failed:', error)
+    return sendProviderError(res, error, 'Table of contents recognition failed.')
+  }
+}
+
 export function createServer() {
   const app = express()
 
@@ -194,6 +249,7 @@ export function createServer() {
   app.post('/ai/translate-text', handleTranslateText)
   app.post('/ai/translate-image-ocr', async (req, res) => handleImageTranslation(req, res, 'ocr'))
   app.post('/ai/translate-image-diagram', async (req, res) => handleImageTranslation(req, res, 'diagram'))
+  app.post('/ai/recognize-toc', handleRecognizeToc)
 
   // Legacy renderer/browser endpoints kept for compatibility.
   app.post('/translate', handleTranslateText)

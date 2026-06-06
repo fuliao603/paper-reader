@@ -89,6 +89,14 @@ function getAnnotationsPath() {
   return path.join(app.getPath('userData'), 'paper-reader-annotations.json')
 }
 
+function getBookmarksPath() {
+  return path.join(app.getPath('userData'), 'paper-reader-bookmarks.json')
+}
+
+function getTableOfContentsPath() {
+  return path.join(app.getPath('userData'), 'paper-reader-toc.json')
+}
+
 function getPdfSessionPath() {
   return path.join(app.getPath('userData'), 'paper-reader-pdf-session.json')
 }
@@ -379,7 +387,7 @@ function normalizePdfSessionTab(tab = {}) {
     scrollTop,
     rightPanelResult: normalizeSessionResult(tab.rightPanelResult),
     ocrResult: normalizeSessionOcrResult(tab.ocrResult),
-    rightPanelTab: ['result', 'history', 'notes'].includes(tab.rightPanelTab) ? tab.rightPanelTab : 'result',
+    rightPanelTab: ['result', 'history', 'notes', 'bookmarks'].includes(tab.rightPanelTab) ? tab.rightPanelTab : 'result',
     rightPanelVisible: tab.rightPanelVisible !== false,
     openedAt: Number.isFinite(openedAt) ? openedAt : Date.now(),
     updatedAt: Number.isFinite(updatedAt) ? updatedAt : Date.now(),
@@ -624,6 +632,159 @@ function normalizeDocumentNotes(data) {
             items,
           },
         ]
+      })
+      .filter(Boolean),
+  )
+}
+
+function normalizeBookmarkItem(item = {}) {
+  if (!item || typeof item !== 'object') return null
+
+  const documentId = String(item.documentId || '').trim()
+  const pageNumber = Math.floor(Number(item.pageNumber))
+  const title = String(item.title || '').replace(/\s+/g, ' ').trim()
+  if (!documentId || !Number.isFinite(pageNumber) || pageNumber < 1 || !title) return null
+
+  const now = Date.now()
+  const createdAt = Number(item.createdAt || now)
+  const updatedAt = Number(item.updatedAt || createdAt)
+
+  return {
+    id: String(item.id || `${pageNumber}-${createdAt}-${Math.random().toString(36).slice(2, 8)}`),
+    documentId,
+    filePath: typeof item.filePath === 'string' ? item.filePath : undefined,
+    fileName: typeof item.fileName === 'string' ? item.fileName : undefined,
+    pageNumber,
+    title: title.slice(0, 120),
+    createdAt: Number.isFinite(createdAt) ? createdAt : now,
+    updatedAt: Number.isFinite(updatedAt) ? updatedAt : now,
+  }
+}
+
+function normalizeBookmarkItems(items) {
+  if (!Array.isArray(items)) return []
+
+  return items
+    .map(normalizeBookmarkItem)
+    .filter(Boolean)
+    .sort((a, b) => a.pageNumber - b.pageNumber || b.updatedAt - a.updatedAt)
+}
+
+function normalizeDocumentBookmarks(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return {}
+
+  return Object.fromEntries(
+    Object.entries(data)
+      .map(([documentId, value]) => {
+        const container = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+        const filePath = typeof container.filePath === 'string' ? container.filePath : ''
+        const fileName = typeof container.fileName === 'string' ? container.fileName : ''
+        const items = normalizeBookmarkItems(Array.isArray(container.items) ? container.items : [])
+          .map((item) => normalizeBookmarkItem({
+            ...item,
+            documentId,
+            filePath: item.filePath || filePath,
+            fileName: item.fileName || fileName,
+          }))
+          .filter(Boolean)
+
+        if (!items.length && !filePath && !fileName) return null
+
+        return [documentId, { filePath, fileName, lastUpdatedAt: Number(container.lastUpdatedAt) || 0, items }]
+      })
+      .filter(Boolean),
+  )
+}
+
+function normalizeTocItem(item = {}, inheritedLevel = 1, index = 0) {
+  if (!item || typeof item !== 'object') return null
+
+  const title = String(item.title || '').replace(/\s+/g, ' ').trim()
+  const legacyPageNumber = Math.floor(Number(item.pageStart ?? item.pageNumber ?? item.page) || 1)
+  const rawPageIndex = Number(item.pageIndex)
+  const pageIndex = Number.isFinite(rawPageIndex)
+    ? Math.max(0, Math.floor(rawPageIndex))
+    : Math.max(0, legacyPageNumber - 1)
+  const level = Math.max(1, Math.min(3, Math.floor(Number(item.level) || inheritedLevel)))
+  const confidence = Number(item.confidence)
+  const rawChildren = Array.isArray(item.children)
+    ? item.children
+    : Array.isArray(item.subsections)
+      ? item.subsections
+      : []
+  if (!title) return null
+
+  return {
+    id: String(item.id || `toc-${pageIndex}-${level}-${index}`),
+    title: title.slice(0, 180),
+    level,
+    pageNumber: pageIndex + 1,
+    pageIndex,
+    confidence: Number.isFinite(confidence) ? Math.min(1, Math.max(0, confidence)) : 0.75,
+    children: rawChildren
+      .map((child, childIndex) => normalizeTocItem(child, Math.min(3, level + 1), childIndex))
+      .filter(Boolean),
+  }
+}
+
+function normalizeTocItems(items) {
+  if (!Array.isArray(items)) return []
+
+  return items
+    .map((item, index) => normalizeTocItem(item, 1, index))
+    .filter(Boolean)
+    .sort((a, b) => a.pageIndex - b.pageIndex)
+}
+
+function normalizeTocFingerprint(fingerprint = {}, fallback = {}) {
+  const source = fingerprint && typeof fingerprint === 'object' && !Array.isArray(fingerprint)
+    ? fingerprint
+    : {}
+  return {
+    filePath: String(source.filePath || fallback.filePath || ''),
+    fileSize: Math.max(0, Number(source.fileSize ?? fallback.fileSize) || 0),
+    modifiedTime: Math.max(0, Number(source.modifiedTime ?? fallback.modifiedTime) || 0),
+    fileHash: String(source.fileHash || fallback.fileHash || ''),
+  }
+}
+
+function normalizeDocumentTableOfContents(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return {}
+
+  return Object.fromEntries(
+    Object.entries(data)
+      .map(([documentId, value]) => {
+        const container = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+        const filePath = typeof container.filePath === 'string' ? container.filePath : ''
+        const fileName = typeof container.fileName === 'string' ? container.fileName : ''
+        const source = ['native', 'toc-page', 'toc-page-ai', 'body', 'body-ai', 'ocr-ai', 'ocr', 'unavailable'].includes(container.source)
+          ? container.source
+          : 'unavailable'
+        const documentType = ['paper', 'book', 'unknown'].includes(container.documentType)
+          ? container.documentType
+          : 'unknown'
+        const pageOffset = Number(container.pageOffset)
+        const items = normalizeTocItems(container.items)
+
+        if (!items.length && !filePath && !fileName) return null
+
+        return [documentId, {
+          filePath,
+          fileName,
+          lastUpdatedAt: Number(container.lastUpdatedAt) || 0,
+          source,
+          version: Number(container.version || container.algorithmVersion) || 0,
+          documentType,
+          pageOffset: Number.isFinite(pageOffset) ? pageOffset : null,
+          userModified: container.userModified === true,
+          fingerprint: normalizeTocFingerprint(container.fingerprint, {
+            filePath,
+            fileSize: container.fileSize,
+            modifiedTime: container.modifiedTime,
+            fileHash: container.fileHash,
+          }),
+          items,
+        }]
       })
       .filter(Boolean),
   )
@@ -997,6 +1158,46 @@ async function saveDocumentNotesData(data) {
   return nextData
 }
 
+async function readDocumentBookmarks() {
+  try {
+    const rawBookmarks = await fs.readFile(getBookmarksPath(), 'utf8')
+    return normalizeDocumentBookmarks(JSON.parse(rawBookmarks))
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return {}
+    }
+
+    throw new Error(`读取文献书签失败：${error.message}`, { cause: error })
+  }
+}
+
+async function saveDocumentBookmarksData(data) {
+  const nextData = normalizeDocumentBookmarks(data)
+  await fs.mkdir(app.getPath('userData'), { recursive: true })
+  await fs.writeFile(getBookmarksPath(), `${JSON.stringify(nextData, null, 2)}\n`, 'utf8')
+  return nextData
+}
+
+async function readDocumentTableOfContents() {
+  try {
+    const rawTableOfContents = await fs.readFile(getTableOfContentsPath(), 'utf8')
+    return normalizeDocumentTableOfContents(JSON.parse(rawTableOfContents))
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return {}
+    }
+
+    throw new Error(`读取文献目录失败：${error.message}`, { cause: error })
+  }
+}
+
+async function saveDocumentTableOfContentsData(data) {
+  const nextData = normalizeDocumentTableOfContents(data)
+  await fs.mkdir(app.getPath('userData'), { recursive: true })
+  await fs.writeFile(getTableOfContentsPath(), `${JSON.stringify(nextData, null, 2)}\n`, 'utf8')
+  return nextData
+}
+
 async function readDocumentAnnotations() {
   try {
     const rawAnnotations = await fs.readFile(getAnnotationsPath(), 'utf8')
@@ -1191,6 +1392,127 @@ async function clearDocumentNotes(documentId) {
   }
 
   return []
+}
+
+async function getDocumentBookmarks(documentId) {
+  const bookmarks = await readDocumentBookmarks()
+  return normalizeBookmarkItems(bookmarks[documentId]?.items || [])
+}
+
+async function saveDocumentBookmarks(documentId, payload = {}) {
+  const bookmarks = await readDocumentBookmarks()
+  const current = bookmarks[documentId] || {}
+  const filePath = String(payload.filePath || current.filePath || '')
+  const fileName = String(payload.fileName || current.fileName || '')
+  const items = normalizeBookmarkItems(payload.items || [])
+    .map((item) => normalizeBookmarkItem({ ...item, documentId, filePath: item.filePath || filePath, fileName: item.fileName || fileName }))
+    .filter(Boolean)
+
+  bookmarks[documentId] = {
+    filePath,
+    fileName,
+    lastUpdatedAt: Date.now(),
+    items,
+  }
+
+  const savedBookmarks = await saveDocumentBookmarksData(bookmarks)
+  return savedBookmarks[documentId]?.items || []
+}
+
+async function addDocumentBookmark(bookmark) {
+  const normalizedBookmark = normalizeBookmarkItem({
+    ...bookmark,
+    id: bookmark?.id || `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+    createdAt: bookmark?.createdAt || Date.now(),
+    updatedAt: bookmark?.updatedAt || Date.now(),
+  })
+
+  if (!normalizedBookmark) return []
+
+  const currentBookmarks = await getDocumentBookmarks(normalizedBookmark.documentId)
+  return saveDocumentBookmarks(normalizedBookmark.documentId, {
+    filePath: normalizedBookmark.filePath,
+    fileName: normalizedBookmark.fileName,
+    items: [normalizedBookmark, ...currentBookmarks.filter((item) => item.id !== normalizedBookmark.id)],
+  })
+}
+
+async function deleteDocumentBookmark(documentId, bookmarkId) {
+  const bookmarks = await readDocumentBookmarks()
+  const current = bookmarks[documentId]
+
+  if (!current) return []
+
+  current.items = normalizeBookmarkItems(current.items || []).filter((item) => item.id !== bookmarkId)
+  current.lastUpdatedAt = Date.now()
+  bookmarks[documentId] = current
+  const savedBookmarks = await saveDocumentBookmarksData(bookmarks)
+  return savedBookmarks[documentId]?.items || []
+}
+
+async function clearDocumentBookmarks(documentId) {
+  const bookmarks = await readDocumentBookmarks()
+
+  if (bookmarks[documentId]) {
+    bookmarks[documentId] = {
+      ...bookmarks[documentId],
+      lastUpdatedAt: Date.now(),
+      items: [],
+    }
+    await saveDocumentBookmarksData(bookmarks)
+  }
+
+  return []
+}
+
+async function getDocumentTableOfContents(documentId) {
+  const tableOfContents = await readDocumentTableOfContents()
+  const current = tableOfContents[documentId] || {}
+
+  return {
+    source: current.source || 'unavailable',
+    version: Number(current.version) || 0,
+    documentType: current.documentType || 'unknown',
+    pageOffset: Number.isFinite(current.pageOffset) ? current.pageOffset : null,
+    userModified: current.userModified === true,
+    fingerprint: normalizeTocFingerprint(current.fingerprint, current),
+    items: normalizeTocItems(current.items),
+    lastUpdatedAt: Number(current.lastUpdatedAt) || 0,
+  }
+}
+
+async function saveDocumentTableOfContents(documentId, payload = {}) {
+  const tableOfContents = await readDocumentTableOfContents()
+  const current = tableOfContents[documentId] || {}
+
+  tableOfContents[documentId] = {
+    filePath: String(payload.filePath || current.filePath || ''),
+    fileName: String(payload.fileName || current.fileName || ''),
+    lastUpdatedAt: Date.now(),
+    source: ['native', 'toc-page', 'toc-page-ai', 'body', 'body-ai', 'ocr-ai', 'ocr', 'unavailable'].includes(payload.source)
+      ? payload.source
+      : current.source || 'unavailable',
+    version: Number(payload.version || payload.algorithmVersion) || Number(current.version) || 0,
+    documentType: ['paper', 'book', 'unknown'].includes(payload.documentType)
+      ? payload.documentType
+      : current.documentType || 'unknown',
+    pageOffset: Number.isFinite(payload.pageOffset)
+      ? payload.pageOffset
+      : Number.isFinite(current.pageOffset)
+        ? current.pageOffset
+        : null,
+    userModified: payload.userModified === true,
+    fingerprint: normalizeTocFingerprint(payload.fingerprint, {
+      filePath: payload.filePath || current.filePath,
+      fileSize: payload.fileSize,
+      modifiedTime: payload.modifiedTime,
+      fileHash: payload.fileHash,
+    }),
+    items: normalizeTocItems(payload.items),
+  }
+
+  const savedTableOfContents = await saveDocumentTableOfContentsData(tableOfContents)
+  return savedTableOfContents[documentId] || { source: 'unavailable', version: 0, items: [], lastUpdatedAt: 0 }
 }
 
 async function readLibraryData() {
@@ -1417,7 +1739,7 @@ function cleanExportFileName(value, fallback = '合并导出') {
     .replace(/\.json$/i, '')
     .trim()
 
-  const typePrefix = '(?:翻译历史|笔记|完整备份|混合合集|翻译历史合集|笔记合集|完整备份合集)'
+  const typePrefix = '(?:翻译历史|笔记|批注|书签|完整备份|混合合集|翻译历史合集|笔记合集|批注合集|书签合集|完整备份合集)'
   const paperReaderPrefix = '(?:paper\\s*reader|paperreader)'
   const prefixPatterns = [
     new RegExp(`^${typePrefix}[_\\-\\s]*${paperReaderPrefix}[_\\-\\s]*`, 'i'),
@@ -1448,13 +1770,14 @@ function getExportTypeLabel(exportType) {
   if (exportType === 'translation-history') return '翻译历史'
   if (exportType === 'notes') return '笔记'
   if (exportType === 'annotations') return '批注'
+  if (exportType === 'bookmarks') return '书签'
   if (exportType === 'mixed') return '混合'
   if (exportType === 'merged') return '合并文件'
   return '完整备份'
 }
 
 function normalizeDataExportType(exportType) {
-  return ['translation-history', 'notes', 'annotations', 'full'].includes(exportType) ? exportType : 'full'
+  return ['translation-history', 'notes', 'annotations', 'bookmarks', 'full'].includes(exportType) ? exportType : 'full'
 }
 
 function getExportFileBaseName({ exportType, exportMode, fileName, documentId, userExportName, timestamp, merged = false }) {
@@ -1546,34 +1869,41 @@ async function collectDocumentExportData(documentId, exportType = 'full') {
   const histories = await readDocumentTranslationHistories()
   const notesData = await readDocumentNotes()
   const annotationsData = await readDocumentAnnotations()
+  const bookmarksData = await readDocumentBookmarks()
   const browsingHistory = await readBrowsingHistory()
   const browsingRecord = browsingHistory.find((record) => record.documentId === documentId)
   const historyContainer = histories[documentId] || {}
   const noteContainer = notesData[documentId] || {}
   const annotationContainer = annotationsData[documentId] || {}
+  const bookmarkContainer = bookmarksData[documentId] || {}
   const historyItems = normalizeHistoryItems(historyContainer.items || [])
   const noteItems = normalizeNoteItems(noteContainer.items || [])
   const annotationItems = normalizeAnnotationItems(annotationContainer.items || [])
+  const bookmarkItems = normalizeBookmarkItems(bookmarkContainer.items || [])
   const document = buildDocumentMeta(documentId, {
-    filePath: historyContainer.filePath || noteContainer.filePath || annotationContainer.filePath,
-    fileName: historyContainer.fileName || noteContainer.fileName || annotationContainer.fileName,
+    filePath: historyContainer.filePath || noteContainer.filePath || annotationContainer.filePath || bookmarkContainer.filePath,
+    fileName: historyContainer.fileName || noteContainer.fileName || annotationContainer.fileName || bookmarkContainer.fileName,
     lastUpdatedAt: Math.max(
       Number(historyContainer.lastOpenedAt) || 0,
       Number(noteContainer.lastUpdatedAt) || 0,
       Number(annotationContainer.lastUpdatedAt) || 0,
+      Number(bookmarkContainer.lastUpdatedAt) || 0,
     ),
   }, browsingRecord)
 
   return {
     document,
     data: {
-      translationHistory: ['notes', 'annotations'].includes(exportType) ? [] : historyItems,
-      notes: ['translation-history', 'annotations'].includes(exportType) ? [] : noteItems,
+      translationHistory: ['notes', 'annotations', 'bookmarks'].includes(exportType) ? [] : historyItems,
+      notes: ['translation-history', 'annotations', 'bookmarks'].includes(exportType) ? [] : noteItems,
       annotations: exportType === 'translation-history'
         ? []
         : exportType === 'notes'
           ? getRelatedAnnotations(noteItems, annotationItems)
-          : annotationItems,
+          : exportType === 'bookmarks'
+            ? []
+            : annotationItems,
+      bookmarks: ['translation-history', 'notes', 'annotations'].includes(exportType) ? [] : bookmarkItems,
     },
   }
 }
@@ -2079,12 +2409,20 @@ function annotationSignature(item) {
   ].join('|')
 }
 
+function bookmarkSignature(item) {
+  return [
+    item.pageNumber || '',
+    item.title || '',
+  ].join('|')
+}
+
 async function importExportDocuments(documents, forcedDocumentId = null, forcedType = null) {
   const histories = await readDocumentTranslationHistories()
   const notesData = await readDocumentNotes()
   const annotationsData = await readDocumentAnnotations()
+  const bookmarksData = await readDocumentBookmarks()
   const importType = forcedType ? normalizeDataExportType(forcedType) : null
-  const summary = { documents: 0, translationHistory: 0, notes: 0, annotations: 0, skipped: 0 }
+  const summary = { documents: 0, translationHistory: 0, notes: 0, annotations: 0, bookmarks: 0, skipped: 0 }
   const touchedDocuments = new Set()
 
   documents.forEach((entry) => {
@@ -2100,14 +2438,17 @@ async function importExportDocuments(documents, forcedDocumentId = null, forcedT
       lastUpdatedAt: Number(sourceDocument.lastUpdatedAt) || Date.now(),
     }
     const data = entry.data || {}
-    const incomingHistory = ['notes', 'annotations'].includes(importType) ? [] : normalizeHistoryItems(data.translationHistory || [])
+    const incomingHistory = ['notes', 'annotations', 'bookmarks'].includes(importType) ? [] : normalizeHistoryItems(data.translationHistory || [])
       .map((item) => normalizeDocumentHistoryItem({ ...item, documentId, filePath: document.filePath, fileName: document.fileName }))
       .filter(Boolean)
-    const incomingNotes = ['translation-history', 'annotations'].includes(importType) ? [] : normalizeNoteItems(data.notes || [])
+    const incomingNotes = ['translation-history', 'annotations', 'bookmarks'].includes(importType) ? [] : normalizeNoteItems(data.notes || [])
       .map((item) => normalizeNoteItem({ ...item, documentId, filePath: document.filePath, fileName: document.fileName }))
       .filter(Boolean)
-    const incomingAnnotations = importType === 'translation-history' ? [] : normalizeAnnotationItems(data.annotations || [])
+    const incomingAnnotations = ['translation-history', 'bookmarks'].includes(importType) ? [] : normalizeAnnotationItems(data.annotations || [])
       .map((item) => normalizeAnnotationItem({ ...item, documentId, filePath: document.filePath, fileName: document.fileName }))
+      .filter(Boolean)
+    const incomingBookmarks = ['translation-history', 'notes', 'annotations'].includes(importType) ? [] : normalizeBookmarkItems(data.bookmarks || [])
+      .map((item) => normalizeBookmarkItem({ ...item, documentId, filePath: document.filePath, fileName: document.fileName }))
       .filter(Boolean)
 
     if (incomingHistory.length) {
@@ -2149,12 +2490,26 @@ async function importExportDocuments(documents, forcedDocumentId = null, forcedT
       summary.skipped += merged.skipped
     }
 
+    if (incomingBookmarks.length) {
+      const current = bookmarksData[documentId] || { filePath: document.filePath, fileName: document.fileName, items: [] }
+      const merged = uniqueByIdAndSignature(normalizeBookmarkItems(current.items || []), incomingBookmarks, bookmarkSignature)
+      bookmarksData[documentId] = {
+        filePath: current.filePath || document.filePath,
+        fileName: current.fileName || document.fileName,
+        lastUpdatedAt: Date.now(),
+        items: normalizeBookmarkItems(merged.items),
+      }
+      summary.bookmarks += merged.imported
+      summary.skipped += merged.skipped
+    }
+
     touchedDocuments.add(documentId)
   })
 
   await saveDocumentTranslationHistories(histories, { prune: false })
   await saveDocumentNotesData(notesData)
   await saveDocumentAnnotationsData(annotationsData)
+  await saveDocumentBookmarksData(bookmarksData)
   summary.documents = touchedDocuments.size
   return summary
 }
@@ -2170,6 +2525,9 @@ async function exportCurrentDocumentData(documentId, exportType) {
   }
   if (nextExportType === 'annotations' && !payload.data.annotations.length) {
     throw new Error('暂无可导出的批注')
+  }
+  if (nextExportType === 'bookmarks' && !payload.data.bookmarks.length) {
+    throw new Error('暂无可导出的书签')
   }
   const exportObject = buildSingleDocumentExport(documentId, nextExportType, payload)
   return writeExportJson(exportObject)
@@ -2192,11 +2550,13 @@ async function getExportableDocuments() {
   const histories = await readDocumentTranslationHistories()
   const notes = await readDocumentNotes()
   const annotations = await readDocumentAnnotations()
+  const bookmarks = await readDocumentBookmarks()
   const browsingHistory = await readBrowsingHistory()
   const ids = new Set([
     ...Object.keys(histories),
     ...Object.keys(notes),
     ...Object.keys(annotations),
+    ...Object.keys(bookmarks),
     ...browsingHistory.map((record) => record.documentId),
   ])
 
@@ -2204,14 +2564,16 @@ async function getExportableDocuments() {
     const historyContainer = histories[documentId] || {}
     const noteContainer = notes[documentId] || {}
     const annotationContainer = annotations[documentId] || {}
+    const bookmarkContainer = bookmarks[documentId] || {}
     const browsingRecord = browsingHistory.find((record) => record.documentId === documentId)
     const document = buildDocumentMeta(documentId, {
-      filePath: historyContainer.filePath || noteContainer.filePath || annotationContainer.filePath,
-      fileName: historyContainer.fileName || noteContainer.fileName || annotationContainer.fileName,
+      filePath: historyContainer.filePath || noteContainer.filePath || annotationContainer.filePath || bookmarkContainer.filePath,
+      fileName: historyContainer.fileName || noteContainer.fileName || annotationContainer.fileName || bookmarkContainer.fileName,
       lastUpdatedAt: Math.max(
         Number(historyContainer.lastOpenedAt) || 0,
         Number(noteContainer.lastUpdatedAt) || 0,
         Number(annotationContainer.lastUpdatedAt) || 0,
+        Number(bookmarkContainer.lastUpdatedAt) || 0,
       ),
     }, browsingRecord)
     return {
@@ -2219,6 +2581,7 @@ async function getExportableDocuments() {
       historyCount: normalizeHistoryItems(historyContainer.items || []).length,
       notesCount: normalizeNoteItems(noteContainer.items || []).length,
       annotationsCount: normalizeAnnotationItems(annotationContainer.items || []).length,
+      bookmarksCount: normalizeBookmarkItems(bookmarkContainer.items || []).length,
     }
   }).sort((a, b) => b.lastUpdatedAt - a.lastUpdatedAt)
 }
@@ -2480,7 +2843,7 @@ async function mergeDocumentDataForPath(canonicalDocumentId, normalizedPath, fil
   const filePathKey = getFilePathKey(normalizedPath)
   if (!canonicalDocumentId || !filePathKey) return
 
-  const { annotations, notes, histories } = stores
+  const { annotations, notes, histories, bookmarks, tableOfContents } = stores
   const annotationEntries = Object.entries(annotations).filter(([, container]) => isSameStoredFilePath(container, filePathKey))
   if (annotationEntries.some(([documentId]) => documentId !== canonicalDocumentId)) {
     const canonical = annotations[canonicalDocumentId] || { filePath: normalizedPath, fileName, items: [] }
@@ -2549,6 +2912,60 @@ async function mergeDocumentDataForPath(canonicalDocumentId, normalizedPath, fil
     }
     await saveDocumentTranslationHistories(histories, { prune: false })
   }
+
+  const bookmarkEntries = Object.entries(bookmarks).filter(([, container]) => isSameStoredFilePath(container, filePathKey))
+  if (bookmarkEntries.some(([documentId]) => documentId !== canonicalDocumentId)) {
+    const canonical = bookmarks[canonicalDocumentId] || { filePath: normalizedPath, fileName, items: [] }
+    let items = normalizeBookmarkItems(canonical.items || [])
+    let lastUpdatedAt = Number(canonical.lastUpdatedAt) || 0
+
+    for (const [documentId, container] of bookmarkEntries) {
+      if (documentId === canonicalDocumentId) continue
+      const merged = uniqueByIdAndSignature(items, normalizeBookmarkItems(container.items || []), bookmarkSignature)
+      items = normalizeBookmarkItems(merged.items)
+      lastUpdatedAt = Math.max(lastUpdatedAt, Number(container.lastUpdatedAt) || 0)
+      delete bookmarks[documentId]
+    }
+
+    bookmarks[canonicalDocumentId] = {
+      filePath: canonical.filePath || normalizedPath,
+      fileName: canonical.fileName || fileName,
+      lastUpdatedAt: Math.max(lastUpdatedAt, Date.now()),
+      items,
+    }
+    await saveDocumentBookmarksData(bookmarks)
+  }
+
+  const tocEntries = Object.entries(tableOfContents).filter(([, container]) => isSameStoredFilePath(container, filePathKey))
+  if (tocEntries.some(([documentId]) => documentId !== canonicalDocumentId)) {
+    const candidates = [
+      [canonicalDocumentId, tableOfContents[canonicalDocumentId]],
+      ...tocEntries,
+    ]
+      .filter(([, container]) => container)
+      .sort(([, first], [, second]) =>
+        normalizeTocItems(second.items).length - normalizeTocItems(first.items).length ||
+        Number(second.lastUpdatedAt || 0) - Number(first.lastUpdatedAt || 0),
+      )
+    const selected = candidates[0]?.[1] || {}
+
+    tocEntries.forEach(([documentId]) => {
+      if (documentId !== canonicalDocumentId) delete tableOfContents[documentId]
+    })
+    tableOfContents[canonicalDocumentId] = {
+      filePath: selected.filePath || normalizedPath,
+      fileName: selected.fileName || fileName,
+      lastUpdatedAt: Math.max(Number(selected.lastUpdatedAt) || 0, Date.now()),
+      source: selected.source || 'unavailable',
+      version: Number(selected.version) || 0,
+      documentType: selected.documentType || 'unknown',
+      pageOffset: Number.isFinite(selected.pageOffset) ? selected.pageOffset : null,
+      userModified: selected.userModified === true,
+      fingerprint: normalizeTocFingerprint(selected.fingerprint, selected),
+      items: normalizeTocItems(selected.items),
+    }
+    await saveDocumentTableOfContentsData(tableOfContents)
+  }
 }
 
 async function resolveDocumentIdForPdf(filePath, fileName, fileSize) {
@@ -2556,10 +2973,12 @@ async function resolveDocumentIdForPdf(filePath, fileName, fileSize) {
   const filePathKey = getFilePathKey(normalizedPath)
 
   if (filePathKey) {
-    const [annotations, notes, histories, browsingHistory] = await Promise.all([
+    const [annotations, notes, histories, bookmarks, tableOfContents, browsingHistory] = await Promise.all([
       readDocumentAnnotations(),
       readDocumentNotes(),
       readDocumentTranslationHistories(),
+      readDocumentBookmarks(),
+      readDocumentTableOfContents(),
       readBrowsingHistory(),
     ])
     const candidates = new Map()
@@ -2589,6 +3008,18 @@ async function resolveDocumentIdForPdf(filePath, fileName, fileSize) {
       }
     }
 
+    for (const [documentId, container] of Object.entries(bookmarks)) {
+      if (isSameStoredFilePath(container, filePathKey)) {
+        addCandidate(documentId, 1500 + normalizeBookmarkItems(container.items || []).length * 10, container.lastUpdatedAt)
+      }
+    }
+
+    for (const [documentId, container] of Object.entries(tableOfContents)) {
+      if (isSameStoredFilePath(container, filePathKey)) {
+        addCandidate(documentId, 1400 + normalizeTocItems(container.items || []).length * 8, container.lastUpdatedAt)
+      }
+    }
+
     for (const record of browsingHistory) {
       if (getFilePathKey(record.filePath) === filePathKey) {
         addCandidate(record.documentId, 1000, record.lastOpenedAt)
@@ -2599,7 +3030,13 @@ async function resolveDocumentIdForPdf(filePath, fileName, fileSize) {
       const canonicalDocumentId = Array.from(candidates.values())
         .sort((first, second) => second.score - first.score || second.updatedAt - first.updatedAt)[0].documentId
 
-      await mergeDocumentDataForPath(canonicalDocumentId, normalizedPath, fileName, { annotations, notes, histories })
+      await mergeDocumentDataForPath(canonicalDocumentId, normalizedPath, fileName, {
+        annotations,
+        notes,
+        histories,
+        bookmarks,
+        tableOfContents,
+      })
       return canonicalDocumentId
     }
   }
@@ -2624,12 +3061,16 @@ async function openPdfFromPath(filePath) {
     const buffer = await fs.readFile(normalizedPath)
     const fileName = path.basename(normalizedPath)
     const fileSize = stat.size
+    const modifiedTime = Math.max(0, Number(stat.mtimeMs) || 0)
+    const fileHash = crypto.createHash('sha256').update(buffer).digest('hex')
     const documentId = await resolveDocumentIdForPdf(normalizedPath, fileName, fileSize)
 
     return {
       filePath: normalizedPath,
       fileName,
       fileSize,
+      modifiedTime,
+      fileHash,
       documentId,
       dataUrl: `data:application/pdf;base64,${buffer.toString('base64')}`,
     }
@@ -2686,6 +3127,7 @@ function registerIpcHandlers() {
   ipcMain.handle('ai:translate-text', async (_event, payload) => postBackendJson('/ai/translate-text', payload))
   ipcMain.handle('ai:translate-image-ocr', async (_event, payload) => postBackendJson('/ai/translate-image-ocr', payload))
   ipcMain.handle('ai:translate-image-diagram', async (_event, payload) => postBackendJson('/ai/translate-image-diagram', payload))
+  ipcMain.handle('ai:recognize-toc', async (_event, payload) => postBackendJson('/ai/recognize-toc', payload))
   ipcMain.handle('glossary:import', async () => importGlossary())
   ipcMain.handle('glossary:get', async () => readGlossary())
   ipcMain.handle('glossary:clear', async () => clearGlossary())
@@ -2720,6 +3162,13 @@ function registerIpcHandlers() {
   ipcMain.handle('document-notes:update', async (_event, note) => updateDocumentNote(note))
   ipcMain.handle('document-notes:delete', async (_event, documentId, noteId) => deleteDocumentNote(documentId, noteId))
   ipcMain.handle('document-notes:clear', async (_event, documentId) => clearDocumentNotes(documentId))
+  ipcMain.handle('document-bookmarks:get', async (_event, documentId) => getDocumentBookmarks(documentId))
+  ipcMain.handle('document-bookmarks:save', async (_event, documentId, payload) => saveDocumentBookmarks(documentId, payload))
+  ipcMain.handle('document-bookmarks:add', async (_event, bookmark) => addDocumentBookmark(bookmark))
+  ipcMain.handle('document-bookmarks:delete', async (_event, documentId, bookmarkId) => deleteDocumentBookmark(documentId, bookmarkId))
+  ipcMain.handle('document-bookmarks:clear', async (_event, documentId) => clearDocumentBookmarks(documentId))
+  ipcMain.handle('document-toc:get', async (_event, documentId) => getDocumentTableOfContents(documentId))
+  ipcMain.handle('document-toc:save', async (_event, documentId, payload) => saveDocumentTableOfContents(documentId, payload))
   ipcMain.handle('document-annotations:get', async (_event, documentId) => getDocumentAnnotations(documentId))
   ipcMain.handle('document-annotations:save', async (_event, documentId, payload) => saveDocumentAnnotations(documentId, payload))
   ipcMain.handle('document-annotations:add', async (_event, annotation) => addDocumentAnnotation(annotation))

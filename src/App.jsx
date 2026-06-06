@@ -27,6 +27,12 @@ import {
   buildPdfReportHtml,
   makeSafePdfReportFileName,
 } from './utils/pdfReportExport'
+import {
+  analyzeTocFromPages,
+  cleanTocTitle,
+  normalizeTocItems,
+  parseAiTocResponse,
+} from './utils/toc'
 
 const UI = {
   choosePdf: '\u9009\u62e9 PDF',
@@ -86,6 +92,10 @@ const SEARCH_RESULT_TYPE_LABELS = {
 }
 const SEARCH_RESULT_LIMIT = 10
 const SEARCH_DEBOUNCE_MS = 180
+const TOC_RECOGNITION_VERSION = 3
+const TOC_OCR_MAX_PAGES = 60
+const TOC_OCR_RENDER_SCALE = 1.15
+const TOC_DEBUG = import.meta.env.VITE_TOC_DEBUG === 'true'
 const SEARCH_TEXT_FIELDS = [
   'title',
   'fileName',
@@ -116,6 +126,13 @@ const EXPORT_DETAIL_TEXT_FIELDS = [
 ]
 const EXPORT_DETAIL_NOTE_FIELDS = ['noteText', 'note', 'content', 'comment', 'memo', 'remark']
 const EXPORT_DETAIL_TRANSLATION_FIELDS = ['translation', 'translatedText', 'targetText', 'result', 'translated', 'target']
+const DATA_EXPORT_TYPE_OPTIONS = [
+  { value: 'full', label: '完整备份' },
+  { value: 'translation-history', label: '翻译历史' },
+  { value: 'notes', label: '笔记' },
+  { value: 'annotations', label: '批注' },
+  { value: 'bookmarks', label: '书签' },
+]
 const MIN_ZOOM = 50
 const MAX_ZOOM = 300
 const ZOOM_STEP = 10
@@ -260,6 +277,23 @@ function normalizeDocumentNoteList(notes) {
   return sortExportDetailRecords(notes)
 }
 
+function normalizeDocumentBookmarkList(bookmarks) {
+  return (Array.isArray(bookmarks) ? bookmarks : [])
+    .filter(Boolean)
+    .map((bookmark) => ({
+      ...bookmark,
+      id: String(bookmark.id || `${bookmark.pageNumber || 1}-${bookmark.title || Date.now()}`),
+      pageNumber: Math.max(1, Math.floor(Number(bookmark.pageNumber) || 1)),
+      title: String(bookmark.title || '').replace(/\s+/g, ' ').trim() || '未命名书签',
+      createdAt: Number(bookmark.createdAt || Date.now()),
+      updatedAt: Number(bookmark.updatedAt || bookmark.createdAt || Date.now()),
+    }))
+    .sort((firstBookmark, secondBookmark) =>
+      firstBookmark.pageNumber - secondBookmark.pageNumber ||
+      secondBookmark.updatedAt - firstBookmark.updatedAt,
+    )
+}
+
 function normalizeDocumentAnnotationList(annotations) {
   return sortExportDetailRecords(annotations)
 }
@@ -309,6 +343,10 @@ function getExportAnnotationDetailPreview(annotation = {}) {
   )
 }
 
+function getExportBookmarkDetailPreview(bookmark = {}) {
+  return trimExportDetailPreview(bookmark.title, '书签')
+}
+
 async function readExportDocumentDetail(electronAPI, documentId) {
   if (!documentId) return null
   if (
@@ -319,10 +357,11 @@ async function readExportDocumentDetail(electronAPI, documentId) {
     throw new Error('文献详情仅在桌面版可用')
   }
 
-  const [histories, annotations, notes] = await Promise.all([
+  const [histories, annotations, notes, bookmarks] = await Promise.all([
     electronAPI.getDocumentTranslationHistory(documentId),
     electronAPI.getDocumentAnnotations(documentId),
     electronAPI.getDocumentNotes(documentId),
+    electronAPI.getDocumentBookmarks?.(documentId) || [],
   ])
 
   return {
@@ -330,6 +369,7 @@ async function readExportDocumentDetail(electronAPI, documentId) {
     histories: sortExportDetailRecords(histories),
     annotations: normalizeDocumentAnnotationList(annotations).filter((item) => item?.type !== 'ocr-note-tag'),
     notes: normalizeDocumentNoteList(notes),
+    bookmarks: normalizeDocumentBookmarkList(bookmarks),
   }
 }
 
@@ -478,6 +518,172 @@ function canSearchScope(scope, type) {
   return scope === 'all' || scope === type
 }
 
+function getPdfTextItemFontSize(item = {}) {
+  const transformHeight = Math.abs(Number(item.transform?.[3]) || 0)
+  return Math.max(Number(item.height) || 0, transformHeight)
+}
+
+function buildPdfPageStructure(textContent, pageNumber, pageMetrics = {}) {
+  const rawItems = (Array.isArray(textContent?.items) ? textContent.items : [])
+    .map((item) => {
+      const text = String(item?.str || '').replace(/\s+/g, ' ').trim()
+      if (!text) return null
+      const style = textContent?.styles?.[item.fontName] || {}
+      const fontName = [item.fontName, style.fontFamily].filter(Boolean).join(' ')
+      const fontSize = getPdfTextItemFontSize(item)
+
+      return {
+        text,
+        x: Number(item.transform?.[4]) || 0,
+        y: Number(item.transform?.[5]) || 0,
+        width: Math.max(Number(item.width) || 0, text.length * Math.max(fontSize, 1) * 0.38),
+        fontSize,
+        bold: /bold|black|heavy|semibold|demi/i.test(fontName),
+        hasEOL: item.hasEOL === true,
+      }
+    })
+    .filter(Boolean)
+  const lineGroups = []
+
+  rawItems
+    .slice()
+    .sort((a, b) => b.y - a.y || a.x - b.x)
+    .forEach((item) => {
+      const tolerance = Math.max(1.5, item.fontSize * 0.24)
+      let line = lineGroups.find((candidate) => Math.abs(candidate.y - item.y) <= tolerance)
+
+      if (!line) {
+        line = { y: item.y, items: [] }
+        lineGroups.push(line)
+      }
+
+      line.items.push(item)
+    })
+
+  const lines = lineGroups
+    .sort((a, b) => b.y - a.y)
+    .flatMap((line) => {
+      const items = line.items.sort((a, b) => a.x - b.x)
+      const segments = []
+      let currentSegment = []
+      let lastRight = null
+
+      items.forEach((item) => {
+        const gap = lastRight === null ? 0 : item.x - lastRight
+        const splitGap = Math.max(28, item.fontSize * 3.2)
+
+        if (currentSegment.length && gap > splitGap) {
+          segments.push(currentSegment)
+          currentSegment = []
+        }
+
+        currentSegment.push(item)
+        lastRight = Math.max(lastRight || 0, item.x + item.width)
+      })
+
+      if (currentSegment.length) segments.push(currentSegment)
+
+      return segments.map((segment) => {
+        const left = Math.min(...segment.map((item) => item.x))
+        const right = Math.max(...segment.map((item) => item.x + item.width))
+        return {
+          text: segment.map((item) => item.text).join(' ').replace(/\s+/g, ' ').trim().slice(0, 400),
+          x: left,
+          y: line.y,
+          width: Math.max(0, right - left),
+          right,
+          fontSize: Math.max(...segment.map((item) => item.fontSize)),
+          bold: segment.some((item) => item.bold),
+        }
+      })
+    })
+    .filter((line) => line.text)
+
+  lines.forEach((line, index) => {
+    const previous = lines[index - 1]
+    const next = lines[index + 1]
+    line.spaceBefore = previous && Number.isFinite(previous.y) && Number.isFinite(line.y)
+      ? Math.max(0, previous.y - line.y - previous.fontSize)
+      : 0
+    line.spaceAfter = next && Number.isFinite(next.y) && Number.isFinite(line.y)
+      ? Math.max(0, line.y - next.y - line.fontSize)
+      : 0
+  })
+
+  return {
+    pageNumber,
+    pageWidth: Number(pageMetrics.width) || 0,
+    pageHeight: Number(pageMetrics.height) || 0,
+    text: rawItems.map((item) => item.text).join(' ').replace(/\s+/g, ' ').trim(),
+    lines,
+  }
+}
+
+async function resolvePdfOutlinePage(pdfDocument, destination) {
+  try {
+    const resolvedDestination = typeof destination === 'string'
+      ? await pdfDocument.getDestination(destination)
+      : destination
+    const pageReference = Array.isArray(resolvedDestination) ? resolvedDestination[0] : null
+    if (!pageReference) return null
+    if (Number.isInteger(pageReference)) return pageReference + 1
+    return (await pdfDocument.getPageIndex(pageReference)) + 1
+  } catch {
+    return null
+  }
+}
+
+async function buildNativePdfToc(pdfDocument, outline, level = 1) {
+  const items = []
+
+  for (let index = 0; index < (Array.isArray(outline) ? outline.length : 0); index += 1) {
+    const outlineItem = outline[index]
+    const pageNumber = await resolvePdfOutlinePage(pdfDocument, outlineItem.dest)
+    const children = await buildNativePdfToc(pdfDocument, outlineItem.items, level + 1)
+
+    if (pageNumber) {
+      items.push({
+        id: `native-toc-${pageNumber}-${level}-${index}`,
+        title: cleanTocTitle(outlineItem.title),
+        pageNumber,
+        pageIndex: pageNumber - 1,
+        level: Math.min(3, level),
+        confidence: 1,
+        children,
+      })
+    } else {
+      items.push(...children)
+    }
+  }
+
+  return items
+}
+
+function getTocFingerprint(documentRecord = {}) {
+  return {
+    filePath: String(documentRecord.filePath || ''),
+    fileSize: Math.max(0, Number(documentRecord.fileSize) || 0),
+    modifiedTime: Math.max(0, Number(documentRecord.modifiedTime) || 0),
+    fileHash: String(documentRecord.fileHash || ''),
+  }
+}
+
+function isTocFingerprintCurrent(savedFingerprint, documentRecord) {
+  if (!savedFingerprint || typeof savedFingerprint !== 'object') return false
+  const current = getTocFingerprint(documentRecord)
+  const comparableFields = ['fileHash', 'modifiedTime', 'fileSize', 'filePath']
+    .filter((field) => current[field] && savedFingerprint[field])
+  if (!comparableFields.length) return false
+  return comparableFields.every((field) => String(savedFingerprint[field]) === String(current[field]))
+}
+
+function logTocDebug(stage, payload) {
+  if (!TOC_DEBUG) return
+  console.groupCollapsed(`[TOC] ${stage}`)
+  console.log(payload)
+  console.groupEnd()
+}
+
 const APP_ICON_SRC = appIconUrl
 const navIconProps = {
   viewBox: '0 0 24 24',
@@ -598,12 +804,16 @@ function App() {
   const noteDialogRef = useRef(null)
   const noteTitleInputRef = useRef(null)
   const noteTextareaRef = useRef(null)
+  const bookmarkTitleInputRef = useRef(null)
   const libraryFolderNameInputRef = useRef(null)
   const retainedRightPanelActionsRef = useRef(null)
   const searchDialogInputRef = useRef(null)
   const pdfTextSearchCacheRef = useRef({ key: '', pages: [] })
   const librarySearchCacheRef = useRef({ key: '', data: null })
   const libraryDocumentTextCacheRef = useRef(new Map())
+  const tocGenerationKeyRef = useRef('')
+  const tocGenerationRequestRef = useRef(0)
+  const generateTableOfContentsRef = useRef(null)
 
   const [pdfUrl, setPdfUrl] = useState('')
   const [currentDocument, setCurrentDocument] = useState(null)
@@ -655,10 +865,20 @@ function App() {
   const [searchHitMarkerRequest, setSearchHitMarkerRequest] = useState(null)
   const [rightPanelTab, setRightPanelTab] = useState('result')
   const [documentNotes, setDocumentNotes] = useState([])
+  const [documentBookmarks, setDocumentBookmarks] = useState([])
+  const [documentToc, setDocumentToc] = useState([])
+  const [, setTocSource] = useState('unavailable')
+  const [tocStatus, setTocStatus] = useState('')
+  const [isTocGenerating, setIsTocGenerating] = useState(false)
+  const [collapsedTocItemIds, setCollapsedTocItemIds] = useState([])
+  const [tocDrawerOpen, setTocDrawerOpen] = useState(false)
   const [selectedNoteId, setSelectedNoteId] = useState('')
   const [noteDialog, setNoteDialog] = useState(null)
   const [noteDraft, setNoteDraft] = useState({ title: '', noteText: '' })
+  const [bookmarkDialogOpen, setBookmarkDialogOpen] = useState(false)
+  const [bookmarkTitleDraft, setBookmarkTitleDraft] = useState('')
   const [notesStatus, setNotesStatus] = useState('')
+  const [bookmarksStatus, setBookmarksStatus] = useState('')
   const [historyStatus, setHistoryStatus] = useState('')
   const [exportStatus, setExportStatus] = useState('')
   const [, setIsHistoryImportExportBusy] = useState(false)
@@ -674,6 +894,7 @@ function App() {
   const [selectedPdfReportDocumentIds, setSelectedPdfReportDocumentIds] = useState([])
   const [isPdfReportExporting, setIsPdfReportExporting] = useState(false)
   const [pdfReportExportOptions, setPdfReportExportOptions] = useState(DEFAULT_CONTENT_EXPORT_OPTIONS)
+  const [batchDataExportType, setBatchDataExportType] = useState('full')
   const [batchExportMode, setBatchExportMode] = useState('merged')
   const [batchExportName, setBatchExportName] = useState('')
   const [exportDefaultDir, setExportDefaultDir] = useState('')
@@ -689,6 +910,8 @@ function App() {
   const [selectedHistoryIds, setSelectedHistoryIds] = useState([])
   const [isNotesBatchSelecting, setIsNotesBatchSelecting] = useState(false)
   const [selectedNoteIds, setSelectedNoteIds] = useState([])
+  const [isBookmarksBatchSelecting, setIsBookmarksBatchSelecting] = useState(false)
+  const [selectedBookmarkIds, setSelectedBookmarkIds] = useState([])
   const [hideOcrNoteTags, setHideOcrNoteTags] = useState(false)
   const [diagramResult, setDiagramResult] = useState(null)
   const [diagramZoom, setDiagramZoom] = useState(1)
@@ -717,6 +940,7 @@ function App() {
   const [settingsTab, setSettingsTab] = useState('model')
   const [importExportTab, setImportExportTab] = useState('importExport')
   const [activeModule, setActiveModule] = useState('reader')
+  const [toolbarCollapsed, setToolbarCollapsed] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [rightPanelWidth, setRightPanelWidth] = useState(DEFAULT_SETTINGS.rightPanelWidth)
   const [rightPanelVisible, setRightPanelVisible] = useState(true)
@@ -838,7 +1062,21 @@ function App() {
     setPageWidth(700)
     setTranslationHistory([])
     setDocumentNotes([])
+    setDocumentBookmarks([])
+    setDocumentToc([])
+    setTocSource('unavailable')
+    setTocStatus('')
+    setIsTocGenerating(false)
+    setCollapsedTocItemIds([])
+    setTocDrawerOpen(false)
+    tocGenerationKeyRef.current = ''
+    tocGenerationRequestRef.current += 1
     setSelectedNoteId('')
+    setSelectedBookmarkIds([])
+    setIsBookmarksBatchSelecting(false)
+    setBookmarkDialogOpen(false)
+    setBookmarkTitleDraft('')
+    setBookmarksStatus('')
     setNoteDialog(null)
     setNotesStatus('')
     setIsOcrMode(false)
@@ -1083,8 +1321,22 @@ function App() {
     setRightPanelVisible(tab.rightPanelVisible !== false)
     setTranslationHistory([])
     setDocumentNotes([])
+    setDocumentBookmarks([])
+    setDocumentToc([])
+    setTocSource('unavailable')
+    setTocStatus('')
+    setIsTocGenerating(false)
+    setCollapsedTocItemIds([])
+    setTocDrawerOpen(false)
+    tocGenerationKeyRef.current = ''
+    tocGenerationRequestRef.current += 1
     setDocumentAnnotations([])
     setSelectedNoteId('')
+    setSelectedBookmarkIds([])
+    setIsBookmarksBatchSelecting(false)
+    setBookmarkDialogOpen(false)
+    setBookmarkTitleDraft('')
+    setBookmarksStatus('')
     clearTransientReadingState()
 
     requestAnimationFrame(() => {
@@ -1300,6 +1552,488 @@ function App() {
 
   function normalizeNoteList(notes) {
     return normalizeDocumentNoteList(notes)
+  }
+
+  function normalizeBookmarkList(bookmarks) {
+    return normalizeDocumentBookmarkList(bookmarks)
+  }
+
+  function openBookmarkDialog() {
+    if (!currentDocument?.documentId) {
+      setBookmarksStatus('请先打开 PDF')
+      return
+    }
+
+    setBookmarkTitleDraft('')
+    setBookmarkDialogOpen(true)
+    setBookmarksStatus('')
+  }
+
+  function closeBookmarkDialog() {
+    setBookmarkDialogOpen(false)
+    setBookmarkTitleDraft('')
+  }
+
+  async function confirmAddBookmark() {
+    if (!currentDocument?.documentId) {
+      setBookmarksStatus('请先打开 PDF')
+      return
+    }
+
+    const title = bookmarkTitleDraft.replace(/\s+/g, ' ').trim()
+    if (!title) {
+      setBookmarksStatus('请输入本页主题')
+      return
+    }
+
+    const now = Date.now()
+    const bookmark = {
+      id: `${now}-${Math.random().toString(36).slice(2, 9)}`,
+      documentId: currentDocument.documentId,
+      filePath: currentDocument.filePath,
+      fileName: currentDocument.fileName,
+      pageNumber,
+      title,
+      createdAt: now,
+      updatedAt: now,
+    }
+
+    try {
+      const nextBookmarks = window.electronAPI?.addDocumentBookmark
+        ? await window.electronAPI.addDocumentBookmark(bookmark)
+        : [bookmark, ...documentBookmarks.filter((item) => item.id !== bookmark.id)]
+      setDocumentBookmarks(normalizeBookmarkList(nextBookmarks))
+      closeBookmarkDialog()
+      setRightPanelTab('bookmarks')
+      setBookmarksStatus('')
+    } catch (error) {
+      setBookmarksStatus(error.message || '添加书签失败')
+    }
+  }
+
+  function jumpToBookmark(bookmark) {
+    const nextPage = Math.max(1, Math.min(Number(bookmark?.pageNumber) || 1, numPages || Number(bookmark?.pageNumber) || 1))
+    setPageNumber(nextPage)
+    setPageJumpInput(String(nextPage))
+    setBookmarksStatus('')
+  }
+
+  function toggleBookmarkSelection(id) {
+    setSelectedBookmarkIds((currentIds) =>
+      currentIds.includes(id) ? currentIds.filter((itemId) => itemId !== id) : [...currentIds, id],
+    )
+  }
+
+  async function deleteSelectedBookmarks() {
+    if (!currentDocument?.documentId) {
+      setBookmarksStatus('请先打开 PDF')
+      return
+    }
+    if (!selectedBookmarkIds.length) {
+      setBookmarksStatus('请先选择要删除的书签')
+      return
+    }
+    if (!window.confirm(`确定删除选中的 ${selectedBookmarkIds.length} 条书签吗？`)) return
+
+    try {
+      let nextBookmarks = documentBookmarks
+      for (const bookmarkId of selectedBookmarkIds) {
+        nextBookmarks = window.electronAPI?.deleteDocumentBookmark
+          ? await window.electronAPI.deleteDocumentBookmark(currentDocument.documentId, bookmarkId)
+          : nextBookmarks.filter((bookmark) => bookmark.id !== bookmarkId)
+      }
+      setDocumentBookmarks(normalizeBookmarkList(nextBookmarks))
+      setSelectedBookmarkIds([])
+      setIsBookmarksBatchSelecting(false)
+      setBookmarksStatus('已删除所选书签')
+    } catch (error) {
+      setBookmarksStatus(error.message || '删除所选书签失败')
+    }
+  }
+
+  async function clearCurrentDocumentBookmarks() {
+    if (!currentDocument?.documentId) {
+      setBookmarksStatus('请先打开 PDF')
+      return
+    }
+    if (!documentBookmarks.length) {
+      setBookmarksStatus('暂无可清空的书签')
+      return
+    }
+    if (!window.confirm('确定清空当前文献的全部书签吗？')) return
+
+    try {
+      const nextBookmarks = window.electronAPI?.clearDocumentBookmarks
+        ? await window.electronAPI.clearDocumentBookmarks(currentDocument.documentId)
+        : []
+      setDocumentBookmarks(normalizeBookmarkList(nextBookmarks))
+      setSelectedBookmarkIds([])
+      setIsBookmarksBatchSelecting(false)
+      setBookmarksStatus('已清空当前文献书签')
+    } catch (error) {
+      setBookmarksStatus(error.message || '清空书签失败')
+    }
+  }
+
+  async function persistCurrentDocumentToc(items, source, metadata = {}) {
+    const normalizedItems = normalizeTocItems(items, numPages || Number.POSITIVE_INFINITY)
+    const payload = {
+      filePath: currentDocument?.filePath,
+      fileName: currentDocument?.fileName,
+      fingerprint: getTocFingerprint(currentDocument),
+      source,
+      version: TOC_RECOGNITION_VERSION,
+      documentType: metadata.documentType || 'unknown',
+      pageOffset: Number.isFinite(metadata.pageOffset) ? metadata.pageOffset : null,
+      items: normalizedItems,
+    }
+
+    if (currentDocument?.documentId && window.electronAPI?.saveDocumentTableOfContents) {
+      const saved = await window.electronAPI.saveDocumentTableOfContents(currentDocument.documentId, payload)
+      return {
+        source: saved?.source || source,
+        documentType: saved?.documentType || payload.documentType,
+        pageOffset: Number.isFinite(saved?.pageOffset) ? saved.pageOffset : payload.pageOffset,
+        items: normalizeTocItems(saved?.items || normalizedItems, numPages || Number.POSITIVE_INFINITY),
+      }
+    }
+
+    return {
+      source,
+      documentType: payload.documentType,
+      pageOffset: payload.pageOffset,
+      items: normalizedItems,
+    }
+  }
+
+  async function requestAiTocRecognition(candidates, documentType) {
+    const payload = {
+      documentType,
+      candidates: candidates.map((candidate) => ({
+        text: candidate.title,
+        pageNumber: candidate.pageNumber,
+        pageIndex: candidate.pageIndex,
+        fontSize: candidate.fontSize,
+        level: candidate.level,
+        score: candidate.score,
+        reasons: candidate.reasons,
+        penalties: candidate.penalties,
+      })),
+    }
+    const data = window.electronAPI?.recognizeTableOfContents
+      ? await window.electronAPI.recognizeTableOfContents(payload)
+      : await requestBackendJson('/ai/recognize-toc', payload)
+
+    return parseAiTocResponse(
+      data?.toc,
+      numPages || Number.POSITIVE_INFINITY,
+      candidates,
+    )
+  }
+
+  function getTocOcrPageNumbers(totalPages) {
+    if (totalPages <= TOC_OCR_MAX_PAGES) {
+      return Array.from({ length: totalPages }, (_item, index) => index + 1)
+    }
+
+    const firstPages = Array.from({ length: 20 }, (_item, index) => index + 1)
+    const remainingSlots = TOC_OCR_MAX_PAGES - firstPages.length
+    const sampledPages = Array.from({ length: remainingSlots }, (_item, index) => (
+      Math.round(21 + ((totalPages - 21) * index) / Math.max(remainingSlots - 1, 1))
+    ))
+
+    return Array.from(new Set([...firstPages, ...sampledPages])).sort((a, b) => a - b)
+  }
+
+  async function renderPdfPageForTocOcr(pdfPage) {
+    const baseViewport = pdfPage.getViewport({ scale: TOC_OCR_RENDER_SCALE })
+    const maxDimension = Math.max(baseViewport.width, baseViewport.height)
+    const scale = maxDimension > 1600
+      ? TOC_OCR_RENDER_SCALE * (1600 / maxDimension)
+      : TOC_OCR_RENDER_SCALE
+    const viewport = pdfPage.getViewport({ scale })
+    const canvas = document.createElement('canvas')
+    const context = canvas.getContext('2d', { alpha: false })
+    if (!context) throw new Error('无法创建目录 OCR 画布')
+
+    canvas.width = Math.max(1, Math.ceil(viewport.width))
+    canvas.height = Math.max(1, Math.ceil(viewport.height))
+    await pdfPage.render({ canvasContext: context, viewport }).promise
+    return canvas.toDataURL('image/jpeg', 0.84)
+  }
+
+  async function extractScannedTocPages(pdfDocument, requestId) {
+    let worker = null
+    const pages = []
+    const pageNumbers = getTocOcrPageNumbers(pdfDocument.numPages)
+
+    try {
+      worker = await createWorker('eng', 1, {
+        workerPath: `${TESSERACT_ASSET_BASE}/worker.min.js`,
+        corePath: `${TESSERACT_ASSET_BASE}/core/tesseract-core-simd-lstm.wasm.js`,
+        langPath: `${TESSERACT_ASSET_BASE}/lang`,
+        cacheMethod: 'none',
+      })
+
+      for (let index = 0; index < pageNumbers.length; index += 1) {
+        if (requestId !== tocGenerationRequestRef.current) return []
+
+        const currentPageNumber = pageNumbers[index]
+        setTocStatus(`正在识别扫描页 ${index + 1} / ${pageNumbers.length}`)
+        const pdfPage = await pdfDocument.getPage(currentPageNumber)
+        const image = await renderPdfPageForTocOcr(pdfPage)
+        const { data } = await worker.recognize(image, {}, { text: true })
+        const text = cleanOcrText(data.text || '')
+
+        if (text) {
+          pages.push({
+            pageNumber: currentPageNumber,
+            text,
+            lines: text
+              .split(/\r?\n/)
+              .map((line) => ({
+                text: String(line || '').replace(/\s+/g, ' ').trim().slice(0, 400),
+                fontSize: 0,
+                bold: false,
+                x: 0,
+              }))
+              .filter((line) => line.text),
+          })
+        }
+      }
+    } finally {
+      if (worker) await worker.terminate()
+    }
+
+    return pages
+  }
+
+  async function generateTableOfContents(options = {}) {
+    if (!pdfUrl || !currentDocument?.documentId) {
+      setTocStatus('请先打开 PDF')
+      return
+    }
+
+    const fingerprint = getTocFingerprint(currentDocument)
+    const generationKey = [
+      currentDocument.documentId,
+      fingerprint.fileHash,
+      fingerprint.modifiedTime,
+      fingerprint.fileSize,
+      fingerprint.filePath,
+    ].join('|')
+    if (!options.force && tocGenerationKeyRef.current === generationKey) return
+
+    tocGenerationKeyRef.current = generationKey
+    const requestId = tocGenerationRequestRef.current + 1
+    tocGenerationRequestRef.current = requestId
+    let pdfDocument = null
+    let lastAnalysis = null
+    setIsTocGenerating(true)
+    setTocStatus('正在读取 PDF 目录')
+
+    try {
+      const saveAndApplyToc = async (items, source, metadata = {}, status = '') => {
+        if (requestId !== tocGenerationRequestRef.current) return false
+        const saved = await persistCurrentDocumentToc(items, source, metadata)
+        if (requestId !== tocGenerationRequestRef.current) return false
+        setDocumentToc(saved.items)
+        setTocSource(saved.source)
+        setCollapsedTocItemIds([])
+        setTocStatus(status)
+        logTocDebug('final toc', {
+          source: saved.source,
+          documentType: metadata.documentType || 'unknown',
+          pageOffset: metadata.pageOffset ?? null,
+          items: saved.items,
+        })
+        return true
+      }
+
+      const cleanCandidatesWithAi = async (analysis, source) => {
+        if (analysis.candidates.length < 2 || !analysis.items.length) return false
+        setTocStatus('正在使用 AI 整理目录')
+
+        try {
+          logTocDebug('before AI cleanup', {
+            documentType: analysis.documentType,
+            candidates: analysis.candidates,
+          })
+          const aiToc = await requestAiTocRecognition(
+            analysis.candidates,
+            analysis.documentType,
+          )
+          logTocDebug('after AI cleanup', aiToc)
+          if (aiToc.length) {
+            return saveAndApplyToc(aiToc, `${source}-ai`, analysis)
+          }
+        } catch (error) {
+          logTocDebug('AI cleanup failed; using local fallback', {
+            message: error?.message || String(error),
+          })
+        }
+
+        return saveAndApplyToc(analysis.items, source, analysis)
+      }
+
+      const loadingTask = pdfjs.getDocument(pdfUrl)
+      pdfDocument = await loadingTask.promise
+      const maxPage = pdfDocument.numPages
+      let nativeOutline = []
+      try {
+        nativeOutline = await pdfDocument.getOutline()
+      } catch (error) {
+        logTocDebug('native outline read failed', { message: error?.message || String(error) })
+      }
+      const nativeToc = normalizeTocItems(
+        await buildNativePdfToc(pdfDocument, nativeOutline),
+        maxPage,
+      )
+
+      logTocDebug('native outline', {
+        found: nativeToc.length > 0,
+        rootCount: nativeToc.length,
+        items: nativeToc,
+      })
+      if (requestId !== tocGenerationRequestRef.current) return
+      if (nativeToc.length) {
+        await saveAndApplyToc(nativeToc, 'native', {
+          documentType: 'unknown',
+          pageOffset: null,
+        })
+        return
+      }
+
+      const textPages = []
+      for (let pageIndex = 1; pageIndex <= maxPage; pageIndex += 1) {
+        if (requestId !== tocGenerationRequestRef.current) return
+        if (pageIndex === 1 || pageIndex % 10 === 0 || pageIndex === maxPage) {
+          setTocStatus(`正在分析文本结构 ${pageIndex} / ${maxPage}`)
+        }
+
+        const page = await pdfDocument.getPage(pageIndex)
+        const textContent = await page.getTextContent()
+        const viewport = page.getViewport({ scale: 1 })
+        textPages.push(buildPdfPageStructure(textContent, pageIndex, viewport))
+      }
+
+      const textCharacterCount = textPages.reduce((total, page) => total + page.text.length, 0)
+      const looksLikeTextPdf = textCharacterCount >= Math.max(120, maxPage * 18)
+
+      if (looksLikeTextPdf) {
+        lastAnalysis = analyzeTocFromPages(textPages, maxPage)
+        logTocDebug('local text analysis', {
+          documentType: lastAnalysis.documentType,
+          documentTypeConfidence: lastAnalysis.documentTypeConfidence,
+          documentSignals: lastAnalysis.documentSignals,
+          tocPageDetected: lastAnalysis.tocPageDetected,
+          pageOffset: lastAnalysis.pageOffset,
+          candidateCount: lastAnalysis.candidates.length,
+          candidateDiagnostics: lastAnalysis.diagnostics,
+          localItems: lastAnalysis.items,
+        })
+        if (await cleanCandidatesWithAi(lastAnalysis, lastAnalysis.source)) return
+      } else {
+        setTocStatus('未检测到文本层，正在 OCR 扫描页')
+        const ocrPages = await extractScannedTocPages(pdfDocument, requestId)
+        if (requestId !== tocGenerationRequestRef.current) return
+
+        if (ocrPages.length) {
+          lastAnalysis = analyzeTocFromPages(ocrPages, maxPage)
+          logTocDebug('local OCR analysis', {
+            documentType: lastAnalysis.documentType,
+            tocPageDetected: lastAnalysis.tocPageDetected,
+            pageOffset: lastAnalysis.pageOffset,
+            candidateCount: lastAnalysis.candidates.length,
+            candidateDiagnostics: lastAnalysis.diagnostics,
+            localItems: lastAnalysis.items,
+          })
+          if (lastAnalysis.candidates.length >= 2 && lastAnalysis.items.length) {
+            setTocStatus('正在使用 AI 整理 OCR 目录')
+            try {
+              const aiToc = await requestAiTocRecognition(
+                lastAnalysis.candidates,
+                lastAnalysis.documentType,
+              )
+              if (aiToc.length && await saveAndApplyToc(aiToc, 'ocr-ai', lastAnalysis)) {
+                return
+              }
+            } catch (error) {
+              logTocDebug('OCR AI cleanup failed; using local fallback', {
+                message: error?.message || String(error),
+              })
+            }
+            if (await saveAndApplyToc(
+              lastAnalysis.items,
+              'ocr',
+              lastAnalysis,
+              'AI 识别不可用，已使用 OCR 结构生成目录',
+            )) return
+          }
+        }
+      }
+
+      await saveAndApplyToc([], 'unavailable', lastAnalysis || {
+        documentType: 'unknown',
+        pageOffset: null,
+      }, '无法识别出目录')
+    } catch (error) {
+      tocGenerationKeyRef.current = ''
+      logTocDebug('generation failed', {
+        message: error?.message || String(error),
+        stack: error?.stack,
+      })
+      setTocStatus(error.message || '目录生成失败')
+    } finally {
+      if (pdfDocument?.destroy) {
+        try {
+          await pdfDocument.destroy()
+        } catch {
+          // PDF.js worker cleanup should not interrupt the reader.
+        }
+      }
+      if (requestId === tocGenerationRequestRef.current) {
+        setIsTocGenerating(false)
+      }
+    }
+  }
+
+  generateTableOfContentsRef.current = generateTableOfContents
+
+  function toggleTocPanel() {
+    setActiveModule('reader')
+
+    if (!pdfUrl) {
+      setTocStatus('请先打开 PDF')
+      setTocDrawerOpen((isOpen) => !isOpen)
+      return
+    }
+
+    setTocDrawerOpen((isOpen) => {
+      const nextOpen = !isOpen
+      if (nextOpen && !documentToc.length && !isTocGenerating) {
+        void generateTableOfContents()
+      }
+      return nextOpen
+    })
+  }
+
+  function jumpToTocItem(item) {
+    const requestedPage = Number.isFinite(Number(item?.pageIndex))
+      ? Number(item.pageIndex) + 1
+      : Number(item?.pageNumber ?? item?.pageStart) || 1
+    const nextPage = clampNumber(requestedPage, 1, numPages || requestedPage)
+    setPageNumber(nextPage)
+    setPageJumpInput(String(nextPage))
+    setTocStatus('')
+  }
+
+  function toggleTocItemCollapsed(itemId) {
+    setCollapsedTocItemIds((currentIds) => (
+      currentIds.includes(itemId)
+        ? currentIds.filter((id) => id !== itemId)
+        : [...currentIds, itemId]
+    ))
   }
 
   function getResultNoteType(result) {
@@ -1896,7 +2630,7 @@ function App() {
 
   function formatImportExportSummary(summary) {
     if (!summary) return ''
-    return `导入 ${summary.documents || 0} 篇文献，翻译历史 ${summary.translationHistory || 0} 条，笔记 ${summary.notes || 0} 条，批注 ${summary.annotations || 0} 条，跳过重复 ${summary.skipped || 0} 条`
+    return `导入 ${summary.documents || 0} 篇文献，翻译历史 ${summary.translationHistory || 0} 条，笔记 ${summary.notes || 0} 条，批注 ${summary.annotations || 0} 条，书签 ${summary.bookmarks || 0} 条，跳过重复 ${summary.skipped || 0} 条`
   }
 
   async function refreshCurrentDocumentData() {
@@ -1909,6 +2643,10 @@ function App() {
     if (window.electronAPI?.getDocumentNotes) {
       const nextNotes = await window.electronAPI.getDocumentNotes(currentDocument.documentId)
       setDocumentNotes(normalizeNoteList(Array.isArray(nextNotes) ? nextNotes : []))
+    }
+    if (window.electronAPI?.getDocumentBookmarks) {
+      const nextBookmarks = await window.electronAPI.getDocumentBookmarks(currentDocument.documentId)
+      setDocumentBookmarks(normalizeBookmarkList(Array.isArray(nextBookmarks) ? nextBookmarks : []))
     }
     if (window.electronAPI?.getDocumentAnnotations) {
       const nextAnnotations = await window.electronAPI.getDocumentAnnotations(currentDocument.documentId)
@@ -2120,7 +2858,7 @@ function App() {
     try {
       const result = await window.electronAPI.batchExportPaperReaderData({
         documentIds: selectedExportDocumentIds,
-        exportType: 'full',
+        exportType: batchDataExportType,
         exportMode: batchExportMode,
         userExportName: batchExportMode === 'merged' ? batchExportName : '',
       })
@@ -2908,6 +3646,16 @@ function App() {
   ])
 
   useEffect(() => {
+    if (!bookmarkDialogOpen) return undefined
+
+    const timerId = window.setTimeout(() => {
+      bookmarkTitleInputRef.current?.focus({ preventScroll: true })
+    }, 50)
+
+    return () => window.clearTimeout(timerId)
+  }, [bookmarkDialogOpen])
+
+  useEffect(() => {
     if (!isAnnotationToolbarOpen) return undefined
 
     function closeAnnotationToolbar(event) {
@@ -3001,6 +3749,84 @@ function App() {
 
     loadDocumentNotes()
   }, [currentDocument])
+
+  useEffect(() => {
+    async function loadDocumentBookmarks() {
+      setSelectedBookmarkIds([])
+      setIsBookmarksBatchSelecting(false)
+      setBookmarkDialogOpen(false)
+      setBookmarkTitleDraft('')
+      setBookmarksStatus('')
+
+      if (!currentDocument?.documentId || !window.electronAPI?.getDocumentBookmarks) {
+        setDocumentBookmarks([])
+        return
+      }
+
+      try {
+        const savedBookmarks = await window.electronAPI.getDocumentBookmarks(currentDocument.documentId)
+        setDocumentBookmarks(normalizeBookmarkList(Array.isArray(savedBookmarks) ? savedBookmarks : []))
+      } catch (error) {
+        console.error('Failed to load document bookmarks', error)
+        setDocumentBookmarks([])
+      }
+    }
+
+    loadDocumentBookmarks()
+  }, [currentDocument])
+
+  useEffect(() => {
+    let cancelled = false
+    tocGenerationRequestRef.current += 1
+    tocGenerationKeyRef.current = ''
+    setDocumentToc([])
+    setTocSource('unavailable')
+    setTocStatus('')
+    setIsTocGenerating(false)
+    setCollapsedTocItemIds([])
+
+    async function loadDocumentTableOfContents() {
+      if (!currentDocument?.documentId || !pdfUrl) return
+
+      if (!window.electronAPI?.getDocumentTableOfContents) {
+        void generateTableOfContentsRef.current?.()
+        return
+      }
+
+      try {
+        const saved = await window.electronAPI.getDocumentTableOfContents(currentDocument.documentId)
+        if (cancelled) return
+
+        const isUserModified = saved?.userModified === true
+        const isCurrentTocVersion = Number(saved?.version) >= TOC_RECOGNITION_VERSION
+        const isCurrentFile = isTocFingerprintCurrent(saved?.fingerprint, currentDocument)
+        const items = isUserModified || (isCurrentTocVersion && isCurrentFile)
+          ? normalizeTocItems(saved?.items, Number.POSITIVE_INFINITY)
+          : []
+        setDocumentToc(items)
+        setTocSource(saved?.source || 'unavailable')
+
+        if (items.length) {
+          setTocStatus('')
+        } else if (!isCurrentTocVersion || !isCurrentFile) {
+          void generateTableOfContentsRef.current?.()
+        } else if (saved?.lastUpdatedAt) {
+          setTocStatus('无法识别出目录')
+        } else {
+          void generateTableOfContentsRef.current?.()
+        }
+      } catch (error) {
+        if (cancelled) return
+        setTocStatus(error.message || '读取目录失败')
+      }
+    }
+
+    void loadDocumentTableOfContents()
+    return () => {
+      cancelled = true
+      tocGenerationRequestRef.current += 1
+    }
+  }, [currentDocument, pdfUrl])
 
   useEffect(() => {
     async function loadDocumentAnnotations() {
@@ -3525,6 +4351,8 @@ function App() {
       filePath: pdfFile.filePath || '',
       fileName: pdfFile.fileName || 'PDF',
       fileSize: Number(pdfFile.fileSize) || 0,
+      modifiedTime: Number(pdfFile.modifiedTime) || 0,
+      fileHash: String(pdfFile.fileHash || ''),
     }
     const nextTabId = getPdfTabId(nextDocument.documentId, nextDocument.filePath, nextDocument.fileName)
     const nextPdfUrl = pdfFile.dataUrl || pdfFile.url
@@ -8300,6 +9128,146 @@ function App() {
     )
   }
 
+  function renderBookmarksPanel() {
+    return (
+      <section className="history-panel bookmarks-panel" aria-label="书签">
+        <div className="bookmark-add-row">
+          <button type="button" className="settings-primary-button bookmark-add-button" onClick={openBookmarkDialog}>
+            添加书签
+          </button>
+        </div>
+
+        <div className="history-panel-actions bookmark-management-actions">
+          <button
+            type="button"
+            className="history-clear-button"
+            onClick={deleteSelectedBookmarks}
+            disabled={!selectedBookmarkIds.length}
+          >
+            删除所选
+          </button>
+          <button
+            type="button"
+            className="history-clear-button"
+            onClick={clearCurrentDocumentBookmarks}
+            disabled={!documentBookmarks.length}
+          >
+            清空
+          </button>
+          <button
+            type="button"
+            className="history-clear-button"
+            onClick={() => {
+              if (isBookmarksBatchSelecting) {
+                setIsBookmarksBatchSelecting(false)
+                setSelectedBookmarkIds([])
+                return
+              }
+
+              setIsBookmarksBatchSelecting(true)
+            }}
+            disabled={!documentBookmarks.length}
+          >
+            {isBookmarksBatchSelecting ? '取消选择' : '批量选择'}
+          </button>
+        </div>
+
+        {bookmarksStatus ? <p className="note-status">{bookmarksStatus}</p> : null}
+
+        {documentBookmarks.length ? (
+          <div className="history-list bookmark-list">
+            {documentBookmarks.map((bookmark) => (
+              <article key={bookmark.id} className="history-item bookmark-item">
+                {isBookmarksBatchSelecting ? (
+                  <input
+                    type="checkbox"
+                    checked={selectedBookmarkIds.includes(bookmark.id)}
+                    onChange={() => toggleBookmarkSelection(bookmark.id)}
+                    aria-label="选择书签"
+                  />
+                ) : null}
+                <button
+                  type="button"
+                  className="bookmark-item-main"
+                  onClick={() => (isBookmarksBatchSelecting ? toggleBookmarkSelection(bookmark.id) : jumpToBookmark(bookmark))}
+                >
+                  <span>第 {bookmark.pageNumber} 页</span>
+                  <strong>{bookmark.title}</strong>
+                </button>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="history-empty">暂无书签</p>
+        )}
+      </section>
+    )
+  }
+
+  function renderTocItem(item) {
+    const subsections = Array.isArray(item.children)
+      ? item.children
+      : Array.isArray(item.subsections)
+        ? item.subsections
+        : []
+    const hasSubsections = subsections.length > 0
+    const isCollapsed = collapsedTocItemIds.includes(item.id)
+
+    return (
+      <div key={item.id} className={item.level >= 2 ? 'toc-tree-item level-two' : 'toc-tree-item'}>
+        <div className="toc-tree-row">
+          {hasSubsections ? (
+            <button
+              type="button"
+              className={isCollapsed ? 'toc-collapse-button collapsed' : 'toc-collapse-button'}
+              onClick={() => toggleTocItemCollapsed(item.id)}
+              aria-label={isCollapsed ? '展开小节' : '折叠小节'}
+              title={isCollapsed ? '展开' : '折叠'}
+            >
+              ▾
+            </button>
+          ) : (
+            <span className="toc-collapse-spacer" aria-hidden="true" />
+          )}
+          <button type="button" className="toc-item-main" onClick={() => jumpToTocItem(item)}>
+            <span>{item.title}</span>
+            <strong>
+              {item.pageNumber || (Number.isFinite(Number(item.pageIndex)) ? Number(item.pageIndex) + 1 : item.pageStart)}
+            </strong>
+          </button>
+        </div>
+        {hasSubsections && !isCollapsed ? (
+          <div className="toc-subsection-list">
+            {subsections.map((subsection) => renderTocItem(subsection))}
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
+  function renderTocPanel() {
+    if (!pdfUrl || isTocGenerating) {
+      return <section className="toc-panel toc-panel-empty" aria-label="目录" />
+    }
+
+    if (!documentToc.length) {
+      return (
+        <section className="toc-panel toc-panel-empty" aria-label="目录">
+          {tocStatus ? <p className="toc-unavailable">无法识别出目录</p> : null}
+        </section>
+      )
+    }
+
+    return (
+      <section className="toc-panel" aria-label="目录">
+        <h2 className="toc-panel-title">目录</h2>
+        <div className="toc-tree-list">
+          {documentToc.map((item) => renderTocItem(item))}
+        </div>
+      </section>
+    )
+  }
+
   function renderHistoryPanel() {
     return (
       <section className="history-panel" aria-label="翻译历史记录">
@@ -8484,6 +9452,7 @@ function App() {
             {renderExportDetailGroup('笔记', detail?.notes || [], getExportNoteDetailPreview)}
             {renderExportDetailGroup('翻译历史', detail?.histories || [], getExportHistoryDetailPreview)}
             {renderExportDetailGroup('批注', detail?.annotations || [], getExportAnnotationDetailPreview)}
+            {renderExportDetailGroup('书签', detail?.bookmarks || [], getExportBookmarkDetailPreview)}
           </div>
         )}
       </section>
@@ -8608,10 +9577,18 @@ function App() {
                 <span>{selectedExportDocumentIds.length} / {exportableDocuments.length} 篇</span>
               </div>
               <p className="markdown-export-hint">
-                完整备份包含翻译历史、笔记和批注；导入多个备份文件时会自动合并并跳过重复数据。
+                完整备份包含翻译历史、笔记、批注和书签；导入多个备份文件时会自动合并并跳过重复数据。
               </p>
 
               <div className="export-options-grid">
+                <label className="settings-field">
+                  <span>数据内容</span>
+                  <select value={batchDataExportType} onChange={(event) => setBatchDataExportType(event.target.value)}>
+                    {DATA_EXPORT_TYPE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </label>
                 <label className="settings-field">
                   <span>导出方式</span>
                   <select value={batchExportMode} onChange={(event) => setBatchExportMode(event.target.value)}>
@@ -9215,6 +10192,24 @@ function App() {
     }, 190)
   }
 
+  function toggleToolbarCollapsed() {
+    setToolbarCollapsed((isCollapsed) => {
+      const nextCollapsed = !isCollapsed
+
+      if (nextCollapsed) {
+        setIsRecentOpen(false)
+        setIsAnnotationToolbarOpen(false)
+        setIsOcrMenuOpen(false)
+      }
+
+      window.setTimeout(() => {
+        syncPageWidthRef.current?.()
+      }, 80)
+
+      return nextCollapsed
+    })
+  }
+
   return (
     <main className={sidebarCollapsed ? 'app sidebar-collapsed' : 'app'} ref={appRef}>
       <aside className="module-sidebar" aria-label="主模块">
@@ -9247,14 +10242,54 @@ function App() {
             </button>
           ))}
         </nav>
+        {!tocDrawerOpen ? (
+          <button
+            type="button"
+            className="toc-edge-button"
+            onClick={toggleTocPanel}
+            aria-label="目录"
+            title="目录"
+          >
+            ›
+          </button>
+        ) : null}
       </aside>
+
+      {tocDrawerOpen ? (
+        <aside className="toc-drawer-panel" aria-label="目录面板">
+          <button
+            type="button"
+            className="toc-edge-button toc-drawer-edge-button active"
+            onClick={toggleTocPanel}
+            aria-label="收起目录"
+            title="目录"
+          >
+            ‹
+          </button>
+          {renderTocPanel()}
+        </aside>
+      ) : null}
 
       <div className="app-content">
         <section
-          className={activeModule === 'reader' ? 'module-page reader-module active' : 'module-page reader-module'}
+          className={[
+            'module-page',
+            'reader-module',
+            activeModule === 'reader' ? 'active' : '',
+            toolbarCollapsed ? 'toolbar-hidden' : '',
+          ].filter(Boolean).join(' ')}
           aria-hidden={activeModule !== 'reader'}
         >
-      <header className="toolbar">
+      {toolbarCollapsed ? (
+        <button
+          type="button"
+          className="toolbar-collapse-toggle collapsed"
+          onClick={toggleToolbarCollapsed}
+          aria-label="展开工具栏"
+          title="展开工具栏"
+        />
+      ) : null}
+      <header className={toolbarCollapsed ? 'toolbar toolbar-collapsed' : 'toolbar'}>
         <section className="toolbar-group toolbar-left" aria-label="文件">
           <button type="button" className="upload-button" onClick={handleOpenPdfClick}>
             {UI.choosePdf}
@@ -9428,6 +10463,15 @@ function App() {
             {isFullscreen ? UI.exitFullscreen : UI.fullscreen}
           </button>
         </section>
+        {!toolbarCollapsed ? (
+          <button
+            type="button"
+            className="toolbar-collapse-toggle expanded"
+            onClick={toggleToolbarCollapsed}
+            aria-label="收起工具栏"
+            title="收起工具栏"
+          />
+        ) : null}
       </header>
 
       {renderPdfTabs()}
@@ -9594,6 +10638,13 @@ function App() {
                 >
                   笔记
                 </button>
+                <button
+                  type="button"
+                  className={rightPanelTab === 'bookmarks' ? 'right-panel-tab active' : 'right-panel-tab'}
+                  onClick={() => setRightPanelTab('bookmarks')}
+                >
+                  书签
+                </button>
               </div>
             </div>
 
@@ -9627,6 +10678,7 @@ function App() {
               {rightPanelTab === 'result' ? renderRightPanelResult() : null}
               {rightPanelTab === 'history' ? renderHistoryPanel() : null}
               {rightPanelTab === 'notes' ? renderNotesPanel() : null}
+              {rightPanelTab === 'bookmarks' ? renderBookmarksPanel() : null}
             </div>
             </aside>
           ) : null}
@@ -9860,6 +10912,48 @@ function App() {
           <button type="button" onClick={() => deleteHighlightAnnotation(highlightContextMenu.highlightId)}>
             取消高亮
           </button>
+        </div>
+      ) : null}
+
+      {bookmarkDialogOpen ? (
+        <div className="note-dialog-overlay" role="presentation">
+          <section className="note-dialog bookmark-dialog" aria-label="添加书签">
+            <div className="diagram-dialog-header">
+              <h2>添加书签</h2>
+              <button type="button" onClick={closeBookmarkDialog}>
+                取消
+              </button>
+            </div>
+
+            <label className="note-dialog-field">
+              <span>本页主题</span>
+              <input
+                ref={bookmarkTitleInputRef}
+                type="text"
+                value={bookmarkTitleDraft}
+                onChange={(event) => setBookmarkTitleDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    void confirmAddBookmark()
+                  }
+                }}
+              />
+            </label>
+
+            <div className="note-dialog-source">
+              <strong>第 {pageNumber} 页</strong>
+            </div>
+
+            <div className="settings-actions">
+              <button type="button" className="settings-secondary-button" onClick={closeBookmarkDialog}>
+                取消
+              </button>
+              <button type="button" className="settings-primary-button" onClick={confirmAddBookmark}>
+                确认
+              </button>
+            </div>
+          </section>
         </div>
       ) : null}
 
