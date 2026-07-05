@@ -9,6 +9,8 @@ import { PDFArray, PDFDocument, PDFHexString, PDFName, PDFString } from 'pdf-lib
 
 let backendServer = null
 let mainWindow = null
+const jsonWriteQueues = new Map()
+const storageMutationQueues = new Map()
 
 const DEFAULT_CONFIG = {
   provider: 'deepseek',
@@ -103,6 +105,117 @@ function getPdfSessionPath() {
 
 function getLibraryPath() {
   return path.join(app.getPath('userData'), 'paper-reader-library.json')
+}
+
+function extractFirstCompleteJson(rawText) {
+  const text = String(rawText || '')
+  const arrayStart = text.indexOf('[')
+  const objectStart = text.indexOf('{')
+  const start = arrayStart < 0
+    ? objectStart
+    : objectStart < 0
+      ? arrayStart
+      : Math.min(arrayStart, objectStart)
+  if (start < 0) return null
+
+  const opening = text[start]
+  const closing = opening === '[' ? ']' : '}'
+  let depth = 0
+  let inString = false
+  let escaped = false
+
+  for (let index = start; index < text.length; index += 1) {
+    const character = text[index]
+
+    if (inString) {
+      if (escaped) {
+        escaped = false
+      } else if (character === '\\') {
+        escaped = true
+      } else if (character === '"') {
+        inString = false
+      }
+      continue
+    }
+
+    if (character === '"') {
+      inString = true
+      continue
+    }
+    if (character === opening) depth += 1
+    if (character === closing) depth -= 1
+
+    if (depth === 0) {
+      try {
+        return JSON.parse(text.slice(start, index + 1))
+      } catch {
+        return null
+      }
+    }
+  }
+
+  return null
+}
+
+function writeJsonFileAtomic(filePath, data) {
+  const previousWrite = jsonWriteQueues.get(filePath) || Promise.resolve()
+  const nextWrite = previousWrite
+    .catch(() => undefined)
+    .then(async () => {
+      await fs.mkdir(path.dirname(filePath), { recursive: true })
+      const tempPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
+
+      try {
+        await fs.writeFile(tempPath, `${JSON.stringify(data, null, 2)}\n`, 'utf8')
+        await fs.rename(tempPath, filePath)
+      } catch (error) {
+        await fs.rm(tempPath, { force: true }).catch(() => undefined)
+        throw error
+      }
+    })
+
+  jsonWriteQueues.set(filePath, nextWrite)
+  return nextWrite.finally(() => {
+    if (jsonWriteQueues.get(filePath) === nextWrite) {
+      jsonWriteQueues.delete(filePath)
+    }
+  })
+}
+
+async function readJsonFileWithRecovery(filePath, fallbackValue, label) {
+  try {
+    const rawText = await fs.readFile(filePath, 'utf8')
+
+    try {
+      return JSON.parse(rawText)
+    } catch (error) {
+      const recovered = extractFirstCompleteJson(rawText)
+      if (recovered === null) throw error
+
+      const backupPath = `${filePath}.corrupt-${Date.now()}.bak`
+      await fs.writeFile(backupPath, rawText, 'utf8')
+      await writeJsonFileAtomic(filePath, recovered)
+      console.warn(`[storage] Recovered corrupted ${label}; backup saved to ${backupPath}`)
+      return recovered
+    }
+  } catch (error) {
+    if (error.code === 'ENOENT') return fallbackValue
+    throw error
+  }
+}
+
+function runStorageMutation(storagePath, operation) {
+  const previousMutation = storageMutationQueues.get(storagePath) || Promise.resolve()
+  const nextMutation = previousMutation
+    .catch(() => undefined)
+    .then(operation)
+
+  storageMutationQueues.set(storagePath, nextMutation)
+  return nextMutation.finally(() => {
+    if (storageMutationQueues.get(storagePath) === nextMutation) {
+      storageMutationQueues.delete(storagePath)
+    }
+  })
 }
 
 function getAppIconPath() {
@@ -849,13 +962,8 @@ function parseGlossaryFile(rawText, filePath) {
 
 async function readConfig() {
   try {
-    const rawConfig = await fs.readFile(getConfigPath(), 'utf8')
-    return normalizeConfig(JSON.parse(rawConfig))
+    return normalizeConfig(await readJsonFileWithRecovery(getConfigPath(), DEFAULT_CONFIG, 'config'))
   } catch (error) {
-    if (error.code === 'ENOENT') {
-      return { ...DEFAULT_CONFIG }
-    }
-
     throw new Error(`读取配置失败：${error.message}`, { cause: error })
   }
 }
@@ -863,8 +971,7 @@ async function readConfig() {
 async function saveConfig(config) {
   try {
     const nextConfig = normalizeConfig(config)
-    await fs.mkdir(app.getPath('userData'), { recursive: true })
-    await fs.writeFile(getConfigPath(), `${JSON.stringify(nextConfig, null, 2)}\n`, 'utf8')
+    await writeJsonFileAtomic(getConfigPath(), nextConfig)
     return nextConfig
   } catch (error) {
     throw new Error(`保存配置失败：${error.message}`, { cause: error })
@@ -873,21 +980,15 @@ async function saveConfig(config) {
 
 async function readGlossary() {
   try {
-    const rawGlossary = await fs.readFile(getGlossaryPath(), 'utf8')
-    return normalizeGlossaryEntries(JSON.parse(rawGlossary))
+    return normalizeGlossaryEntries(await readJsonFileWithRecovery(getGlossaryPath(), [], 'glossary'))
   } catch (error) {
-    if (error.code === 'ENOENT') {
-      return []
-    }
-
     throw new Error(`读取术语库失败：${error.message}`, { cause: error })
   }
 }
 
 async function saveGlossary(glossary) {
   const nextGlossary = normalizeGlossaryEntries(glossary)
-  await fs.mkdir(app.getPath('userData'), { recursive: true })
-  await fs.writeFile(getGlossaryPath(), `${JSON.stringify(nextGlossary, null, 2)}\n`, 'utf8')
+  await writeJsonFileAtomic(getGlossaryPath(), nextGlossary)
   return nextGlossary
 }
 
@@ -929,21 +1030,15 @@ async function clearGlossary() {
 
 async function readHistory() {
   try {
-    const rawHistory = await fs.readFile(getHistoryPath(), 'utf8')
-    return normalizeHistoryItems(JSON.parse(rawHistory))
+    return normalizeHistoryItems(await readJsonFileWithRecovery(getHistoryPath(), [], 'translation history'))
   } catch (error) {
-    if (error.code === 'ENOENT') {
-      return []
-    }
-
     throw new Error(`读取翻译历史失败：${error.message}`, { cause: error })
   }
 }
 
 async function saveHistory(history) {
   const nextHistory = normalizeHistoryItems(history)
-  await fs.mkdir(app.getPath('userData'), { recursive: true })
-  await fs.writeFile(getHistoryPath(), `${JSON.stringify(nextHistory, null, 2)}\n`, 'utf8')
+  await writeJsonFileAtomic(getHistoryPath(), nextHistory)
   return nextHistory
 }
 
@@ -954,34 +1049,25 @@ async function clearHistory() {
 
 async function readBrowsingHistory() {
   try {
-    const rawHistory = await fs.readFile(getBrowsingHistoryPath(), 'utf8')
-    return normalizeBrowsingHistory(JSON.parse(rawHistory))
+    return normalizeBrowsingHistory(
+      await readJsonFileWithRecovery(getBrowsingHistoryPath(), [], 'browsing history'),
+    )
   } catch (error) {
-    if (error.code === 'ENOENT') {
-      return []
-    }
-
     throw new Error(`读取最近打开记录失败：${error.message}`, { cause: error })
   }
 }
 
 async function saveBrowsingHistory(history) {
   const nextHistory = normalizeBrowsingHistory(history)
-  await fs.mkdir(app.getPath('userData'), { recursive: true })
-  await fs.writeFile(getBrowsingHistoryPath(), `${JSON.stringify(nextHistory, null, 2)}\n`, 'utf8')
+  await writeJsonFileAtomic(getBrowsingHistoryPath(), nextHistory)
   await pruneDocumentTranslationHistories(nextHistory)
   return nextHistory
 }
 
 async function readPdfSession() {
   try {
-    const rawSession = await fs.readFile(getPdfSessionPath(), 'utf8')
-    return normalizePdfSession(JSON.parse(rawSession))
+    return normalizePdfSession(await readJsonFileWithRecovery(getPdfSessionPath(), {}, 'PDF session'))
   } catch (error) {
-    if (error.code === 'ENOENT') {
-      return normalizePdfSession()
-    }
-
     throw new Error(`璇诲彇 PDF 浼氳瘽澶辫触锛?{error.message}`, { cause: error })
   }
 }
@@ -992,75 +1078,77 @@ async function savePdfSession(session = {}) {
     updatedAt: Date.now(),
   })
 
-  await fs.mkdir(app.getPath('userData'), { recursive: true })
-  await fs.writeFile(getPdfSessionPath(), `${JSON.stringify(nextSession, null, 2)}\n`, 'utf8')
+  await writeJsonFileAtomic(getPdfSessionPath(), nextSession)
 
   return nextSession
 }
 
 async function updateBrowsingRecord(record) {
-  const normalizedRecord = normalizeBrowsingRecord(record)
+  return runStorageMutation(getBrowsingHistoryPath(), async () => {
+    const normalizedRecord = normalizeBrowsingRecord(record)
 
-  if (!normalizedRecord) {
-    return readBrowsingHistory()
-  }
+    if (!normalizedRecord) {
+      return readBrowsingHistory()
+    }
 
-  const currentHistory = await readBrowsingHistory()
-  const now = Date.now()
-  const nextRecord = {
-    ...normalizedRecord,
-    lastOpenedAt: Number(record.lastOpenedAt) || now,
-  }
-  const nextHistory = normalizeBrowsingHistory([
-    nextRecord,
-    ...currentHistory.filter((item) => item.documentId !== nextRecord.documentId && item.filePath !== nextRecord.filePath),
-  ])
+    const currentHistory = await readBrowsingHistory()
+    const now = Date.now()
+    const nextRecord = {
+      ...normalizedRecord,
+      lastOpenedAt: Number(record.lastOpenedAt) || now,
+    }
+    const nextHistory = normalizeBrowsingHistory([
+      nextRecord,
+      ...currentHistory.filter((item) => item.documentId !== nextRecord.documentId && item.filePath !== nextRecord.filePath),
+    ])
 
-  return saveBrowsingHistory(nextHistory)
+    return saveBrowsingHistory(nextHistory)
+  })
 }
 
 async function deleteBrowsingRecord(id) {
-  const currentHistory = await readBrowsingHistory()
-  const deletedRecord = currentHistory.find((record) => record.id === id || record.documentId === id)
-  const nextHistory = currentHistory.filter((record) => record.id !== id && record.documentId !== id)
+  return runStorageMutation(getBrowsingHistoryPath(), async () => {
+    const currentHistory = await readBrowsingHistory()
+    const deletedRecord = currentHistory.find((record) => record.id === id || record.documentId === id)
+    const nextHistory = currentHistory.filter((record) => record.id !== id && record.documentId !== id)
 
-  await saveBrowsingHistory(nextHistory)
+    await saveBrowsingHistory(nextHistory)
 
-  if (deletedRecord?.documentId) {
-    const histories = await readDocumentTranslationHistories()
-    delete histories[deletedRecord.documentId]
-    await saveDocumentTranslationHistories(histories, { prune: false })
-  }
+    if (deletedRecord?.documentId) {
+      const histories = await readDocumentTranslationHistories()
+      delete histories[deletedRecord.documentId]
+      await saveDocumentTranslationHistories(histories, { prune: false })
+    }
 
-  return nextHistory
+    return nextHistory
+  })
 }
 
 async function clearBrowsingHistory() {
-  const currentHistory = await readBrowsingHistory()
-  const documentIds = new Set(currentHistory.map((record) => record.documentId))
+  return runStorageMutation(getBrowsingHistoryPath(), async () => {
+    const currentHistory = await readBrowsingHistory()
+    const documentIds = new Set(currentHistory.map((record) => record.documentId))
 
-  await saveBrowsingHistory([])
+    await saveBrowsingHistory([])
 
-  if (documentIds.size) {
-    const histories = await readDocumentTranslationHistories()
-    for (const documentId of documentIds) {
-      delete histories[documentId]
+    if (documentIds.size) {
+      const histories = await readDocumentTranslationHistories()
+      for (const documentId of documentIds) {
+        delete histories[documentId]
+      }
+      await saveDocumentTranslationHistories(histories, { prune: false })
     }
-    await saveDocumentTranslationHistories(histories, { prune: false })
-  }
 
-  return []
+    return []
+  })
 }
 
 async function readDocumentTranslationHistories() {
   try {
-    const rawHistory = await fs.readFile(getDocumentTranslationHistoryPath(), 'utf8')
-    return normalizeDocumentTranslationHistories(JSON.parse(rawHistory))
+    return normalizeDocumentTranslationHistories(
+      await readJsonFileWithRecovery(getDocumentTranslationHistoryPath(), {}, 'document translation history'),
+    )
   } catch (error) {
-    if (error.code === 'ENOENT') {
-      return {}
-    }
-
     throw new Error(`读取文献翻译历史失败：${error.message}`, { cause: error })
   }
 }
@@ -1076,8 +1164,7 @@ async function saveDocumentTranslationHistories(data, options = {}) {
     )
   }
 
-  await fs.mkdir(app.getPath('userData'), { recursive: true })
-  await fs.writeFile(getDocumentTranslationHistoryPath(), `${JSON.stringify(nextData, null, 2)}\n`, 'utf8')
+  await writeJsonFileAtomic(getDocumentTranslationHistoryPath(), nextData)
   return nextData
 }
 
@@ -1088,8 +1175,7 @@ async function pruneDocumentTranslationHistories(recentBrowsingRecords) {
     Object.entries(histories).filter(([documentId]) => recentDocumentIds.has(documentId)),
   )
 
-  await fs.mkdir(app.getPath('userData'), { recursive: true })
-  await fs.writeFile(getDocumentTranslationHistoryPath(), `${JSON.stringify(nextHistories, null, 2)}\n`, 'utf8')
+  await writeJsonFileAtomic(getDocumentTranslationHistoryPath(), nextHistories)
   return nextHistories
 }
 
@@ -1140,78 +1226,61 @@ async function clearAllDocumentTranslationHistories() {
 
 async function readDocumentNotes() {
   try {
-    const rawNotes = await fs.readFile(getNotesPath(), 'utf8')
-    return normalizeDocumentNotes(JSON.parse(rawNotes))
+    return normalizeDocumentNotes(await readJsonFileWithRecovery(getNotesPath(), {}, 'document notes'))
   } catch (error) {
-    if (error.code === 'ENOENT') {
-      return {}
-    }
-
     throw new Error(`读取文献笔记失败：${error.message}`, { cause: error })
   }
 }
 
 async function saveDocumentNotesData(data) {
   const nextData = normalizeDocumentNotes(data)
-  await fs.mkdir(app.getPath('userData'), { recursive: true })
-  await fs.writeFile(getNotesPath(), `${JSON.stringify(nextData, null, 2)}\n`, 'utf8')
+  await writeJsonFileAtomic(getNotesPath(), nextData)
   return nextData
 }
 
 async function readDocumentBookmarks() {
   try {
-    const rawBookmarks = await fs.readFile(getBookmarksPath(), 'utf8')
-    return normalizeDocumentBookmarks(JSON.parse(rawBookmarks))
+    return normalizeDocumentBookmarks(await readJsonFileWithRecovery(getBookmarksPath(), {}, 'document bookmarks'))
   } catch (error) {
-    if (error.code === 'ENOENT') {
-      return {}
-    }
-
     throw new Error(`读取文献书签失败：${error.message}`, { cause: error })
   }
 }
 
 async function saveDocumentBookmarksData(data) {
   const nextData = normalizeDocumentBookmarks(data)
-  await fs.mkdir(app.getPath('userData'), { recursive: true })
-  await fs.writeFile(getBookmarksPath(), `${JSON.stringify(nextData, null, 2)}\n`, 'utf8')
+  await writeJsonFileAtomic(getBookmarksPath(), nextData)
   return nextData
 }
 
 async function readDocumentTableOfContents() {
   try {
-    const rawTableOfContents = await fs.readFile(getTableOfContentsPath(), 'utf8')
-    return normalizeDocumentTableOfContents(JSON.parse(rawTableOfContents))
+    return normalizeDocumentTableOfContents(
+      await readJsonFileWithRecovery(getTableOfContentsPath(), {}, 'document table of contents'),
+    )
   } catch (error) {
-    if (error.code === 'ENOENT') {
-      return {}
-    }
-
     throw new Error(`读取文献目录失败：${error.message}`, { cause: error })
   }
 }
 
 async function saveDocumentTableOfContentsData(data) {
   const nextData = normalizeDocumentTableOfContents(data)
-  await fs.mkdir(app.getPath('userData'), { recursive: true })
-  await fs.writeFile(getTableOfContentsPath(), `${JSON.stringify(nextData, null, 2)}\n`, 'utf8')
+  await writeJsonFileAtomic(getTableOfContentsPath(), nextData)
   return nextData
 }
 
 async function readDocumentAnnotations() {
   try {
-    const rawAnnotations = await fs.readFile(getAnnotationsPath(), 'utf8')
-    return normalizeDocumentAnnotations(JSON.parse(rawAnnotations))
+    return normalizeDocumentAnnotations(
+      await readJsonFileWithRecovery(getAnnotationsPath(), {}, 'document annotations'),
+    )
   } catch (error) {
-    if (error.code === 'ENOENT') return {}
     throw new Error(`读取文献批注失败：${error.message}`, { cause: error })
   }
 }
 
 async function saveDocumentAnnotationsData(data) {
   const nextData = normalizeDocumentAnnotations(data)
-  await fs.mkdir(app.getPath('userData'), { recursive: true })
-  await fs.writeFile(getAnnotationsPath(), `${JSON.stringify(nextData, null, 2)}\n`, 'utf8')
+  await writeJsonFileAtomic(getAnnotationsPath(), nextData)
   return nextData
 }
 
@@ -1517,21 +1586,15 @@ async function saveDocumentTableOfContents(documentId, payload = {}) {
 
 async function readLibraryData() {
   try {
-    const rawLibrary = await fs.readFile(getLibraryPath(), 'utf8')
-    return normalizeLibraryData(JSON.parse(rawLibrary))
+    return normalizeLibraryData(await readJsonFileWithRecovery(getLibraryPath(), {}, 'library'))
   } catch (error) {
-    if (error.code === 'ENOENT') {
-      return normalizeLibraryData({})
-    }
-
     throw new Error(`读取文献库失败：${error.message}`, { cause: error })
   }
 }
 
 async function saveLibraryData(data) {
   const nextData = normalizeLibraryData(data)
-  await fs.mkdir(app.getPath('userData'), { recursive: true })
-  await fs.writeFile(getLibraryPath(), `${JSON.stringify(nextData, null, 2)}\n`, 'utf8')
+  await writeJsonFileAtomic(getLibraryPath(), nextData)
   return nextData
 }
 
