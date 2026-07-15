@@ -1,10 +1,39 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Document, Page, pdfjs } from 'react-pdf'
 import { createWorker } from 'tesseract.js'
+import {
+  Archive,
+  BookOpen,
+  CircleOff,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  FilePlus2,
+  FolderPlus,
+  Highlighter,
+  History,
+  LibraryBig,
+  ListTree,
+  Maximize2,
+  Minimize2,
+  Minus,
+  NotebookPen,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Plus,
+  RotateCcw,
+  ScanLine,
+  Search,
+  Settings,
+  Trash2,
+  X,
+} from 'lucide-react'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
 import './App.css'
 import appIconUrl from '../build/icon.png'
+import IconButton from './components/ui/IconButton'
 import {
   HISTORY_LIMIT,
   HISTORY_TYPE_LABELS,
@@ -33,6 +62,44 @@ import {
   normalizeTocItems,
   parseAiTocResponse,
 } from './utils/toc'
+
+function TreeChevron({ expanded, onToggle }) {
+  return (
+    <IconButton
+      className="tree-chevron"
+      label={expanded ? '折叠文件夹' : '展开文件夹'}
+      onClick={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        onToggle()
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+      }}
+      onDragStart={(event) => event.preventDefault()}
+    >
+      {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+    </IconButton>
+  )
+}
+
+const TEXT_ENTRY_SELECTOR = [
+  'textarea',
+  '[contenteditable="true"]',
+  'input:not([type="button"]):not([type="checkbox"]):not([type="color"]):not([type="file"]):not([type="hidden"]):not([type="image"]):not([type="radio"]):not([type="range"]):not([type="reset"]):not([type="submit"])',
+].join(', ')
+
+function getTextEntryElement(target) {
+  if (!target || typeof target.closest !== 'function') return null
+
+  const element = target.closest(TEXT_ENTRY_SELECTOR)
+  if (!element || element.disabled || element.readOnly || element.getAttribute('aria-disabled') === 'true') {
+    return null
+  }
+
+  return element
+}
 
 const UI = {
   choosePdf: '\u9009\u62e9 PDF',
@@ -69,13 +136,17 @@ const DEFAULT_TRANSLATION_PROMPT =
   '你是通用学术翻译助手。请把用户提供的英文学术文本翻译成准确、自然、符合中文学术表达习惯的中文。保留必要的专业术语、英文缩写、公式、指数、上下标、单位、变量名和专有名词。遇到 10^16、10^{-6}、H_2O、CO_2 等表达时，不要改写成普通数字。不要扩写，不要总结，不要添加解释，只输出译文。'
 const DEFAULT_CONTENT_EXPORT_OPTIONS = {
   exportHistories: true,
-  exportAnnotations: true,
   exportNotes: true,
+  exportHighlights: false,
+  exportAnnotations: false,
+  exportBookmarks: false,
 }
 const CONTENT_EXPORT_OPTION_ITEMS = [
-  { key: 'exportHistories', label: '翻译历史' },
-  { key: 'exportAnnotations', label: '批注' },
   { key: 'exportNotes', label: '笔记' },
+  { key: 'exportHistories', label: '翻译历史' },
+  { key: 'exportHighlights', label: '高亮' },
+  { key: 'exportAnnotations', label: '批注' },
+  { key: 'exportBookmarks', label: '书签' },
 ]
 const SEARCH_SCOPE_OPTIONS = [
   { value: 'all', label: '全部' },
@@ -126,13 +197,6 @@ const EXPORT_DETAIL_TEXT_FIELDS = [
 ]
 const EXPORT_DETAIL_NOTE_FIELDS = ['noteText', 'note', 'content', 'comment', 'memo', 'remark']
 const EXPORT_DETAIL_TRANSLATION_FIELDS = ['translation', 'translatedText', 'targetText', 'result', 'translated', 'target']
-const DATA_EXPORT_TYPE_OPTIONS = [
-  { value: 'full', label: '完整备份' },
-  { value: 'translation-history', label: '翻译历史' },
-  { value: 'notes', label: '笔记' },
-  { value: 'annotations', label: '批注' },
-  { value: 'bookmarks', label: '书签' },
-]
 const MIN_ZOOM = 50
 const MAX_ZOOM = 300
 const ZOOM_STEP = 10
@@ -685,59 +749,26 @@ function logTocDebug(stage, payload) {
 }
 
 const APP_ICON_SRC = appIconUrl
-const navIconProps = {
-  viewBox: '0 0 24 24',
-  width: 20,
-  height: 20,
-  fill: 'none',
-  stroke: 'currentColor',
-  strokeWidth: 1.7,
-  strokeLinecap: 'round',
-  strokeLinejoin: 'round',
-}
 const MODULE_NAV_ITEMS = [
   {
     id: 'reader',
     label: '阅读',
-    icon: (
-      <svg {...navIconProps}>
-        <path d="M12 6.4C10.4 5 7.6 4.5 4.6 5v12.6c3-.5 5.8 0 7.4 1.4 1.6-1.4 4.4-1.9 7.4-1.4V5c-3-.5-5.8 0-7.4 1.4Z" />
-        <path d="M12 6.4v12.6" />
-      </svg>
-    ),
+    icon: BookOpen,
   },
   {
     id: 'library',
     label: '文献库',
-    icon: (
-      <svg {...navIconProps}>
-        <rect x="5" y="4.5" width="4" height="14.5" rx="1.1" />
-        <rect x="10" y="4.5" width="4" height="14.5" rx="1.1" />
-        <rect x="15" y="4.5" width="4" height="14.5" rx="1.1" />
-        <path d="M4.5 19.5h15" />
-        <path d="M6.5 8h1M11.5 12h1M16.5 9.5h1" />
-      </svg>
-    ),
+    icon: LibraryBig,
   },
   {
     id: 'importExport',
     label: '历史笔记管理',
-    icon: (
-      <svg {...navIconProps}>
-        <path d="M7 8.5h11l-3-3M17 15.5H6l3 3" />
-      </svg>
-    ),
+    icon: Archive,
   },
   {
     id: 'settings',
     label: '设置',
-    icon: (
-      <svg {...navIconProps}>
-        <circle cx="12" cy="12" r="3.2" />
-        <path d="M12 3.4v2.2M12 18.4v2.2M5.9 5.9l1.6 1.6M16.5 16.5l1.6 1.6M3.4 12h2.2M18.4 12h2.2M5.9 18.1l1.6-1.6M16.5 7.5l1.6-1.6" />
-        <path d="M8.7 4.7 8 6.8M16 17.2l-.7 2.1M4.7 15.3l2.1.7M17.2 8l2.1.7" />
-      </svg>
-    ),
+    icon: Settings,
   },
 ]
 const NOTE_TYPE_LABELS = {
@@ -778,6 +809,7 @@ function App() {
   const requestIdRef = useRef(0)
   const isSelectingRef = useRef(false)
   const selectionFrameRef = useRef(null)
+  const selectionInteractionVersionRef = useRef(0)
   const ocrStartPointRef = useRef(null)
   const panelResizeStartRef = useRef(null)
   const settingsFormRef = useRef(DEFAULT_SETTINGS)
@@ -808,6 +840,7 @@ function App() {
   const libraryFolderNameInputRef = useRef(null)
   const retainedRightPanelActionsRef = useRef(null)
   const searchDialogInputRef = useRef(null)
+  const batchExportNameRef = useRef('')
   const pdfTextSearchCacheRef = useRef({ key: '', pages: [] })
   const librarySearchCacheRef = useRef({ key: '', data: null })
   const libraryDocumentTextCacheRef = useRef(new Map())
@@ -828,6 +861,8 @@ function App() {
   const [recentStatus, setRecentStatus] = useState('')
   const [libraryFolders, setLibraryFolders] = useState([])
   const [libraryDocuments, setLibraryDocuments] = useState([])
+  const [libraryLiteratures, setLibraryLiteratures] = useState([])
+  const [recycledLibraryDocuments, setRecycledLibraryDocuments] = useState([])
   const [selectedLibraryFolderId, setSelectedLibraryFolderId] = useState('all')
   const [librarySearch, setLibrarySearch] = useState('')
   const [librarySearchMode, setLibrarySearchMode] = useState('filename')
@@ -835,10 +870,25 @@ function App() {
   const [selectedLibraryDocumentIds, setSelectedLibraryDocumentIds] = useState([])
   const [libraryStatus, setLibraryStatus] = useState('')
   const [libraryContextMenu, setLibraryContextMenu] = useState(null)
+  const [libraryFolderContextMenu, setLibraryFolderContextMenu] = useState(null)
   const [libraryMoveDialog, setLibraryMoveDialog] = useState(null)
+  const [libraryMoveRootExpanded, setLibraryMoveRootExpanded] = useState(true)
+  const [libraryMoveExpandedIds, setLibraryMoveExpandedIds] = useState(() => new Set())
+  const [libraryFolderMoveDialog, setLibraryFolderMoveDialog] = useState(null)
+  const [libraryFolderMoveRootExpanded, setLibraryFolderMoveRootExpanded] = useState(true)
+  const [libraryFolderMoveExpandedIds, setLibraryFolderMoveExpandedIds] = useState(() => new Set())
+  const [draggedLibraryFolderId, setDraggedLibraryFolderId] = useState('')
+  const [libraryFolderDropTarget, setLibraryFolderDropTarget] = useState(null)
   const [libraryFolderDialogOpen, setLibraryFolderDialogOpen] = useState(false)
+  const [libraryFolderParentId, setLibraryFolderParentId] = useState(null)
+  const [libraryFolderEditingId, setLibraryFolderEditingId] = useState('')
   const [libraryFolderNameDraft, setLibraryFolderNameDraft] = useState('')
   const [libraryFolderNameError, setLibraryFolderNameError] = useState('')
+  const [libraryDeleteDialog, setLibraryDeleteDialog] = useState(null)
+  const [permanentDeleteDialogIds, setPermanentDeleteDialogIds] = useState([])
+  const [historyLibraryNodeId, setHistoryLibraryNodeId] = useState('all')
+  const [historyIncludeDescendants, setHistoryIncludeDescendants] = useState(true)
+  const [historySelectedRecycleIds, setHistorySelectedRecycleIds] = useState([])
   const [pageNumber, setPageNumber] = useState(1)
   const [numPages, setNumPages] = useState(null)
   const [selectedText, setSelectedText] = useState('')
@@ -881,6 +931,7 @@ function App() {
   const [bookmarksStatus, setBookmarksStatus] = useState('')
   const [historyStatus, setHistoryStatus] = useState('')
   const [exportStatus, setExportStatus] = useState('')
+  const [exportFailures, setExportFailures] = useState([])
   const [, setIsHistoryImportExportBusy] = useState(false)
   const [, setIsNotesImportExportBusy] = useState(false)
   const [exportableDocuments, setExportableDocuments] = useState([])
@@ -888,15 +939,19 @@ function App() {
   const [selectedExportDetailDocumentId, setSelectedExportDetailDocumentId] = useState('')
   const [exportDocumentDetail, setExportDocumentDetail] = useState(null)
   const [exportDocumentDetailStatus, setExportDocumentDetailStatus] = useState('')
-  const [selectedMarkdownDocumentIds, setSelectedMarkdownDocumentIds] = useState([])
-  const [isMarkdownExporting, setIsMarkdownExporting] = useState(false)
-  const [markdownExportOptions, setMarkdownExportOptions] = useState(DEFAULT_CONTENT_EXPORT_OPTIONS)
-  const [selectedPdfReportDocumentIds, setSelectedPdfReportDocumentIds] = useState([])
-  const [isPdfReportExporting, setIsPdfReportExporting] = useState(false)
-  const [pdfReportExportOptions, setPdfReportExportOptions] = useState(DEFAULT_CONTENT_EXPORT_OPTIONS)
-  const [batchDataExportType, setBatchDataExportType] = useState('full')
-  const [batchExportMode, setBatchExportMode] = useState('merged')
-  const [batchExportName, setBatchExportName] = useState('')
+  const [selectedFileExportDocumentIds, setSelectedFileExportDocumentIds] = useState([])
+  const [fileExportScope, setFileExportScope] = useState('selected')
+  const [fileExportFolderId, setFileExportFolderId] = useState('unfiled')
+  const [exportFolderTreeRootExpanded, setExportFolderTreeRootExpanded] = useState(true)
+  const [exportFolderTreeUnfiledExpanded, setExportFolderTreeUnfiledExpanded] = useState(true)
+  const [exportFolderTreeRecycleExpanded, setExportFolderTreeRecycleExpanded] = useState(true)
+  const [exportFolderTreeExpandedIds, setExportFolderTreeExpandedIds] = useState(() => new Set())
+  const [fileExportFormat, setFileExportFormat] = useState('markdown')
+  const [fileExportMethod, setFileExportMethod] = useState('merged')
+  const [fileExportContents, setFileExportContents] = useState(DEFAULT_CONTENT_EXPORT_OPTIONS)
+  const [markdownFormatOptions, setMarkdownFormatOptions] = useState({ includeOriginal: true, generateToc: false, groupByType: true })
+  const [pdfFormatOptions, setPdfFormatOptions] = useState({ pageSize: 'A4', pageMargin: 'normal', showPageNumbers: true, includeOriginal: true, groupByType: true })
+  const [isFileExporting, setIsFileExporting] = useState(false)
   const [exportDefaultDir, setExportDefaultDir] = useState('')
   const [isAnnotationToolbarOpen, setIsAnnotationToolbarOpen] = useState(false)
   const [annotationColor, setAnnotationColor] = useState(null)
@@ -938,7 +993,7 @@ function App() {
   const [glossaryStatus, setGlossaryStatus] = useState('未导入术语库')
   const [isGlossaryVisible, setIsGlossaryVisible] = useState(false)
   const [settingsTab, setSettingsTab] = useState('model')
-  const [importExportTab, setImportExportTab] = useState('importExport')
+  const [importExportTab, setImportExportTab] = useState('libraryRecords')
   const [activeModule, setActiveModule] = useState('reader')
   const [toolbarCollapsed, setToolbarCollapsed] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -976,18 +1031,37 @@ function App() {
     setIsImagePreviewFullscreen(false)
   }, [clearOcrSelection])
 
-  function clearNoteDialogBlockers() {
+  const releasePdfTextSelection = useCallback(() => {
     if (selectionFrameRef.current) {
       cancelAnimationFrame(selectionFrameRef.current)
       selectionFrameRef.current = null
     }
 
-    requestIdRef.current += 1
     window.getSelection()?.removeAllRanges()
     isSelectingRef.current = false
+    setHighlightRects([])
+    setPreviewHighlight(null)
+  }, [])
+
+  const cancelTransientPointerInteractions = useCallback(() => {
+    releasePdfTextSelection()
     ocrStartPointRef.current = null
     panelResizeStartRef.current = null
     document.body.classList.remove('resizing-panel')
+
+    setIsOcrDragging(false)
+    setOcrRect(null)
+    setIsResizingPanel(false)
+    setDraggingTabId('')
+    setDragOverTabId('')
+    setDraggedLibraryFolderId('')
+    setLibraryFolderDropTarget(null)
+  }, [releasePdfTextSelection])
+
+  function clearNoteDialogBlockers() {
+    selectionInteractionVersionRef.current += 1
+    cancelTransientPointerInteractions()
+    requestIdRef.current += 1
 
     setSelectedText('')
     setHighlightRects([])
@@ -995,17 +1069,13 @@ function App() {
     setActiveAnnotationId('')
     setHighlightContextMenu(null)
     setIsAnnotationToolbarOpen(false)
+    setAnnotationColor(null)
     setAnnotationStatus('')
     setIsOcrMode(false)
     setIsOcrMenuOpen(false)
-    setIsOcrDragging(false)
-    setOcrRect(null)
     setLibraryContextMenu(null)
     setLibraryMoveDialog(null)
     setIsRecentOpen(false)
-    setIsResizingPanel(false)
-    setDraggingTabId('')
-    setDragOverTabId('')
     setImagePreview(null)
     setImagePreviewZoom(1)
     setIsImagePreviewFullscreen(false)
@@ -1484,7 +1554,7 @@ function App() {
                     closePdfTab(tab.id)
                   }}
                 >
-                  ×
+                  <X size={13} strokeWidth={2} aria-hidden="true" />
                 </button>
               </div>
             ))}
@@ -2550,6 +2620,10 @@ function App() {
   }
 
   function handleAnnotationClick(annotation) {
+    selectionInteractionVersionRef.current += 1
+    releasePdfTextSelection()
+    setAnnotationColor(null)
+    setIsAnnotationToolbarOpen(false)
     setActiveAnnotationId(annotation.id)
 
     if (annotation.noteId && openNoteById(annotation.noteId)) return
@@ -2630,7 +2704,10 @@ function App() {
 
   function formatImportExportSummary(summary) {
     if (!summary) return ''
-    return `导入 ${summary.documents || 0} 篇文献，翻译历史 ${summary.translationHistory || 0} 条，笔记 ${summary.notes || 0} 条，批注 ${summary.annotations || 0} 条，书签 ${summary.bookmarks || 0} 条，跳过重复 ${summary.skipped || 0} 条`
+    const recordCount = (summary.translationHistory || 0) + (summary.notes || 0) +
+      (summary.annotations || 0) + (summary.bookmarks || 0)
+    const folderLine = summary.restoredStates ? `\n恢复文件夹 ${summary.folders || 0}` : ''
+    return `导入完成\n新增文献 ${summary.addedLiteratures ?? summary.documents ?? 0}\n合并文献 ${summary.mergedLiteratures || 0}\n新增记录 ${recordCount}${folderLine}`
   }
 
   async function refreshCurrentDocumentData() {
@@ -2655,10 +2732,29 @@ function App() {
   }
 
   const updateLibraryState = useCallback((library) => {
-    setLibraryFolders(Array.isArray(library?.folders) ? library.folders : [])
-    setLibraryDocuments(Array.isArray(library?.documents) ? library.documents : [])
+    const nextFolders = Array.isArray(library?.folders) ? library.folders : []
+    const nextDocuments = Array.isArray(library?.documents) ? library.documents : []
+    const nextLiteratures = Array.isArray(library?.literatures) ? library.literatures : nextDocuments
+    const nextRecycledDocuments = Array.isArray(library?.recycledDocuments)
+      ? library.recycledDocuments
+      : nextLiteratures.filter((document) => document.status === 'recycled')
+
+    setLibraryFolders(nextFolders)
+    setLibraryDocuments(nextDocuments)
+    setLibraryLiteratures(nextLiteratures)
+    setRecycledLibraryDocuments(nextRecycledDocuments)
     setSelectedLibraryDocumentIds((currentIds) => (
-      currentIds.filter((id) => library?.documents?.some?.((document) => document.documentId === id))
+      currentIds.filter((id) => nextDocuments.some((document) => document.documentId === id))
+    ))
+    setSelectedLibraryFolderId((currentFolderId) => (
+      currentFolderId === 'all' ||
+      currentFolderId === 'unfiled' ||
+      nextFolders.some((folder) => folder.id === currentFolderId)
+        ? currentFolderId
+        : 'all'
+    ))
+    setHistorySelectedRecycleIds((currentIds) => (
+      currentIds.filter((id) => nextRecycledDocuments.some((document) => document.documentId === id))
     ))
   }, [])
 
@@ -2799,8 +2895,7 @@ function App() {
       setExportableDocuments(nextDocuments)
       setExportDefaultDir(defaultDir || '')
       setSelectedExportDocumentIds((currentIds) => currentIds.filter((id) => nextDocuments.some((document) => document.documentId === id)))
-      setSelectedMarkdownDocumentIds((currentIds) => currentIds.filter((id) => nextDocuments.some((document) => document.documentId === id)))
-      setSelectedPdfReportDocumentIds((currentIds) => currentIds.filter((id) => nextDocuments.some((document) => document.documentId === id)))
+      setSelectedFileExportDocumentIds((currentIds) => currentIds.filter((id) => nextDocuments.some((document) => document.documentId === id)))
       setSelectedExportDetailDocumentId((currentId) => (
         nextDocuments.some((document) => document.documentId === currentId)
           ? currentId
@@ -2837,10 +2932,11 @@ function App() {
 
   async function batchImportPaperReaderData() {
     setExportStatus('')
+    setExportFailures([])
     try {
       const result = await window.electronAPI.batchImportPaperReaderData()
       if (!result?.canceled) {
-        await Promise.all([loadExportSettingsData(), refreshCurrentDocumentData()])
+        await Promise.all([loadExportSettingsData(), refreshCurrentDocumentData(), refreshLibrary()])
         setExportStatus(formatImportExportSummary(result.summary))
       }
     } catch (error) {
@@ -2848,8 +2944,11 @@ function App() {
     }
   }
 
-  async function batchExportPaperReaderData() {
-    if (!selectedExportDocumentIds.length) {
+  async function backupPaperReaderData(scope = 'selected') {
+    const documentIds = scope === 'full'
+      ? exportableDocuments.map((document) => document.documentId)
+      : selectedExportDocumentIds
+    if (!documentIds.length) {
       setExportStatus('请先选择要导出的文献')
       return
     }
@@ -2857,21 +2956,22 @@ function App() {
     setExportStatus('')
     try {
       const result = await window.electronAPI.batchExportPaperReaderData({
-        documentIds: selectedExportDocumentIds,
-        exportType: batchDataExportType,
-        exportMode: batchExportMode,
-        userExportName: batchExportMode === 'merged' ? batchExportName : '',
+        documentIds,
+        exportType: 'full',
+        exportMode: 'merged',
+        userExportName: batchExportNameRef.current.trim() || (scope === 'full' ? 'Paper Reader 完整备份' : 'Paper Reader 文献备份'),
+        includeAppState: true,
       })
       if (!result?.canceled) {
-        setExportStatus(result.outputDir ? `已导出到：${result.outputDir}` : `已导出：${result.filePath}`)
+        setExportStatus(`备份完成\n文献 ${documentIds.length}\n${result.filePath}`)
       }
     } catch (error) {
-      setExportStatus(error.message || '批量导出失败')
+      setExportStatus(error.message || '备份失败')
     }
   }
 
   async function collectMarkdownExportItems(documentIds, featureName = 'Markdown 导出') {
-    if (!window.electronAPI?.getDocumentTranslationHistory || !window.electronAPI?.getDocumentAnnotations || !window.electronAPI?.getDocumentNotes) {
+    if (!window.electronAPI?.getDocumentTranslationHistory || !window.electronAPI?.getDocumentAnnotations || !window.electronAPI?.getDocumentNotes || !window.electronAPI?.getDocumentBookmarks) {
       throw new Error(`${featureName}仅在桌面版可用`)
     }
 
@@ -2880,250 +2980,40 @@ function App() {
 
     return Promise.all(uniqueDocumentIds.map(async (documentId) => {
       const pdf = documentsById.get(documentId) || (currentDocument?.documentId === documentId ? currentDocument : { documentId })
-      const [histories, annotations, notes] = await Promise.all([
+      const [histories, annotations, notes, bookmarks] = await Promise.all([
         window.electronAPI.getDocumentTranslationHistory(documentId),
         window.electronAPI.getDocumentAnnotations(documentId),
         window.electronAPI.getDocumentNotes(documentId),
+        window.electronAPI.getDocumentBookmarks(documentId),
       ])
 
       return {
-        pdf,
+        pdf: {
+          ...pdf,
+          folderPath: getFileExportRelativePath(pdf),
+        },
         histories: Array.isArray(histories) ? histories : [],
         annotations: Array.isArray(annotations) ? annotations : [],
         notes: Array.isArray(notes) ? notes : [],
+        bookmarks: Array.isArray(bookmarks) ? bookmarks : [],
       }
     }))
   }
 
   function hasSelectedContentExportOption(options) {
-    return Boolean(options?.exportHistories || options?.exportAnnotations || options?.exportNotes)
-  }
-
-  function assertContentExportSelection(options) {
-    if (!hasSelectedContentExportOption(options)) {
-      throw new Error('请至少选择一项导出内容')
-    }
-  }
-
-  function toggleContentExportOption(setter, key) {
-    setter((currentOptions) => ({
-      ...currentOptions,
-      [key]: !currentOptions[key],
-    }))
-  }
-
-  async function exportCurrentPdfMarkdown() {
-    if (!currentDocument?.documentId) {
-      setExportStatus('请先打开 PDF')
-      return
-    }
-    if (!window.electronAPI?.saveMarkdownFile) {
-      setExportStatus('Markdown 导出仅在桌面版可用')
-      return
-    }
-
-    setIsMarkdownExporting(true)
-    setExportStatus('')
-    try {
-      assertContentExportSelection(markdownExportOptions)
-      const [item] = await collectMarkdownExportItems([currentDocument.documentId])
-      const result = await window.electronAPI.saveMarkdownFile({
-        markdown: buildPdfMarkdown(item, markdownExportOptions),
-        defaultFileName: makeSafeMarkdownFileName(getPdfDisplayName(item.pdf)),
-      })
-      if (!result?.canceled) {
-        setExportStatus(`已导出 Markdown：${result.filePath}`)
-      }
-    } catch (error) {
-      setExportStatus(error.message || '导出 Markdown 失败')
-    } finally {
-      setIsMarkdownExporting(false)
-    }
-  }
-
-  async function exportMergedMarkdown() {
-    if (!selectedMarkdownDocumentIds.length) {
-      setExportStatus('请先选择要导出的文献')
-      return
-    }
-    if (!window.electronAPI?.saveMarkdownFile) {
-      setExportStatus('Markdown 导出仅在桌面版可用')
-      return
-    }
-
-    setIsMarkdownExporting(true)
-    setExportStatus('')
-    try {
-      assertContentExportSelection(markdownExportOptions)
-      const items = await collectMarkdownExportItems(selectedMarkdownDocumentIds)
-      const result = await window.electronAPI.saveMarkdownFile({
-        markdown: buildBatchPdfMarkdown(items, markdownExportOptions),
-        defaultFileName: makeSafeMarkdownFileName(`Markdown合集_${items.length}篇文献`),
-      })
-      if (!result?.canceled) {
-        setExportStatus(`已合并导出 Markdown：${result.filePath}`)
-      }
-    } catch (error) {
-      setExportStatus(error.message || '合并导出 Markdown 失败')
-    } finally {
-      setIsMarkdownExporting(false)
-    }
-  }
-
-  async function exportBatchMarkdownFiles() {
-    if (!selectedMarkdownDocumentIds.length) {
-      setExportStatus('请先选择要导出的文献')
-      return
-    }
-    if (!window.electronAPI?.saveMarkdownBatchFiles) {
-      setExportStatus('Markdown 导出仅在桌面版可用')
-      return
-    }
-
-    setIsMarkdownExporting(true)
-    setExportStatus('')
-    try {
-      assertContentExportSelection(markdownExportOptions)
-      const items = await collectMarkdownExportItems(selectedMarkdownDocumentIds)
-      const result = await window.electronAPI.saveMarkdownBatchFiles({
-        files: items.map((item) => ({
-          fileName: makeSafeMarkdownFileName(getPdfDisplayName(item.pdf)),
-          markdown: buildPdfMarkdown(item, markdownExportOptions),
-        })),
-      })
-      if (!result?.canceled) {
-        setExportStatus(`已批量导出 ${result.filePaths?.length || 0} 个 Markdown 文件到：${result.outputDir}`)
-      }
-    } catch (error) {
-      setExportStatus(error.message || '批量导出 Markdown 失败')
-    } finally {
-      setIsMarkdownExporting(false)
-    }
-  }
-
-  function formatPdfReportErrors(errors = []) {
-    return errors
-      .map((item) => `${item.fileName || '未命名文件'}：${item.error || '未知错误'}`)
-      .join('；')
-  }
-
-  function showPdfReportError(message) {
-    const text = message || '导出 PDF 报告失败'
-    setExportStatus(text)
-    if (typeof window !== 'undefined' && typeof window.alert === 'function') {
-      window.alert(`导出 PDF 失败：${text}`)
-    }
+    return Boolean(
+      options?.exportNotes ||
+      options?.exportHistories ||
+      options?.exportHighlights ||
+      options?.exportAnnotations ||
+      options?.exportBookmarks,
+    )
   }
 
   function assertPdfReportHtml(html) {
     const safeHtml = String(html || '').trim()
     if (!safeHtml) throw new Error('没有可导出的 PDF HTML 内容')
     return safeHtml
-  }
-
-  async function exportCurrentPdfReport() {
-    if (!currentDocument?.documentId) {
-      setExportStatus('请先打开 PDF')
-      return
-    }
-    if (!window.electronAPI?.savePdfReport) {
-      setExportStatus('PDF 报告导出仅在桌面版可用')
-      return
-    }
-
-    setIsPdfReportExporting(true)
-    setExportStatus('')
-    try {
-      assertContentExportSelection(pdfReportExportOptions)
-      const [item] = await collectMarkdownExportItems([currentDocument.documentId], 'PDF 报告导出')
-      const html = assertPdfReportHtml(buildPdfReportHtml(item, pdfReportExportOptions))
-      const result = await window.electronAPI.savePdfReport({
-        html,
-        defaultFileName: makeSafePdfReportFileName(getPdfDisplayName(item.pdf)),
-      })
-
-      if (result?.error) {
-        showPdfReportError(result.error)
-      } else if (!result?.canceled) {
-        setExportStatus(`已导出 PDF 报告：${result.filePath}`)
-      }
-    } catch (error) {
-      showPdfReportError(error.message || '导出 PDF 报告失败')
-    } finally {
-      setIsPdfReportExporting(false)
-    }
-  }
-
-  async function exportMergedPdfReport() {
-    if (!selectedPdfReportDocumentIds.length) {
-      setExportStatus('请先选择要导出的文献')
-      return
-    }
-    if (!window.electronAPI?.savePdfReport) {
-      setExportStatus('PDF 报告导出仅在桌面版可用')
-      return
-    }
-
-    setIsPdfReportExporting(true)
-    setExportStatus('')
-    try {
-      assertContentExportSelection(pdfReportExportOptions)
-      const items = await collectMarkdownExportItems(selectedPdfReportDocumentIds, 'PDF 报告导出')
-      const html = assertPdfReportHtml(buildBatchPdfReportHtml(items, pdfReportExportOptions))
-      const result = await window.electronAPI.savePdfReport({
-        html,
-        defaultFileName: makeSafePdfReportFileName(`PDF报告合集_${items.length}篇文献`),
-      })
-
-      if (result?.error) {
-        showPdfReportError(result.error)
-      } else if (!result?.canceled) {
-        setExportStatus(`已合并导出 PDF 报告：${result.filePath}`)
-      }
-    } catch (error) {
-      showPdfReportError(error.message || '合并导出 PDF 报告失败')
-    } finally {
-      setIsPdfReportExporting(false)
-    }
-  }
-
-  async function exportBatchPdfReports() {
-    if (!selectedPdfReportDocumentIds.length) {
-      setExportStatus('请先选择要导出的文献')
-      return
-    }
-    if (!window.electronAPI?.saveBatchPdfReports) {
-      setExportStatus('PDF 报告导出仅在桌面版可用')
-      return
-    }
-
-    setIsPdfReportExporting(true)
-    setExportStatus('')
-    try {
-      assertContentExportSelection(pdfReportExportOptions)
-      const items = await collectMarkdownExportItems(selectedPdfReportDocumentIds, 'PDF 报告导出')
-      const result = await window.electronAPI.saveBatchPdfReports({
-        files: items.map((item) => ({
-          fileName: makeSafePdfReportFileName(getPdfDisplayName(item.pdf)),
-          html: assertPdfReportHtml(buildPdfReportHtml(item, pdfReportExportOptions)),
-        })),
-      })
-
-      if (result?.error || result?.errors?.length) {
-        const detail = formatPdfReportErrors(result.errors || [])
-        const exportedCount = result.filePaths?.length || 0
-        const message = detail
-          ? `已导出 ${exportedCount} 个，失败 ${result.errors.length} 个：${detail}`
-          : result.error
-        showPdfReportError(message)
-      } else if (!result?.canceled) {
-        setExportStatus(`已批量导出 ${result.filePaths?.length || 0} 个 PDF 报告到：${result.outputDir}`)
-      }
-    } catch (error) {
-      showPdfReportError(error.message || '批量导出 PDF 报告失败')
-    } finally {
-      setIsPdfReportExporting(false)
-    }
   }
 
   function toggleExportDocument(documentId) {
@@ -3135,28 +3025,48 @@ function App() {
     )
   }
 
-  function toggleMarkdownDocument(documentId) {
-    setSelectedExportDetailDocumentId(documentId)
-    setSelectedMarkdownDocumentIds((currentIds) =>
-      currentIds.includes(documentId)
-        ? currentIds.filter((id) => id !== documentId)
-        : [...currentIds, documentId],
-    )
-  }
-
-  function togglePdfReportDocument(documentId) {
-    setSelectedExportDetailDocumentId(documentId)
-    setSelectedPdfReportDocumentIds((currentIds) =>
-      currentIds.includes(documentId)
-        ? currentIds.filter((id) => id !== documentId)
-        : [...currentIds, documentId],
-    )
-  }
-
   useEffect(() => {
     settingsFormRef.current = { ...settingsForm, rightPanelWidth }
     rightPanelWidthRef.current = rightPanelWidth
   }, [settingsForm, rightPanelWidth])
+
+  useEffect(() => {
+    let focusFrameId = null
+
+    function handleTextEntryPointerDown(event) {
+      const textEntry = getTextEntryElement(event.target)
+      if (!textEntry) return
+
+      selectionInteractionVersionRef.current += 1
+      cancelTransientPointerInteractions()
+      setAnnotationColor(null)
+      setIsAnnotationToolbarOpen(false)
+      setHighlightContextMenu(null)
+
+      if (focusFrameId) cancelAnimationFrame(focusFrameId)
+      focusFrameId = requestAnimationFrame(() => {
+        focusFrameId = null
+        if (textEntry.isConnected && document.activeElement !== textEntry) {
+          textEntry.focus({ preventScroll: true })
+        }
+      })
+    }
+
+    function handleWindowBlur() {
+      cancelTransientPointerInteractions()
+    }
+
+    document.addEventListener('pointerdown', handleTextEntryPointerDown, true)
+    document.addEventListener('pointercancel', cancelTransientPointerInteractions)
+    window.addEventListener('blur', handleWindowBlur)
+
+    return () => {
+      if (focusFrameId) cancelAnimationFrame(focusFrameId)
+      document.removeEventListener('pointerdown', handleTextEntryPointerDown, true)
+      document.removeEventListener('pointercancel', cancelTransientPointerInteractions)
+      window.removeEventListener('blur', handleWindowBlur)
+    }
+  }, [cancelTransientPointerInteractions])
 
   useEffect(() => {
     if (settingsTab === 'importExport') {
@@ -3505,6 +3415,26 @@ function App() {
   }, [libraryContextMenu])
 
   useEffect(() => {
+    if (!libraryFolderContextMenu) return
+
+    function closeLibraryFolderContextMenu() {
+      setLibraryFolderContextMenu(null)
+    }
+
+    function handleLibraryFolderMenuKeyDown(event) {
+      if (event.key === 'Escape') closeLibraryFolderContextMenu()
+    }
+
+    document.addEventListener('pointerdown', closeLibraryFolderContextMenu)
+    document.addEventListener('keydown', handleLibraryFolderMenuKeyDown)
+
+    return () => {
+      document.removeEventListener('pointerdown', closeLibraryFolderContextMenu)
+      document.removeEventListener('keydown', handleLibraryFolderMenuKeyDown)
+    }
+  }, [libraryFolderContextMenu])
+
+  useEffect(() => {
     if (!libraryMoveDialog) return
 
     function closeMoveDialog() {
@@ -3517,6 +3447,26 @@ function App() {
       document.removeEventListener('pointerdown', closeMoveDialog)
     }
   }, [libraryMoveDialog])
+
+  useEffect(() => {
+    if (!libraryFolderMoveDialog) return
+
+    function closeFolderMoveDialog() {
+      setLibraryFolderMoveDialog(null)
+    }
+
+    function handleFolderMoveDialogKeyDown(event) {
+      if (event.key === 'Escape') closeFolderMoveDialog()
+    }
+
+    document.addEventListener('pointerdown', closeFolderMoveDialog)
+    document.addEventListener('keydown', handleFolderMoveDialogKeyDown)
+
+    return () => {
+      document.removeEventListener('pointerdown', closeFolderMoveDialog)
+      document.removeEventListener('keydown', handleFolderMoveDialogKeyDown)
+    }
+  }, [libraryFolderMoveDialog])
 
   useEffect(() => {
     if (!libraryFolderDialogOpen) return
@@ -3597,53 +3547,10 @@ function App() {
       const targetInput = noteTitleInputRef.current || noteTextareaRef.current
 
       targetInput?.focus({ preventScroll: true })
-
-      if (import.meta.env.DEV) {
-        const inspectedFields = [noteTitleInputRef.current, noteTextareaRef.current].filter(Boolean)
-
-        for (const field of inspectedFields) {
-          const rect = field.getBoundingClientRect()
-          const centerX = rect.left + rect.width / 2
-          const centerY = rect.top + rect.height / 2
-          const topElement = document.elementFromPoint(centerX, centerY)
-
-          console.log('[PaperReader] note dialog focus debug', {
-            field: field.tagName,
-            fieldClassName: field.className,
-            activeElement: document.activeElement?.tagName,
-            topElement: topElement?.tagName,
-            topElementClassName: topElement?.className,
-            isFieldReachable: topElement === field || field.contains(topElement),
-            bodyClassName: document.body.className,
-            states: {
-              isFullscreen,
-              isOcrMode,
-              isOcrDragging,
-              isResizingPanel,
-              isAnnotationToolbarOpen,
-              hasHighlightContextMenu: Boolean(highlightContextMenu),
-              hasImagePreview: Boolean(imagePreview),
-              hasDiagramResult: Boolean(diagramResult),
-              hasCompareResult: Boolean(compareResult),
-            },
-          })
-        }
-      }
     }, 50)
 
     return () => window.clearTimeout(focusTimer)
-  }, [
-    compareResult,
-    diagramResult,
-    highlightContextMenu,
-    imagePreview,
-    isAnnotationToolbarOpen,
-    isFullscreen,
-    isOcrDragging,
-    isOcrMode,
-    isResizingPanel,
-    noteDialog,
-  ])
+  }, [noteDialog])
 
   useEffect(() => {
     if (!bookmarkDialogOpen) return undefined
@@ -4007,9 +3914,16 @@ function App() {
       return flooredWidth
     }
 
-    function updatePageWidth(containerWidth, containerHeight) {
-      const roundedContainerWidth = Math.floor(containerWidth)
-      const roundedContainerHeight = Math.floor(containerHeight)
+    function updatePageWidth() {
+      const viewer = pdfViewerRef.current
+      if (!viewer) return
+
+      // Use the border-box as the resize key. A page near the viewport edge can
+      // add or remove a scrollbar, which changes clientWidth without changing
+      // the reader's actual layout. Treating that as a resize creates a loop:
+      // page width -> scrollbar -> clientWidth -> page width.
+      const roundedContainerWidth = Math.floor(viewer.offsetWidth)
+      const roundedContainerHeight = Math.floor(viewer.offsetHeight)
       const lastViewerSize = lastViewerSizeRef.current
 
       if (
@@ -4025,8 +3939,8 @@ function App() {
       }
 
       const sideSpace = isFullscreen ? 24 : 28
-      const availableWidth = Math.max(160, roundedContainerWidth - sideSpace)
-      const availableHeight = Math.max(160, roundedContainerHeight - sideSpace)
+      const availableWidth = Math.max(160, Math.floor(viewer.clientWidth) - sideSpace)
+      const availableHeight = Math.max(160, Math.floor(viewer.clientHeight) - sideSpace)
       const widthByHeight = availableHeight * pageRatio
       const basePageWidth = isFullscreen
         ? Math.min(availableWidth, widthByHeight, 1200)
@@ -4046,19 +3960,10 @@ function App() {
     const pdfViewer = pdfViewerRef.current
 
     syncPageWidthRef.current = () => {
-      if (!pdfViewerRef.current) return
-
-      updatePageWidth(pdfViewerRef.current.clientWidth, pdfViewerRef.current.clientHeight)
+      updatePageWidth()
     }
 
-    const resizeObserver = new ResizeObserver((entries) => {
-      const entry = entries[0]
-
-      if (!entry) return
-
-      const nextWidth = Math.floor(entry.contentRect.width)
-      const nextHeight = Math.floor(entry.contentRect.height)
-
+    const resizeObserver = new ResizeObserver(() => {
       if (animationFrameId) {
         cancelAnimationFrame(animationFrameId)
       }
@@ -4068,13 +3973,13 @@ function App() {
           return
         }
 
-        updatePageWidth(nextWidth, nextHeight)
+        updatePageWidth()
       })
     })
 
     resizeObserver.observe(pdfViewer)
     animationFrameId = requestAnimationFrame(() => {
-      updatePageWidth(pdfViewer.clientWidth, pdfViewer.clientHeight)
+      updatePageWidth()
     })
 
     return () => {
@@ -4085,6 +3990,22 @@ function App() {
       resizeObserver.disconnect()
     }
   }, [isFullscreen, pageRatio, pdfUrl, zoomPercent])
+
+  useEffect(() => {
+    if (!pdfUrl) return undefined
+
+    let secondFrameId = null
+    const firstFrameId = requestAnimationFrame(() => {
+      secondFrameId = requestAnimationFrame(() => {
+        syncPageWidthRef.current?.()
+      })
+    })
+
+    return () => {
+      cancelAnimationFrame(firstFrameId)
+      if (secondFrameId) cancelAnimationFrame(secondFrameId)
+    }
+  }, [isFullscreen, pdfUrl, toolbarCollapsed])
 
   useEffect(() => {
     const pdfViewer = pdfViewerRef.current
@@ -4515,6 +4436,49 @@ function App() {
   function getLibraryFolderName(folderId) {
     if (!folderId) return '未分类'
     return libraryFolders.find((folder) => folder.id === folderId)?.name || '未分类'
+  }
+
+  function getLibraryFolderChildren(parentId = null) {
+    return libraryFolders
+      .filter((folder) => (folder.parentId || null) === (parentId || null))
+      .sort((first, second) => (first.order || 0) - (second.order || 0) || first.name.localeCompare(second.name))
+  }
+
+  function getLibraryDescendantFolderIds(folderId) {
+    const ids = new Set(folderId ? [folderId] : [])
+    let changed = true
+    while (changed) {
+      changed = false
+      libraryFolders.forEach((folder) => {
+        if (folder.parentId && ids.has(folder.parentId) && !ids.has(folder.id)) {
+          ids.add(folder.id)
+          changed = true
+        }
+      })
+    }
+    return ids
+  }
+
+  function getLibraryFolderDocumentCount(folderId, includeDescendants = true) {
+    const folderIds = includeDescendants ? getLibraryDescendantFolderIds(folderId) : new Set([folderId])
+    return libraryDocuments.filter((document) => folderIds.has(document.folderId)).length
+  }
+
+  function getLibraryFolderRecordCount(folderId, includeDescendants = true) {
+    const folderIds = includeDescendants ? getLibraryDescendantFolderIds(folderId) : new Set([folderId])
+    return libraryDocuments
+      .filter((document) => folderIds.has(document.folderId))
+      .reduce((total, document) => total + (document.recordCount || 0), 0)
+  }
+
+  function getHistoryLibraryDocuments() {
+    if (historyLibraryNodeId === 'recycle') return recycledLibraryDocuments
+    if (historyLibraryNodeId === 'all') return libraryDocuments
+    if (historyLibraryNodeId === 'unfiled') return libraryDocuments.filter((document) => !document.folderId)
+    const folderIds = historyIncludeDescendants
+      ? getLibraryDescendantFolderIds(historyLibraryNodeId)
+      : new Set([historyLibraryNodeId])
+    return libraryDocuments.filter((document) => folderIds.has(document.folderId))
   }
 
   function getLibraryProgress(document) {
@@ -5013,14 +4977,19 @@ function App() {
     }
   }
 
-  function openLibraryFolderDialog() {
-    setLibraryFolderNameDraft('')
+  function openLibraryFolderDialog(parentId = null, editingFolder = null) {
+    setLibraryStatus('')
+    setLibraryFolderParentId(editingFolder ? (editingFolder.parentId ?? null) : (parentId ?? null))
+    setLibraryFolderEditingId(editingFolder?.id || '')
+    setLibraryFolderNameDraft(editingFolder?.name || '')
     setLibraryFolderNameError('')
     setLibraryFolderDialogOpen(true)
   }
 
   function closeLibraryFolderDialog() {
     setLibraryFolderDialogOpen(false)
+    setLibraryFolderParentId(null)
+    setLibraryFolderEditingId('')
     setLibraryFolderNameDraft('')
     setLibraryFolderNameError('')
   }
@@ -5033,20 +5002,81 @@ function App() {
       return
     }
 
-    if (libraryFolders.some((folder) => folder.name.trim().toLowerCase() === name.toLowerCase())) {
+    if (libraryFolders.some((folder) => (
+      folder.id !== libraryFolderEditingId &&
+      (folder.parentId || null) === (libraryFolderParentId || null) &&
+      folder.name.trim().toLowerCase() === name.toLowerCase()
+    ))) {
       setLibraryFolderNameError('已存在同名文件夹')
       return
     }
 
     try {
-      const library = await window.electronAPI.createLibraryFolder(name)
+      const library = libraryFolderEditingId
+        ? await window.electronAPI.updateLibraryFolder(libraryFolderEditingId, { name })
+        : await window.electronAPI.createLibraryFolder({ name, parentId: libraryFolderParentId })
       updateLibraryState(library)
-      setSelectedLibraryFolderId(library.folders.at(-1)?.id || selectedLibraryFolderId)
       closeLibraryFolderDialog()
-      setLibraryStatus('文件夹已创建')
+      setLibraryStatus('')
     } catch (error) {
-      setLibraryFolderNameError(error.message || '创建文件夹失败')
+      setLibraryFolderNameError(error.message || (libraryFolderEditingId ? '重命名失败' : '创建失败'))
     }
+  }
+
+  function openLibraryFolderContextMenu(event, folder) {
+    event.preventDefault()
+    event.stopPropagation()
+    setLibraryContextMenu(null)
+    setLibraryMoveDialog(null)
+    setLibraryFolderMoveDialog(null)
+    setSelectedLibraryFolderId(folder.id)
+    setLibraryFolderContextMenu({
+      folderId: folder.id,
+      x: Math.max(8, Math.min(event.clientX + 2, window.innerWidth - 168)),
+      y: Math.max(8, Math.min(event.clientY + 2, window.innerHeight - 174)),
+    })
+  }
+
+  function createLibrarySubfolder(event, folder) {
+    event.preventDefault()
+    event.stopPropagation()
+    setLibraryFolderContextMenu(null)
+    openLibraryFolderDialog(folder.id)
+  }
+
+  function openLibraryFolderMoveDialog(folder, position) {
+    if (!folder?.id) return
+
+    setLibraryFolderContextMenu(null)
+    setLibraryFolderMoveRootExpanded(true)
+    setLibraryFolderMoveExpandedIds(new Set())
+    setLibraryFolderMoveDialog({
+      folderId: folder.id,
+      hasTarget: false,
+      targetParentId: null,
+      x: position?.x ?? Math.min(window.innerWidth - 280, Math.max(24, window.innerWidth / 2 - 132)),
+      y: position?.y ?? Math.min(window.innerHeight - 360, Math.max(72, window.innerHeight / 2 - 160)),
+    })
+  }
+
+  function toggleLibraryFolderMoveExpanded(folderId) {
+    setLibraryFolderMoveExpandedIds((currentIds) => {
+      const nextIds = new Set(currentIds)
+      if (nextIds.has(folderId)) nextIds.delete(folderId)
+      else nextIds.add(folderId)
+      return nextIds
+    })
+  }
+
+  function selectLibraryFolderMoveTarget(parentId) {
+    setLibraryFolderMoveDialog((dialog) => (
+      dialog ? { ...dialog, hasTarget: true, targetParentId: parentId } : dialog
+    ))
+  }
+
+  function confirmLibraryFolderMove() {
+    if (!libraryFolderMoveDialog?.hasTarget) return
+    void moveLibraryFolder(libraryFolderMoveDialog.folderId, libraryFolderMoveDialog.targetParentId)
   }
 
   function toggleLibraryDocumentSelection(documentId) {
@@ -5063,13 +5093,36 @@ function App() {
     if (!ids.length) return
 
     setLibraryContextMenu(null)
+    setLibraryMoveRootExpanded(true)
+    setLibraryMoveExpandedIds(new Set())
     setLibraryMoveDialog({
       documentIds: ids,
       currentFolderId,
-      targetFolderId: currentFolderId || '',
+      targetFolderId: '',
+      hasTarget: false,
       x: position?.x ?? Math.min(window.innerWidth - 260, Math.max(24, window.innerWidth / 2 - 120)),
       y: position?.y ?? Math.min(window.innerHeight - 260, Math.max(72, window.innerHeight / 2 - 120)),
     })
+  }
+
+  function toggleLibraryMoveExpanded(folderId) {
+    setLibraryMoveExpandedIds((currentIds) => {
+      const nextIds = new Set(currentIds)
+      if (nextIds.has(folderId)) nextIds.delete(folderId)
+      else nextIds.add(folderId)
+      return nextIds
+    })
+  }
+
+  function selectLibraryMoveTarget(folderId) {
+    setLibraryMoveDialog((dialog) => (
+      dialog ? { ...dialog, hasTarget: true, targetFolderId: folderId } : dialog
+    ))
+  }
+
+  function confirmLibraryDocumentMove() {
+    if (!libraryMoveDialog?.hasTarget) return
+    void moveLibraryDocuments(libraryMoveDialog.documentIds, libraryMoveDialog.targetFolderId)
   }
 
   async function moveLibraryDocuments(documentIds, folderId) {
@@ -5086,18 +5139,178 @@ function App() {
     }
   }
 
-  async function deleteLibraryDocuments(documentIds = selectedLibraryDocumentIds) {
-    if (!documentIds.length) return
-    if (!window.confirm('确定要从文献库删除选中的文献吗？不会删除 PDF 文件和已有笔记/批注。')) return
+  async function toggleLibraryFolderExpanded(folder) {
+    try {
+      const library = await window.electronAPI.updateLibraryFolder(folder.id, { expanded: folder.expanded === false })
+      updateLibraryState(library)
+      setLibraryStatus('')
+    } catch (error) {
+      setLibraryStatus(error.message || '更新文件夹失败')
+    }
+  }
+
+  async function reorderLibraryFolder(folderId, targetFolderId, placement) {
+    try {
+      const library = await window.electronAPI.reorderLibraryFolder(folderId, targetFolderId, placement)
+      updateLibraryState(library)
+      setLibraryStatus('')
+    } catch (error) {
+      setLibraryStatus(error.message || '调整文件夹顺序失败')
+    }
+  }
+
+  async function moveLibraryFolder(folderId, parentId) {
+    try {
+      const library = await window.electronAPI.moveLibraryFolder(folderId, parentId)
+      updateLibraryState(library)
+      setLibraryFolderMoveDialog(null)
+      setLibraryStatus('')
+    } catch (error) {
+      setLibraryStatus(error.message || '移动文件夹失败')
+    }
+  }
+
+  function beginLibraryFolderDrag(event, folder) {
+    if (event.target.closest('button')) {
+      event.preventDefault()
+      return
+    }
+
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', folder.id)
+    setDraggedLibraryFolderId(folder.id)
+    setLibraryFolderDropTarget(null)
+  }
+
+  function updateLibraryFolderDragTarget(event, folder) {
+    const draggedFolder = libraryFolders.find((item) => item.id === draggedLibraryFolderId)
+    if (!draggedFolder || draggedFolder.id === folder.id || draggedFolder.parentId !== folder.parentId) return
+
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+    const bounds = event.currentTarget.getBoundingClientRect()
+    setLibraryFolderDropTarget({
+      folderId: folder.id,
+      placement: event.clientY >= bounds.top + bounds.height / 2 ? 'after' : 'before',
+    })
+  }
+
+  function endLibraryFolderDrag() {
+    setDraggedLibraryFolderId('')
+    setLibraryFolderDropTarget(null)
+  }
+
+  function dropLibraryFolder(event, folder) {
+    const target = libraryFolderDropTarget
+    const draggedFolder = libraryFolders.find((item) => item.id === draggedLibraryFolderId)
+    if (!target || target.folderId !== folder.id || !draggedFolder || draggedFolder.parentId !== folder.parentId) {
+      endLibraryFolderDrag()
+      return
+    }
+
+    event.preventDefault()
+    const { folderId, placement } = target
+    const draggedFolderId = draggedFolder.id
+    endLibraryFolderDrag()
+    void reorderLibraryFolder(draggedFolderId, folderId, placement)
+  }
+
+  async function deleteLibraryFolder(folder) {
+    if (!folder?.id) return
+
+    if (!window.electronAPI?.deleteLibraryFolder) {
+      setLibraryStatus('\u5220\u9664\u6587\u4ef6\u5939\u4ec5\u5728\u684c\u9762\u7248\u53ef\u7528')
+      return
+    }
+
+    const removedFolderIds = getLibraryDescendantFolderIds(folder.id)
+    const folderDocumentCount = getLibraryFolderDocumentCount(folder.id, true)
+    const childFolderCount = Math.max(0, removedFolderIds.size - 1)
+    const wasSelectedFolder = removedFolderIds.has(selectedLibraryFolderId)
+    const childFolderText = childFolderCount ? `及其 ${childFolderCount} 个子文件夹` : ''
+    const confirmMessage = folderDocumentCount
+      ? `确定删除项目文件夹 "${folder.name}"${childFolderText}吗？其中 ${folderDocumentCount} 篇文献会移到未分类，不会删除 PDF 文件和已有笔记/批注。`
+      : `确定删除项目文件夹 "${folder.name}"${childFolderText}吗？`
+
+    if (!window.confirm(confirmMessage)) return
 
     try {
-      const library = await window.electronAPI.deleteLibraryDocuments(documentIds)
+      const library = await window.electronAPI.deleteLibraryFolder(folder.id)
+      updateLibraryState(library)
+      if (wasSelectedFolder) setSelectedLibraryFolderId('unfiled')
+      setSelectedLibraryDocumentIds([])
+      setLibraryStatus('')
+    } catch (error) {
+      setLibraryStatus(error.message || '\u5220\u9664\u6587\u4ef6\u5939\u5931\u8d25')
+    }
+  }
+
+  function deleteLibraryDocuments(documentIds = selectedLibraryDocumentIds) {
+    if (!documentIds.length) return
+    setLibraryContextMenu(null)
+    setLibraryDeleteDialog({ documentIds: [...documentIds] })
+  }
+
+  async function renameLibraryDocument(document) {
+    const currentName = document?.displayName || document?.fileName || ''
+    const displayName = window.prompt('重命名文献', currentName)?.trim()
+    if (!displayName || displayName === currentName) return
+    try {
+      const library = await window.electronAPI.updateLibraryDocument(document.documentId, { displayName })
+      updateLibraryState(library)
+      setLibraryContextMenu(null)
+      setLibraryStatus('文献已重命名')
+      await loadExportSettingsData()
+    } catch (error) {
+      setLibraryStatus(error.message || '重命名文献失败')
+    }
+  }
+
+  async function confirmDeleteLibraryDocuments(mode) {
+    const documentIds = libraryDeleteDialog?.documentIds || []
+    if (!documentIds.length) return
+    try {
+      const library = await window.electronAPI.deleteLiterature(documentIds, mode)
       updateLibraryState(library)
       setSelectedLibraryDocumentIds([])
       setLibraryContextMenu(null)
-      setLibraryStatus('已从文献库删除')
+      setLibraryDeleteDialog(null)
+      setLibraryStatus(mode === 'permanent' ? '已删除文献及记录' : '已移入回收箱')
+      await loadExportSettingsData()
     } catch (error) {
       setLibraryStatus(error.message || '删除文献失败')
+    }
+  }
+
+  async function restoreRecycledDocuments(documentIds) {
+    try {
+      const library = await window.electronAPI.restoreLibraryDocuments(documentIds)
+      updateLibraryState(library)
+      setHistorySelectedRecycleIds([])
+      setExportStatus('已恢复')
+      await loadExportSettingsData()
+    } catch (error) {
+      setExportStatus(error.message || '恢复失败')
+    }
+  }
+
+  async function permanentlyDeleteRecycledDocuments(documentIds) {
+    if (!documentIds.length) return
+    setPermanentDeleteDialogIds([...documentIds])
+  }
+
+  async function confirmPermanentlyDeleteRecycledDocuments() {
+    const documentIds = permanentDeleteDialogIds
+    if (!documentIds.length) return
+    try {
+      const library = await window.electronAPI.permanentlyDeleteLibraryDocuments(documentIds)
+      updateLibraryState(library)
+      setHistorySelectedRecycleIds([])
+      setPermanentDeleteDialogIds([])
+      setExportStatus('已永久删除')
+      await loadExportSettingsData()
+    } catch (error) {
+      setExportStatus(error.message || '永久删除失败')
     }
   }
 
@@ -5208,7 +5421,7 @@ function App() {
 
     if (moduleName === 'importExport') {
       setSettingsTab('importExport')
-      void loadSettingsData()
+      void Promise.all([loadSettingsData(), loadExportSettingsData(), refreshLibrary()])
       return
     }
 
@@ -8271,8 +8484,7 @@ function App() {
 
   async function handleTextSelection(event) {
     if (event?.target && isInteractiveElement(event.target)) {
-      isSelectingRef.current = false
-      setPreviewHighlight(null)
+      releasePdfTextSelection()
       return
     }
 
@@ -8289,21 +8501,20 @@ function App() {
     }
 
     const selection = window.getSelection()
-    const selectionText = selection.toString().trim()
+    const selectionText = selection?.toString().trim() || ''
     const formattedText = getFormattedSelectionText(selection, selectionText)
     const text = formattedText.trim()
 
     if (!text || text.length <= 1) {
-      setPreviewHighlight(null)
+      releasePdfTextSelection()
       clearTranslation()
       return
     }
 
     const nextHighlightRects = getSelectionHighlightRects(selection)
-    setHighlightRects(nextHighlightRects)
 
     if (nextHighlightRects.length === 0) {
-      setPreviewHighlight(null)
+      releasePdfTextSelection()
       return
     }
 
@@ -8312,6 +8523,12 @@ function App() {
       const rects = nextHighlightRects
         .map((rect) => normalizeViewerRectToPage(rect, pageBox))
         .filter(Boolean)
+
+      // Release the native PDF selection before persistence begins. The saved
+      // highlight can render while the IPC/PDF write is still pending, so a
+      // delayed cleanup here would race with opening its note dialog.
+      releasePdfTextSelection()
+      const selectionInteractionVersion = ++selectionInteractionVersionRef.current
 
       if (rects.length && !hasDuplicateHighlight(text, rects)) {
         const now = Date.now()
@@ -8336,17 +8553,18 @@ function App() {
 
         const savedAnnotation = await addAnnotation(annotation)
         await maybeEmbedHighlightInPdf(savedAnnotation || annotation)
-        setActiveAnnotationId(annotation.id)
-        setAnnotationStatus('')
+        if (selectionInteractionVersionRef.current === selectionInteractionVersion) {
+          setActiveAnnotationId(annotation.id)
+          setAnnotationStatus('')
+        }
       } else if (rects.length) {
         setAnnotationStatus('已存在相同高亮')
       }
 
-      window.getSelection()?.removeAllRanges()
-      setHighlightRects([])
-      setPreviewHighlight(null)
       return
     }
+
+    setHighlightRects(nextHighlightRects)
 
     if (text) {
       setRightPanelResult(null)
@@ -8380,8 +8598,7 @@ function App() {
 
     function handleDocumentMouseUp(event) {
       if (isInteractiveElement(event.target)) {
-        isSelectingRef.current = false
-        setPreviewHighlight(null)
+        releasePdfTextSelection()
         return
       }
 
@@ -8940,7 +9157,7 @@ function App() {
               }}
               title="打开 OCR 笔记"
             >
-              📝
+              <NotebookPen size={14} strokeWidth={1.9} aria-hidden="true" />
             </button>
           )
         }) : null}
@@ -9126,6 +9343,129 @@ function App() {
         ) : null}
       </section>
     )
+  }
+
+  function getFileExportDocumentIds() {
+    if (fileExportScope === 'current') {
+      const documentId = selectedExportDetailDocumentId || currentDocument?.documentId
+      return documentId ? [documentId] : []
+    }
+    if (fileExportScope === 'selected') return selectedFileExportDocumentIds
+    if (fileExportScope === 'all') return libraryDocuments.map((document) => document.documentId)
+    if (fileExportScope === 'recycle') return recycledLibraryDocuments.map((document) => document.documentId)
+    const folderId = fileExportFolderId === 'unfiled' ? null : fileExportFolderId
+    const folderIds = fileExportScope === 'folder-tree' && folderId
+      ? getLibraryDescendantFolderIds(folderId)
+      : new Set(folderId ? [folderId] : [])
+    return libraryDocuments
+      .filter((document) => (folderId ? folderIds.has(document.folderId) : !document.folderId))
+      .map((document) => document.documentId)
+  }
+
+  function getSelectedExportRecordCount(items, options) {
+    return items.reduce((total, item) => {
+      const highlights = item.annotations.filter((annotation) => annotation.type === 'text-highlight').length
+      const annotations = item.annotations.length - highlights
+      return total +
+        (options.exportNotes ? item.notes.length : 0) +
+        (options.exportHistories ? item.histories.length : 0) +
+        (options.exportHighlights ? highlights : 0) +
+        (options.exportAnnotations ? annotations : 0) +
+        (options.exportBookmarks ? item.bookmarks.length : 0)
+    }, 0)
+  }
+
+  function openFileExportFromHistory() {
+    const selectedDocument = getHistoryLibraryDocuments().find((document) => document.documentId === selectedExportDetailDocumentId)
+    if (historyLibraryNodeId === 'recycle' && historySelectedRecycleIds.length > 1) {
+      setSelectedFileExportDocumentIds(historySelectedRecycleIds)
+      setFileExportScope('selected')
+    } else if (selectedDocument) {
+      setSelectedFileExportDocumentIds([selectedDocument.documentId])
+      setFileExportScope('current')
+    } else if (historyLibraryNodeId === 'all') {
+      setFileExportScope('all')
+    } else if (historyLibraryNodeId === 'recycle') {
+      setFileExportScope('recycle')
+    } else {
+      setFileExportFolderId(historyLibraryNodeId)
+      setFileExportScope('folder-tree')
+      setFileExportMethod('folder')
+    }
+    setImportExportTab('fileExport')
+    setExportStatus('')
+    setExportFailures([])
+  }
+
+  async function exportFiles() {
+    const documentIds = Array.from(new Set(getFileExportDocumentIds()))
+    if (!documentIds.length) {
+      setExportStatus('请选择文献')
+      return
+    }
+    if (!hasSelectedContentExportOption(fileExportContents)) {
+      setExportStatus('请至少选择一项导出内容')
+      return
+    }
+
+    setIsFileExporting(true)
+    setExportStatus('')
+    setExportFailures([])
+    try {
+      const generatorOptions = fileExportFormat === 'markdown'
+        ? { ...fileExportContents, ...markdownFormatOptions }
+        : { ...fileExportContents, ...pdfFormatOptions }
+      const items = await collectMarkdownExportItems(documentIds, '文件导出')
+      const recordCount = getSelectedExportRecordCount(items, fileExportContents)
+      if (!recordCount) throw new Error('所选文献没有符合条件的记录')
+
+      const outputName = batchExportNameRef.current.trim() || `${fileExportFormat === 'markdown' ? 'Markdown' : 'PDF'}导出_${items.length}篇文献`
+      const exportDocumentsById = new Map(exportableDocuments.map((document) => [document.documentId, document]))
+      let result
+      if (fileExportFormat === 'markdown') {
+        result = fileExportMethod === 'merged'
+          ? await window.electronAPI.saveMarkdownFile({
+              markdown: buildBatchPdfMarkdown(items, generatorOptions),
+              defaultFileName: makeSafeMarkdownFileName(outputName),
+            })
+          : await window.electronAPI.saveMarkdownBatchFiles({
+              outputName,
+              files: items.map((item) => ({
+                fileName: makeSafeMarkdownFileName(getPdfDisplayName(item.pdf)),
+                markdown: buildPdfMarkdown(item, generatorOptions),
+                relativePath: fileExportMethod === 'folder' ? getFileExportRelativePath(exportDocumentsById.get(item.pdf.documentId) || item.pdf) : '',
+              })),
+            })
+      } else {
+        result = fileExportMethod === 'merged'
+          ? await window.electronAPI.savePdfReport({
+              html: assertPdfReportHtml(buildBatchPdfReportHtml(items, generatorOptions)),
+              defaultFileName: makeSafePdfReportFileName(outputName),
+            })
+          : await window.electronAPI.saveBatchPdfReports({
+              outputName,
+              files: items.map((item) => ({
+                fileName: makeSafePdfReportFileName(getPdfDisplayName(item.pdf)),
+                html: assertPdfReportHtml(buildPdfReportHtml(item, generatorOptions)),
+                relativePath: fileExportMethod === 'folder' ? getFileExportRelativePath(exportDocumentsById.get(item.pdf.documentId) || item.pdf) : '',
+              })),
+            })
+      }
+
+      setExportFailures(result?.errors || [])
+      if (result?.error) {
+        const detail = (result.errors || []).map((failure) => `${failure.fileName}：${failure.error}`).join('；')
+        throw new Error(detail ? `${result.error}：${detail}` : result.error)
+      }
+      if (!result?.canceled) {
+        const failures = result.errors?.length || 0
+        setExportStatus(`导出完成\n文献 ${(result.filePaths?.length || (result.filePath ? items.length : 0))}\n记录 ${recordCount}\n失败 ${failures}`)
+      }
+    } catch (error) {
+      setExportStatus(error.message || '导出失败')
+    } finally {
+      setIsFileExporting(false)
+    }
   }
 
   function renderBookmarksPanel() {
@@ -9348,6 +9688,12 @@ function App() {
   }
 
   function renderContentExportOptions(options, setOptions, disabled = false) {
+    const toggleOption = (key) => {
+      setOptions((currentOptions) => ({
+        ...currentOptions,
+        [key]: !currentOptions[key],
+      }))
+    }
     return (
       <fieldset className="content-export-options" aria-label="选择导出内容">
         <div className="content-export-option-list">
@@ -9357,49 +9703,13 @@ function App() {
                 type="checkbox"
                 checked={Boolean(options[item.key])}
                 disabled={disabled}
-                onChange={() => toggleContentExportOption(setOptions, item.key)}
+                onChange={() => toggleOption(item.key)}
               />
               <span>{item.label}</span>
             </label>
           ))}
         </div>
       </fieldset>
-    )
-  }
-
-  function renderExportDocumentList({ selectedIds = [], onToggle, className = '', disabled = false, emptyText = '暂无可导出的文献数据' }) {
-    const selectedIdSet = new Set(selectedIds)
-    const listClassName = ['exportable-document-list', className].filter(Boolean).join(' ')
-
-    return (
-      <div className={listClassName}>
-        {exportableDocuments.length ? exportableDocuments.map((document) => {
-          const documentName = getExportDocumentDisplayName(document)
-          const isActive = selectedExportDetailDocumentId === document.documentId
-
-          return (
-            <article
-              className={isActive ? 'exportable-document-item active' : 'exportable-document-item'}
-              key={document.documentId}
-            >
-              <input
-                type="checkbox"
-                checked={selectedIdSet.has(document.documentId)}
-                disabled={disabled}
-                aria-label={`选择 ${documentName}`}
-                onChange={() => onToggle(document.documentId)}
-              />
-              <button
-                type="button"
-                className="exportable-document-name-button"
-                onClick={() => setSelectedExportDetailDocumentId(document.documentId)}
-              >
-                {documentName}
-              </button>
-            </article>
-          )
-        }) : <p className="history-empty">{emptyText}</p>}
-      </div>
     )
   }
 
@@ -9451,7 +9761,8 @@ function App() {
           <div className="export-detail-grid">
             {renderExportDetailGroup('笔记', detail?.notes || [], getExportNoteDetailPreview)}
             {renderExportDetailGroup('翻译历史', detail?.histories || [], getExportHistoryDetailPreview)}
-            {renderExportDetailGroup('批注', detail?.annotations || [], getExportAnnotationDetailPreview)}
+            {renderExportDetailGroup('高亮', (detail?.annotations || []).filter((item) => item.type === 'text-highlight'), getExportAnnotationDetailPreview)}
+            {renderExportDetailGroup('批注', (detail?.annotations || []).filter((item) => item.type !== 'text-highlight'), getExportAnnotationDetailPreview)}
             {renderExportDetailGroup('书签', detail?.bookmarks || [], getExportBookmarkDetailPreview)}
           </div>
         )}
@@ -9474,13 +9785,13 @@ function App() {
         <section className="search-dialog" role="dialog" aria-modal="true" aria-label={dialogTitle}>
           <header className="search-dialog-header">
             <h2>{dialogTitle}</h2>
-            <button type="button" className="search-dialog-close" onClick={closeSearchDialog} aria-label="关闭搜索">
-              ×
-            </button>
+            <IconButton className="search-dialog-close" onClick={closeSearchDialog} label="关闭搜索">
+              <X size={17} strokeWidth={1.9} />
+            </IconButton>
           </header>
           <div className="search-dialog-controls">
             <label className="search-dialog-input">
-              <span aria-hidden="true">⌕</span>
+              <Search size={17} strokeWidth={1.8} aria-hidden="true" />
               <input
                 ref={searchDialogInputRef}
                 type="search"
@@ -9523,42 +9834,349 @@ function App() {
     )
   }
 
+  function toggleFileExportDocument(documentId) {
+    setSelectedExportDetailDocumentId(documentId)
+    setSelectedFileExportDocumentIds((currentIds) => (
+      currentIds.includes(documentId)
+        ? currentIds.filter((id) => id !== documentId)
+        : [...currentIds, documentId]
+    ))
+  }
+
+  function toggleExportFolderTreeExpanded(folderId) {
+    setExportFolderTreeExpandedIds((currentIds) => {
+      const nextIds = new Set(currentIds)
+      if (nextIds.has(folderId)) nextIds.delete(folderId)
+      else nextIds.add(folderId)
+      return nextIds
+    })
+  }
+
+  function renderFileExportDocumentRow(document, {
+    selectedIds = selectedFileExportDocumentIds,
+    onToggle = toggleFileExportDocument,
+    disabled = isFileExporting,
+    depth = 0,
+  } = {}) {
+    const documentName = getExportDocumentDisplayName(document)
+    return (
+      <div className="file-export-document-row" key={`file-export-${document.documentId}`} style={{ '--folder-depth': depth }}>
+        <input
+          type="checkbox"
+          checked={selectedIds.includes(document.documentId)}
+          disabled={disabled}
+          onChange={() => onToggle(document.documentId)}
+        />
+        <button type="button" onClick={() => setSelectedExportDetailDocumentId(document.documentId)}>{documentName}</button>
+        <span>{document.recordCount || 0}</span>
+      </div>
+    )
+  }
+
+  function renderFileExportFolderBranch(folder, depth = 1, options = {}) {
+    const {
+      selectedIds = [],
+      onToggle = () => {},
+      disabled = false,
+      showDocuments = true,
+      selectFolder = false,
+    } = options
+    const documents = exportableDocuments.filter((document) => document.status !== 'recycled' && document.folderId === folder.id)
+    const children = getLibraryFolderChildren(folder.id)
+    const isExpanded = exportFolderTreeExpandedIds.has(folder.id)
+    const isSelected = selectFolder && fileExportFolderId === folder.id
+    const canExpand = children.length > 0 || (showDocuments && documents.length > 0)
+
+    return (
+      <div className="file-export-folder-branch" key={`export-folder-${folder.id}`}>
+        <div className="file-export-folder-tree-row" style={{ '--folder-depth': depth }}>
+          {canExpand ? (
+            <TreeChevron
+              expanded={isExpanded}
+              onToggle={() => toggleExportFolderTreeExpanded(folder.id)}
+            />
+          ) : <span className="tree-chevron-spacer" />}
+          {selectFolder ? (
+            <button
+              type="button"
+              className={isSelected ? 'file-export-folder-node active' : 'file-export-folder-node'}
+              onClick={() => setFileExportFolderId(folder.id)}
+            >
+              <span>{folder.name}</span>
+            </button>
+          ) : <div className="file-export-folder-node"><span>{folder.name}</span></div>}
+        </div>
+        {isExpanded ? (
+          <>
+            {showDocuments ? documents.map((document) => renderFileExportDocumentRow(document, {
+              selectedIds,
+              onToggle,
+              disabled,
+              depth: depth + 1,
+            })) : null}
+            {children.map((child) => renderFileExportFolderBranch(child, depth + 1, options))}
+          </>
+        ) : null}
+      </div>
+    )
+  }
+
+  function renderFileExportFolderTree({
+    selectedIds = [],
+    onToggle = () => {},
+    disabled = false,
+    showDocuments = true,
+    selectFolder = false,
+    includeRecycle = false,
+  } = {}) {
+    const isUnfiledSelected = selectFolder && fileExportFolderId === 'unfiled'
+    const unfiledDocuments = exportableDocuments.filter((document) => document.status !== 'recycled' && !document.folderId)
+    const recycledDocuments = exportableDocuments.filter((document) => document.status === 'recycled')
+    const options = { selectedIds, onToggle, disabled, showDocuments, selectFolder }
+
+    return (
+      <div className="file-export-selection-tree">
+        <div className="file-export-folder-branch">
+          <div className="file-export-folder-tree-row" style={{ '--folder-depth': 0 }}>
+            <TreeChevron
+              expanded={exportFolderTreeRootExpanded}
+              onToggle={() => setExportFolderTreeRootExpanded((expanded) => !expanded)}
+            />
+            <div className="file-export-folder-node"><span>全部文献</span></div>
+          </div>
+          {exportFolderTreeRootExpanded ? (
+            <>
+              <div className="file-export-folder-branch">
+                <div className="file-export-folder-tree-row" style={{ '--folder-depth': 1 }}>
+                  {showDocuments && unfiledDocuments.length ? (
+                    <TreeChevron
+                      expanded={exportFolderTreeUnfiledExpanded}
+                      onToggle={() => setExportFolderTreeUnfiledExpanded((expanded) => !expanded)}
+                    />
+                  ) : <span className="tree-chevron-spacer" />}
+                  {selectFolder ? (
+                    <button
+                      type="button"
+                      className={isUnfiledSelected ? 'file-export-folder-node active' : 'file-export-folder-node'}
+                      onClick={() => setFileExportFolderId('unfiled')}
+                    >
+                      <span>未分类</span>
+                    </button>
+                  ) : <div className="file-export-folder-node"><span>未分类</span></div>}
+                </div>
+                {showDocuments && exportFolderTreeUnfiledExpanded ? unfiledDocuments.map((document) => renderFileExportDocumentRow(document, {
+                  selectedIds,
+                  onToggle,
+                  disabled,
+                  depth: 2,
+                })) : null}
+              </div>
+              {getLibraryFolderChildren(null).map((folder) => renderFileExportFolderBranch(folder, 1, options))}
+            </>
+          ) : null}
+        </div>
+        {includeRecycle ? (
+          <div className="file-export-folder-branch recycle">
+            <div className="file-export-folder-tree-row" style={{ '--folder-depth': 0 }}>
+              {showDocuments && recycledDocuments.length ? (
+                <TreeChevron
+                  expanded={exportFolderTreeRecycleExpanded}
+                  onToggle={() => setExportFolderTreeRecycleExpanded((expanded) => !expanded)}
+                />
+              ) : <span className="tree-chevron-spacer" />}
+              <div className="file-export-folder-node"><span>回收箱</span></div>
+            </div>
+            {showDocuments && exportFolderTreeRecycleExpanded ? recycledDocuments.map((document) => renderFileExportDocumentRow(document, {
+              selectedIds,
+              onToggle,
+              disabled,
+              depth: 1,
+            })) : null}
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
+  function getFileExportRelativePath(document) {
+    if (document.status === 'recycled') return '回收箱'
+    if (!document.folderId) return '未分类'
+    const names = []
+    const visited = new Set()
+    let folderId = document.folderId
+    while (folderId && !visited.has(folderId)) {
+      visited.add(folderId)
+      const folder = libraryFolders.find((item) => item.id === folderId)
+      if (!folder) break
+      names.unshift(folder.name)
+      folderId = folder.parentId
+    }
+    return names.join('/') || '未分类'
+  }
+
   function renderImportExportSettings() {
+    const historyDocuments = getHistoryLibraryDocuments()
+    const historyRecordCount = historyDocuments.reduce((total, document) => total + (document.recordCount || 0), 0)
+    const selectedRecycleIdSet = new Set(historySelectedRecycleIds)
+
     return (
       <div className="settings-dialog module-settings-panel import-export-settings-panel">
         <div className="settings-dialog-body">
-          <nav className="settings-tabs" aria-label="导出数据分类">
+          <nav className="settings-tabs" aria-label="文献数据工具">
           <button
             type="button"
-            className={importExportTab === 'importExport' ? 'settings-tab active' : 'settings-tab'}
-            onClick={() => setImportExportTab('importExport')}
+            className={importExportTab === 'libraryRecords' ? 'settings-tab active' : 'settings-tab'}
+            onClick={() => setImportExportTab('libraryRecords')}
           >
-            导出数据
+            文献与记录
           </button>
           <button
             type="button"
-            className={importExportTab === 'markdown' ? 'settings-tab active' : 'settings-tab'}
-            onClick={() => setImportExportTab('markdown')}
+            className={importExportTab === 'backupRestore' ? 'settings-tab active' : 'settings-tab'}
+            onClick={() => setImportExportTab('backupRestore')}
           >
-            导出 Markdown
+            备份与恢复
           </button>
           <button
             type="button"
-            className={importExportTab === 'pdfReport' ? 'settings-tab active' : 'settings-tab'}
-            onClick={() => setImportExportTab('pdfReport')}
+            className={importExportTab === 'fileExport' ? 'settings-tab active' : 'settings-tab'}
+            onClick={() => setImportExportTab('fileExport')}
           >
-            导出 PDF
+            导出文件
           </button>
           </nav>
 
           <div className="settings-content">
             <section className="settings-page import-export-page">
 
-        {importExportTab === 'importExport' ? (
+        {importExportTab === 'libraryRecords' ? (
+          <section className="history-library-browser">
+            <aside className="history-library-tree">
+              <div className="history-library-tree-header">
+                <strong>文献分类</strong>
+                <small>{libraryLiteratures.length}</small>
+              </div>
+              <button
+                type="button"
+                className={historyLibraryNodeId === 'all' ? 'library-folder-button active' : 'library-folder-button'}
+                onClick={() => setHistoryLibraryNodeId('all')}
+              >
+                <span>全部文献</span>
+                <small>{libraryDocuments.length}</small>
+              </button>
+              <div className="history-library-folder-tree">
+                <div className="library-folder-tree-row history-mode" style={{ '--folder-depth': 0 }}>
+                  <span className="tree-chevron-spacer" />
+                  <button
+                    type="button"
+                    className={historyLibraryNodeId === 'unfiled' ? 'library-folder-button active' : 'library-folder-button'}
+                    onClick={() => setHistoryLibraryNodeId('unfiled')}
+                  >
+                    <span>未分类</span>
+                    <small>{libraryDocuments.filter((document) => !document.folderId).length}</small>
+                  </button>
+                </div>
+                {getLibraryFolderChildren(null).map((folder) => renderLibraryFolderTreeNode(folder, 0, 'history'))}
+              </div>
+              <div className="history-library-system-divider" />
+              <button
+                type="button"
+                className={historyLibraryNodeId === 'recycle' ? 'library-folder-button active recycle' : 'library-folder-button recycle'}
+                onClick={() => setHistoryLibraryNodeId('recycle')}
+              >
+                <span>回收箱</span>
+                <small>{recycledLibraryDocuments.length}</small>
+              </button>
+            </aside>
+
+            <div className="history-library-content">
+              <div className="history-library-toolbar">
+                <div>
+                  <strong>{historyLibraryNodeId === 'recycle' ? '回收箱' : historyLibraryNodeId === 'all' ? '全部文献' : getLibraryFolderName(historyLibraryNodeId)}</strong>
+                  <span>{historyDocuments.length} 篇 · {historyRecordCount} 条记录</span>
+                </div>
+                {!["all", "unfiled", "recycle"].includes(historyLibraryNodeId) ? (
+                  <label className="history-library-toggle">
+                    <input
+                      type="checkbox"
+                      checked={historyIncludeDescendants}
+                      onChange={(event) => setHistoryIncludeDescendants(event.target.checked)}
+                    />
+                    包含子文件夹
+                  </label>
+                ) : null}
+                <button type="button" className="settings-primary-button" onClick={openFileExportFromHistory}>
+                  导出
+                </button>
+              </div>
+
+              {historyLibraryNodeId === 'recycle' && historySelectedRecycleIds.length ? (
+                <div className="history-library-selection-bar">
+                  <span>已选 {historySelectedRecycleIds.length} 篇</span>
+                  <button type="button" className="settings-secondary-button" onClick={() => void restoreRecycledDocuments(historySelectedRecycleIds)}>
+                    恢复
+                  </button>
+                  <button type="button" className="settings-secondary-button" onClick={() => void permanentlyDeleteRecycledDocuments(historySelectedRecycleIds)}>
+                    永久删除
+                  </button>
+                </div>
+              ) : null}
+
+              <div className="history-library-document-list">
+                {historyDocuments.length ? historyDocuments.map((document) => (
+                  <article className={document.recordCount ? 'history-library-document' : 'history-library-document empty-records'} key={document.documentId}>
+                    {historyLibraryNodeId === 'recycle' ? (
+                      <input
+                        type="checkbox"
+                        checked={selectedRecycleIdSet.has(document.documentId)}
+                        onChange={() => setHistorySelectedRecycleIds((current) => (
+                          current.includes(document.documentId)
+                            ? current.filter((id) => id !== document.documentId)
+                            : [...current, document.documentId]
+                        ))}
+                        aria-label={`选择 ${document.displayName || document.fileName}`}
+                      />
+                    ) : null}
+                    <button type="button" className="history-library-document-main" onClick={() => setSelectedExportDetailDocumentId(document.documentId)}>
+                      <strong>{document.displayName || document.fileName}</strong>
+                      <span>{document.recordCount || 0} 条记录</span>
+                    </button>
+                    <span className="history-library-document-folder">
+                      {historyLibraryNodeId === 'recycle'
+                        ? `移入 ${formatHistoryTime(document.recycledAt)}`
+                        : getLibraryFolderName(document.folderId)}
+                    </span>
+                    {historyLibraryNodeId === 'recycle' ? (
+                      <div className="history-library-document-actions">
+                        <IconButton onClick={() => void restoreRecycledDocuments([document.documentId])} label="恢复到文献库" title="恢复">
+                          <RotateCcw size={15} />
+                        </IconButton>
+                        <button type="button" onClick={() => {
+                          setSelectedFileExportDocumentIds([document.documentId])
+                          setSelectedExportDetailDocumentId(document.documentId)
+                          setFileExportScope('selected')
+                          setImportExportTab('fileExport')
+                        }}>导出</button>
+                        <IconButton onClick={() => void permanentlyDeleteRecycledDocuments([document.documentId])} label="永久删除" title="永久删除">
+                          <Trash2 size={15} />
+                        </IconButton>
+                      </div>
+                    ) : null}
+                  </article>
+                )) : null}
+              </div>
+              {historyDocuments.some((document) => document.documentId === selectedExportDetailDocumentId)
+                ? renderExportDocumentDetail()
+                : null}
+            </div>
+          </section>
+        ) : null}
+
+        {importExportTab === 'backupRestore' ? (
           <>
             <section className="settings-glossary">
               <div className="settings-section-header">
-                <h3>默认导出位置</h3>
+                <h3>默认备份位置</h3>
                 <span>{exportDefaultDir || 'Downloads'}</span>
               </div>
               <div className="settings-inline-actions">
@@ -9573,191 +10191,405 @@ function App() {
 
             <section className="settings-glossary">
               <div className="settings-section-header">
-                <h3>数据备份</h3>
+                <h3>备份范围</h3>
                 <span>{selectedExportDocumentIds.length} / {exportableDocuments.length} 篇</span>
               </div>
-              <p className="markdown-export-hint">
-                完整备份包含翻译历史、笔记、批注和书签；导入多个备份文件时会自动合并并跳过重复数据。
-              </p>
+              <label className="settings-field backup-name-field">
+                <span>备份名称</span>
+                <input
+                  type="text"
+                  defaultValue={batchExportNameRef.current}
+                  onInput={(event) => {
+                    batchExportNameRef.current = event.currentTarget.value
+                  }}
+                  placeholder="Paper Reader 备份"
+                />
+              </label>
 
-              <div className="export-options-grid">
-                <label className="settings-field">
-                  <span>数据内容</span>
-                  <select value={batchDataExportType} onChange={(event) => setBatchDataExportType(event.target.value)}>
-                    {DATA_EXPORT_TYPE_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="settings-field">
-                  <span>导出方式</span>
-                  <select value={batchExportMode} onChange={(event) => setBatchExportMode(event.target.value)}>
-                    <option value="separate">每篇一个文件</option>
-                    <option value="merged">合并为一个文件</option>
-                  </select>
-                </label>
-                <label className="settings-field">
-                  <span>导出名称</span>
-                  <input
-                    type="text"
-                    value={batchExportName}
-                    onChange={(event) => setBatchExportName(event.target.value)}
-                    placeholder={batchExportMode === 'merged' ? '未命名合集' : '仅合并导出时需要填写'}
-                    disabled={batchExportMode !== 'merged'}
-                  />
-                </label>
-              </div>
-
-              {renderExportDocumentList({
+              {renderFileExportFolderTree({
                 selectedIds: selectedExportDocumentIds,
                 onToggle: toggleExportDocument,
+                includeRecycle: true,
               })}
-              {renderExportDocumentDetail()}
 
-              <div className="settings-inline-actions">
-                <button type="button" className="settings-primary-button" onClick={batchExportPaperReaderData}>
-                  开始导出
+              <div className="settings-inline-actions backup-actions">
+                <button type="button" className="settings-primary-button" onClick={() => void backupPaperReaderData('full')}>
+                  完整备份
+                </button>
+                <button type="button" className="settings-secondary-button" onClick={() => void backupPaperReaderData('selected')} disabled={!selectedExportDocumentIds.length}>
+                  选择文献备份
                 </button>
               </div>
             </section>
 
             <section className="settings-glossary">
               <div className="settings-section-header">
-                <h3>批量导入并合并</h3>
+                <h3>恢复</h3>
               </div>
               <div className="settings-inline-actions">
                 <button type="button" className="settings-primary-button" onClick={batchImportPaperReaderData}>
-                  选择导入文件
+                  导入备份
                 </button>
               </div>
             </section>
           </>
         ) : null}
 
-        {importExportTab === 'markdown' ? (
-          <>
-            <section className="settings-glossary markdown-export-panel">
-              <div className="settings-section-header">
-                <h3>导出 Markdown</h3>
-                <span>{selectedMarkdownDocumentIds.length} / {exportableDocuments.length} 篇</span>
+        {importExportTab === 'fileExport' ? (
+          <section className="file-export-workspace">
+            <section className="file-export-section">
+              <h3>导出范围</h3>
+              <div className="file-export-scope-grid">
+                {[
+                  ['current', '当前文献'],
+                  ['selected', '选中文献'],
+                  ['folder', '当前文件夹'],
+                  ['folder-tree', '当前文件夹及子文件夹'],
+                  ['all', '全部文献'],
+                  ['recycle', '回收箱'],
+                ].map(([value, label]) => (
+                  <label key={value} className={fileExportScope === value ? 'file-export-choice active' : 'file-export-choice'}>
+                    <input type="radio" name="file-export-scope" value={value} checked={fileExportScope === value} onChange={() => setFileExportScope(value)} />
+                    {label}
+                  </label>
+                ))}
               </div>
-              <p className="markdown-export-hint">
-                Markdown 用于可编辑整理；可导出全部或单独导出笔记、翻译历史、批注，批注只包含高亮内容。
-              </p>
-              {renderContentExportOptions(markdownExportOptions, setMarkdownExportOptions, isMarkdownExporting)}
+              {['folder', 'folder-tree'].includes(fileExportScope) ? renderFileExportFolderTree({
+                showDocuments: false,
+                selectFolder: true,
+              }) : null}
+              {fileExportScope === 'selected' ? (
+                renderFileExportFolderTree({
+                  selectedIds: selectedFileExportDocumentIds,
+                  onToggle: toggleFileExportDocument,
+                  disabled: isFileExporting,
+                  includeRecycle: true,
+                })
+              ) : null}
+            </section>
 
-              {renderExportDocumentList({
-                selectedIds: selectedMarkdownDocumentIds,
-                onToggle: toggleMarkdownDocument,
-                className: 'markdown-document-list',
-                disabled: isMarkdownExporting,
-              })}
-              {renderExportDocumentDetail()}
+            <section className="file-export-section">
+              <h3>导出内容</h3>
+              {renderContentExportOptions(fileExportContents, setFileExportContents, isFileExporting)}
+            </section>
 
-              <div className="settings-inline-actions markdown-export-actions">
-                <button
-                  type="button"
-                  className="settings-secondary-button"
-                  onClick={exportCurrentPdfMarkdown}
-                  disabled={isMarkdownExporting || !currentDocument?.documentId || !hasSelectedContentExportOption(markdownExportOptions)}
-                >
-                  导出当前 PDF
-                </button>
-                <button
-                  type="button"
-                  className="settings-primary-button"
-                  onClick={exportMergedMarkdown}
-                  disabled={isMarkdownExporting || !selectedMarkdownDocumentIds.length || !hasSelectedContentExportOption(markdownExportOptions)}
-                >
-                  选中文件合并导出
-                </button>
-                <button
-                  type="button"
-                  className="settings-secondary-button"
-                  onClick={exportBatchMarkdownFiles}
-                  disabled={isMarkdownExporting || !selectedMarkdownDocumentIds.length || !hasSelectedContentExportOption(markdownExportOptions)}
-                >
-                  选中文件批量导出
-                </button>
+            <section className="file-export-section file-export-two-column">
+              <div>
+                <h3>输出格式</h3>
+                <div className="segmented-control">
+                  <button type="button" className={fileExportFormat === 'markdown' ? 'active' : ''} onClick={() => setFileExportFormat('markdown')}>Markdown</button>
+                  <button type="button" className={fileExportFormat === 'pdf' ? 'active' : ''} onClick={() => setFileExportFormat('pdf')}>PDF</button>
+                </div>
+              </div>
+              <div>
+                <h3>导出方式</h3>
+                <select value={fileExportMethod} onChange={(event) => setFileExportMethod(event.target.value)}>
+                  <option value="merged">合并导出</option>
+                  <option value="batch">批量导出</option>
+                  <option value="folder">按文件夹导出</option>
+                </select>
               </div>
             </section>
-          </>
-        ) : null}
 
-        {importExportTab === 'pdfReport' ? (
-          <>
-            <section className="settings-glossary report-export-panel">
-              <div className="settings-section-header">
-                <h3>导出 PDF 报告</h3>
-                <span>{selectedPdfReportDocumentIds.length} / {exportableDocuments.length} 篇</span>
-              </div>
-              <p className="report-export-hint">
-                PDF 用于阅读整理；可导出全部或单独导出笔记、翻译历史、批注，批注只包含高亮内容，不会写回原始 PDF。
-              </p>
-              {renderContentExportOptions(pdfReportExportOptions, setPdfReportExportOptions, isPdfReportExporting)}
+            <section className="file-export-section">
+              <h3>{fileExportFormat === 'markdown' ? 'Markdown 设置' : 'PDF 设置'}</h3>
+              {fileExportFormat === 'markdown' ? (
+                <div className="file-export-option-row">
+                  <label><input type="checkbox" checked={markdownFormatOptions.includeOriginal} onChange={(event) => setMarkdownFormatOptions((current) => ({ ...current, includeOriginal: event.target.checked }))} />包含原文</label>
+                  <label><input type="checkbox" checked={markdownFormatOptions.generateToc} onChange={(event) => setMarkdownFormatOptions((current) => ({ ...current, generateToc: event.target.checked }))} />生成目录</label>
+                  <label><input type="checkbox" checked={markdownFormatOptions.groupByType} onChange={(event) => setMarkdownFormatOptions((current) => ({ ...current, groupByType: event.target.checked }))} />按记录类型分节</label>
+                </div>
+              ) : (
+                <div className="file-export-format-grid">
+                  <label><span>页面尺寸</span><select value={pdfFormatOptions.pageSize} onChange={(event) => setPdfFormatOptions((current) => ({ ...current, pageSize: event.target.value }))}><option value="A4">A4</option><option value="Letter">Letter</option></select></label>
+                  <label><span>页边距</span><select value={pdfFormatOptions.pageMargin} onChange={(event) => setPdfFormatOptions((current) => ({ ...current, pageMargin: event.target.value }))}><option value="compact">紧凑</option><option value="normal">标准</option><option value="wide">宽</option></select></label>
+                  <label><input type="checkbox" checked={pdfFormatOptions.showPageNumbers} onChange={(event) => setPdfFormatOptions((current) => ({ ...current, showPageNumbers: event.target.checked }))} />显示页码</label>
+                  <label><input type="checkbox" checked={pdfFormatOptions.includeOriginal} onChange={(event) => setPdfFormatOptions((current) => ({ ...current, includeOriginal: event.target.checked }))} />包含原文</label>
+                  <label><input type="checkbox" checked={pdfFormatOptions.groupByType} onChange={(event) => setPdfFormatOptions((current) => ({ ...current, groupByType: event.target.checked }))} />按记录类型分节</label>
+                </div>
+              )}
+            </section>
 
-              {renderExportDocumentList({
-                selectedIds: selectedPdfReportDocumentIds,
-                onToggle: togglePdfReportDocument,
-                className: 'report-document-list',
-                disabled: isPdfReportExporting,
-              })}
-              {renderExportDocumentDetail()}
-
-              <div className="settings-inline-actions report-export-actions">
-                <button
-                  type="button"
-                  className="settings-secondary-button"
-                  onClick={exportCurrentPdfReport}
-                  disabled={isPdfReportExporting || !currentDocument?.documentId || !hasSelectedContentExportOption(pdfReportExportOptions)}
-                >
-                  导出当前 PDF
-                </button>
-                <button
-                  type="button"
-                  className="settings-primary-button"
-                  onClick={exportMergedPdfReport}
-                  disabled={isPdfReportExporting || !selectedPdfReportDocumentIds.length || !hasSelectedContentExportOption(pdfReportExportOptions)}
-                >
-                  选中文件合并导出
-                </button>
-                <button
-                  type="button"
-                  className="settings-secondary-button"
-                  onClick={exportBatchPdfReports}
-                  disabled={isPdfReportExporting || !selectedPdfReportDocumentIds.length || !hasSelectedContentExportOption(pdfReportExportOptions)}
-                >
-                  选中文件批量导出
-                </button>
+            <section className="file-export-section">
+              <h3>保存设置</h3>
+              <div className="file-export-save-grid">
+                <label className="settings-field">
+                  <span>导出名称</span>
+                  <input
+                    type="text"
+                    defaultValue={batchExportNameRef.current}
+                    onInput={(event) => {
+                      batchExportNameRef.current = event.currentTarget.value
+                    }}
+                    placeholder="未命名导出"
+                  />
+                </label>
+                <div className="file-export-location"><span>{exportDefaultDir || 'Downloads'}</span><button type="button" className="settings-secondary-button" onClick={selectExportDefaultDir}>选择文件夹</button><button type="button" className="settings-secondary-button" onClick={resetExportDefaultDir}>恢复默认</button></div>
               </div>
             </section>
-          </>
+
+            <section className="file-export-section file-export-preview">
+              <div className="settings-section-header"><h3>预览</h3><span>{getFileExportDocumentIds().length} 篇</span></div>
+              {getFileExportDocumentIds().includes(selectedExportDetailDocumentId) ? renderExportDocumentDetail() : null}
+            </section>
+
+            <div className="file-export-submit">
+              <button type="button" className="settings-primary-button" onClick={() => void exportFiles()} disabled={isFileExporting || !getFileExportDocumentIds().length || !hasSelectedContentExportOption(fileExportContents)}>
+                {isFileExporting ? '导出中...' : '导出'}
+              </button>
+            </div>
+          </section>
         ) : null}
 
         {exportStatus ? <p className="settings-status">{exportStatus}</p> : null}
+        {exportFailures.length ? (
+          <details className="export-failure-list">
+            <summary>失败列表</summary>
+            {exportFailures.map((failure, index) => (
+              <p key={`${failure.fileName || 'file'}-${index}`}>{failure.fileName || '未命名文件'}：{failure.error || '导出失败'}</p>
+            ))}
+          </details>
+        ) : null}
             </section>
           </div>
         </div>
+        {permanentDeleteDialogIds.length ? (
+          <div className="note-dialog-overlay" role="presentation">
+            <section className="note-dialog library-delete-dialog" aria-label="永久删除" onClick={(event) => event.stopPropagation()}>
+              <div className="diagram-dialog-header">
+                <h2>永久删除</h2>
+              </div>
+              <p>将删除该文献及全部历史记录，此操作无法撤销。</p>
+              <div className="settings-actions">
+                <button type="button" className="settings-secondary-button" onClick={() => setPermanentDeleteDialogIds([])}>取消</button>
+                <button type="button" className="settings-primary-button" onClick={() => void confirmPermanentlyDeleteRecycledDocuments()}>永久删除</button>
+              </div>
+            </section>
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
+  function renderLibraryFolderTreeNode(folder, depth = 0, mode = 'library') {
+    const children = getLibraryFolderChildren(folder.id)
+    const isExpanded = folder.expanded !== false
+    const isHistoryMode = mode === 'history'
+    const isSelected = isHistoryMode ? historyLibraryNodeId === folder.id : selectedLibraryFolderId === folder.id
+    const documentCount = getLibraryFolderDocumentCount(folder.id, true)
+    const recordCount = getLibraryFolderRecordCount(folder.id, true)
+    const isDragging = draggedLibraryFolderId === folder.id
+    const dropPlacement = libraryFolderDropTarget?.folderId === folder.id
+      ? libraryFolderDropTarget.placement
+      : ''
+
+    return (
+      <div className="library-folder-tree-branch" key={`${mode}-${folder.id}`}>
+        <div
+          className={isHistoryMode
+            ? 'library-folder-tree-row history-mode'
+            : `library-folder-tree-row${isSelected ? ' active' : ''}${isDragging ? ' dragging' : ''}${dropPlacement ? ` drop-${dropPlacement}` : ''}`}
+          style={{ '--folder-depth': depth }}
+          onContextMenu={isHistoryMode ? undefined : (event) => openLibraryFolderContextMenu(event, folder)}
+          draggable={!isHistoryMode}
+          onDragStart={isHistoryMode ? undefined : (event) => beginLibraryFolderDrag(event, folder)}
+          onDragOver={isHistoryMode ? undefined : (event) => updateLibraryFolderDragTarget(event, folder)}
+          onDrop={isHistoryMode ? undefined : (event) => dropLibraryFolder(event, folder)}
+          onDragEnd={isHistoryMode ? undefined : endLibraryFolderDrag}
+        >
+          {children.length ? (
+            <TreeChevron
+              expanded={isExpanded}
+              onToggle={() => void toggleLibraryFolderExpanded(folder)}
+            />
+          ) : <span className="tree-chevron-spacer" />}
+          {isHistoryMode ? (
+            <button
+              type="button"
+              className={isSelected ? 'library-folder-button active' : 'library-folder-button'}
+              onClick={() => setHistoryLibraryNodeId(folder.id)}
+            >
+              <span>{folder.name}</span>
+              <small>{`${documentCount} · ${recordCount}`}</small>
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                className={isSelected ? 'library-folder-main active' : 'library-folder-main'}
+                onClick={() => setSelectedLibraryFolderId(folder.id)}
+              >
+                <span>{folder.name}</span>
+              </button>
+              <IconButton
+                className="library-folder-create-child"
+                onClick={(event) => createLibrarySubfolder(event, folder)}
+                onDragStart={(event) => event.preventDefault()}
+                label="新建子文件夹"
+                title="新建子文件夹"
+              >
+                +
+              </IconButton>
+              <button
+                type="button"
+                className="library-folder-count"
+                onClick={() => setSelectedLibraryFolderId(folder.id)}
+                aria-label={`${folder.name}，${documentCount} 篇文献`}
+              >
+                {documentCount}
+              </button>
+            </>
+          )}
+        </div>
+        {isExpanded ? children.map((child) => renderLibraryFolderTreeNode(child, depth + 1, mode)) : null}
+      </div>
+    )
+  }
+
+  function renderLibraryFolderMoveTarget(folder, depth = 0) {
+    const movingFolder = libraryFolders.find((item) => item.id === libraryFolderMoveDialog?.folderId)
+    if (!movingFolder) return null
+
+    const invalidTargets = getLibraryDescendantFolderIds(movingFolder.id)
+    const isDisabled = invalidTargets.has(folder.id) || folder.id === movingFolder.parentId
+    const children = getLibraryFolderChildren(folder.id)
+    const isExpanded = libraryFolderMoveExpandedIds.has(folder.id)
+    const isSelected = libraryFolderMoveDialog?.hasTarget && libraryFolderMoveDialog.targetParentId === folder.id
+
+    return (
+      <div className="library-move-tree-branch" key={`folder-move-${folder.id}`}>
+        <div className="library-folder-move-tree-row" style={{ '--folder-depth': depth }}>
+          {children.length ? (
+            <TreeChevron
+              expanded={isExpanded}
+              onToggle={() => toggleLibraryFolderMoveExpanded(folder.id)}
+            />
+          ) : <span className="tree-chevron-spacer" />}
+          <button
+            type="button"
+            className={isSelected ? 'library-folder-move-node active' : 'library-folder-move-node'}
+            disabled={isDisabled}
+            onClick={() => selectLibraryFolderMoveTarget(folder.id)}
+          >
+            <span>{folder.name}</span>
+          </button>
+        </div>
+        {isExpanded ? children.map((child) => renderLibraryFolderMoveTarget(child, depth + 1)) : null}
+      </div>
+    )
+  }
+
+  function renderLibraryFolderMoveRoot() {
+    const movingFolder = libraryFolders.find((folder) => folder.id === libraryFolderMoveDialog?.folderId)
+    const rootDisabled = !movingFolder || movingFolder.parentId === null
+    const isSelected = libraryFolderMoveDialog?.hasTarget && libraryFolderMoveDialog.targetParentId === null
+
+    return (
+      <div className="library-move-tree-branch">
+        <div className="library-folder-move-tree-row" style={{ '--folder-depth': 0 }}>
+          <TreeChevron
+            expanded={libraryFolderMoveRootExpanded}
+            onToggle={() => setLibraryFolderMoveRootExpanded((expanded) => !expanded)}
+          />
+          <button
+            type="button"
+            className={isSelected ? 'library-folder-move-node active' : 'library-folder-move-node'}
+            disabled={rootDisabled}
+            onClick={() => selectLibraryFolderMoveTarget(null)}
+          >
+            <span>全部文献</span>
+          </button>
+        </div>
+        {libraryFolderMoveRootExpanded ? (
+          <>
+            <div className="library-folder-move-tree-row system" style={{ '--folder-depth': 1 }}>
+              <span className="tree-chevron-spacer" />
+              <button type="button" className="library-folder-move-node" disabled>
+                <span>未分类</span>
+              </button>
+            </div>
+            {getLibraryFolderChildren(null).map((folder) => renderLibraryFolderMoveTarget(folder, 1))}
+          </>
+        ) : null}
+      </div>
+    )
+  }
+
+  function renderMoveFolderTree(folder, depth = 0) {
+    const children = getLibraryFolderChildren(folder.id)
+    const isExpanded = libraryMoveExpandedIds.has(folder.id)
+    const isSelectedFolder = libraryMoveDialog?.hasTarget && folder.id === libraryMoveDialog.targetFolderId
+
+    return (
+      <div className="library-move-tree-branch" key={`move-${folder.id}`}>
+        <div className="library-folder-move-tree-row" style={{ '--folder-depth': depth }}>
+          {children.length ? (
+            <TreeChevron
+              expanded={isExpanded}
+              onToggle={() => toggleLibraryMoveExpanded(folder.id)}
+            />
+          ) : <span className="tree-chevron-spacer" />}
+          <button
+            type="button"
+            className={isSelectedFolder ? 'library-folder-move-node active' : 'library-folder-move-node'}
+            onClick={() => selectLibraryMoveTarget(folder.id)}
+          >
+            <span>{folder.name}</span>
+          </button>
+        </div>
+        {isExpanded ? children.map((child) => renderMoveFolderTree(child, depth + 1)) : null}
+      </div>
+    )
+  }
+
+  function renderLibraryDocumentMoveRoot() {
+    const isUnfiledSelected = libraryMoveDialog?.hasTarget && !libraryMoveDialog.targetFolderId
+
+    return (
+      <div className="library-move-tree-branch">
+        <div className="library-folder-move-tree-row system" style={{ '--folder-depth': 0 }}>
+          <TreeChevron
+            expanded={libraryMoveRootExpanded}
+            onToggle={() => setLibraryMoveRootExpanded((expanded) => !expanded)}
+          />
+          <button type="button" className="library-folder-move-node" disabled>
+            <span>全部文献</span>
+          </button>
+        </div>
+        {libraryMoveRootExpanded ? (
+          <>
+            <div className="library-folder-move-tree-row" style={{ '--folder-depth': 1 }}>
+              <span className="tree-chevron-spacer" />
+              <button
+                type="button"
+                className={isUnfiledSelected ? 'library-folder-move-node active' : 'library-folder-move-node'}
+                onClick={() => selectLibraryMoveTarget('')}
+              >
+                <span>未分类</span>
+              </button>
+            </div>
+            {getLibraryFolderChildren(null).map((folder) => renderMoveFolderTree(folder, 1))}
+          </>
+        ) : null}
       </div>
     )
   }
 
   function renderLibraryPage() {
     const visibleDocuments = getVisibleLibraryDocuments()
-    const folderCounts = libraryDocuments.reduce((counts, document) => {
-      const key = document.folderId || 'unfiled'
-      counts[key] = (counts[key] || 0) + 1
-      return counts
-    }, {})
+    const unfiledCount = libraryDocuments.filter((document) => !document.folderId).length
+    const contextFolder = libraryFolderContextMenu
+      ? libraryFolders.find((folder) => folder.id === libraryFolderContextMenu.folderId)
+      : null
 
     return (
       <section className="library-page">
         <aside className="library-folder-panel">
           <div className="library-folder-header">
             <strong>项目文件夹</strong>
-            <button type="button" className="settings-secondary-button" onClick={openLibraryFolderDialog}>
-              新建
-            </button>
+            <IconButton onClick={() => openLibraryFolderDialog(null, null)} label="新建文件夹" title="新建文件夹">
+              <FolderPlus size={16} />
+            </IconButton>
           </div>
           <button
             type="button"
@@ -9767,26 +10599,101 @@ function App() {
             <span>全部文献</span>
             <small>{libraryDocuments.length}</small>
           </button>
-          <button
-            type="button"
-            className={selectedLibraryFolderId === 'unfiled' ? 'library-folder-button active' : 'library-folder-button'}
-            onClick={() => setSelectedLibraryFolderId('unfiled')}
+          <div className="library-folder-tree">
+            <div className={`library-folder-tree-row system-folder-row${selectedLibraryFolderId === 'unfiled' ? ' active' : ''}`} style={{ '--folder-depth': 0 }}>
+              <span className="tree-chevron-spacer" />
+              <button
+                type="button"
+                className={selectedLibraryFolderId === 'unfiled' ? 'library-folder-main active' : 'library-folder-main'}
+                onClick={() => setSelectedLibraryFolderId('unfiled')}
+              >
+                <span>未分类</span>
+              </button>
+              <span className="library-folder-system-spacer" />
+              <button
+                type="button"
+                className="library-folder-count"
+                onClick={() => setSelectedLibraryFolderId('unfiled')}
+                aria-label={`未分类：${unfiledCount} 篇文献`}
+              >
+                {unfiledCount}
+              </button>
+            </div>
+            {getLibraryFolderChildren(null).map((folder) => renderLibraryFolderTreeNode(folder))}
+          </div>
+        </aside>
+
+        {libraryFolderContextMenu && contextFolder ? (
+          <div
+            className="library-context-menu library-folder-context-menu"
+            style={{ left: `${libraryFolderContextMenu.x}px`, top: `${libraryFolderContextMenu.y}px` }}
+            role="menu"
+            aria-label={`${contextFolder.name} 文件夹操作`}
+            onPointerDown={(event) => event.stopPropagation()}
           >
-            <span>未分类</span>
-            <small>{folderCounts.unfiled || 0}</small>
-          </button>
-          {libraryFolders.map((folder) => (
             <button
               type="button"
-              key={folder.id}
-              className={selectedLibraryFolderId === folder.id ? 'library-folder-button active' : 'library-folder-button'}
-              onClick={() => setSelectedLibraryFolderId(folder.id)}
+              role="menuitem"
+              onClick={() => {
+                setLibraryFolderContextMenu(null)
+                openLibraryFolderDialog(contextFolder.parentId, contextFolder)
+              }}
             >
-              <span>{folder.name}</span>
-              <small>{folderCounts[folder.id] || 0}</small>
+              重命名
             </button>
-          ))}
-        </aside>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                openLibraryFolderMoveDialog(contextFolder, libraryFolderContextMenu)
+              }}
+            >
+              移动至
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="danger"
+              onClick={() => {
+                setLibraryFolderContextMenu(null)
+                void deleteLibraryFolder(contextFolder)
+              }}
+            >
+              删除
+            </button>
+          </div>
+        ) : null}
+
+        {libraryFolderMoveDialog ? (
+          <div
+            className="library-move-popover library-folder-move-popover"
+            style={{ left: `${libraryFolderMoveDialog.x}px`, top: `${libraryFolderMoveDialog.y}px` }}
+            role="dialog"
+            aria-label="移动文件夹"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <div className="library-move-header">
+              <strong>移动至</strong>
+              <button type="button" onClick={() => setLibraryFolderMoveDialog(null)}>关闭</button>
+            </div>
+            <div className="library-move-folder-list">
+              {renderLibraryFolderMoveRoot()}
+            </div>
+            <div className="library-move-actions">
+              <button type="button" className="settings-secondary-button" onClick={() => setLibraryFolderMoveDialog(null)}>
+                取消
+              </button>
+              <button
+                type="button"
+                className="settings-primary-button"
+                disabled={!libraryFolderMoveDialog.hasTarget}
+                onClick={confirmLibraryFolderMove}
+              >
+                移动
+              </button>
+            </div>
+          </div>
+        ) : null}
 
         <section className="library-main-panel">
           <div className="library-toolbar">
@@ -9827,7 +10734,7 @@ function App() {
                 <option value="notes">笔记数量</option>
               </select>
             </label>
-            <button type="button" className="settings-primary-button" onClick={importLibraryDocuments}>
+            <button type="button" className="settings-primary-button library-import-button" onClick={importLibraryDocuments}>
               导入文献
             </button>
           </div>
@@ -9855,7 +10762,7 @@ function App() {
           {libraryStatus ? <p className="settings-status">{libraryStatus}</p> : null}
 
           <div className="library-document-list">
-            {visibleDocuments.length ? visibleDocuments.map((document) => (
+            {visibleDocuments.map((document) => (
               <article
                 key={document.documentId}
                 className="library-document-row"
@@ -9868,7 +10775,7 @@ function App() {
                   aria-label={`选择 ${document.fileName}`}
                 />
                 <button type="button" className="library-document-main" onClick={() => openLibraryDocument(document)}>
-                  <strong>{document.fileName}</strong>
+                  <strong>{document.displayName || document.fileName}</strong>
                   <div className="library-progress">
                     <i style={{ width: `${getLibraryProgressPercent(document)}%` }} />
                   </div>
@@ -9879,9 +10786,7 @@ function App() {
                   <span>阅读 {getLibraryProgress(document)}</span>
                 </div>
               </article>
-            )) : (
-              <p className="history-empty">暂无文献</p>
-            )}
+            ))}
           </div>
 
           {libraryContextMenu ? (
@@ -9899,6 +10804,14 @@ function App() {
                 )}
               >
                 移动到
+              </button>
+              <button
+                type="button"
+                onClick={() => void renameLibraryDocument(
+                  libraryDocuments.find((document) => document.documentId === libraryContextMenu.documentId),
+                )}
+              >
+                重命名
               </button>
               <button type="button" onClick={() => deleteLibraryDocuments([libraryContextMenu.documentId])}>
                 删除文献
@@ -9919,20 +10832,7 @@ function App() {
                 </button>
               </div>
               <div className="library-move-folder-list">
-                {[{ id: '', name: '未分类' }, ...libraryFolders].map((folder) => {
-                  const isSelectedFolder = folder.id === libraryMoveDialog.targetFolderId
-
-                  return (
-                    <button
-                      type="button"
-                      key={folder.id || 'unfiled'}
-                      className={isSelectedFolder ? 'library-move-folder active' : 'library-move-folder'}
-                      onClick={() => setLibraryMoveDialog((dialog) => ({ ...dialog, targetFolderId: folder.id }))}
-                    >
-                      <span>{folder.name}</span>
-                    </button>
-                  )
-                })}
+                {renderLibraryDocumentMoveRoot()}
               </div>
               <div className="library-move-actions">
                 <button type="button" className="settings-secondary-button" onClick={() => setLibraryMoveDialog(null)}>
@@ -9941,7 +10841,8 @@ function App() {
                 <button
                   type="button"
                   className="settings-primary-button"
-                  onClick={() => moveLibraryDocuments(libraryMoveDialog.documentIds, libraryMoveDialog.targetFolderId)}
+                  disabled={!libraryMoveDialog.hasTarget}
+                  onClick={confirmLibraryDocumentMove}
                 >
                   确认
                 </button>
@@ -9954,13 +10855,13 @@ function App() {
           <div className="note-dialog-overlay" role="presentation">
             <section
               className="note-dialog library-folder-dialog"
-              aria-label="新建文件夹"
+              aria-label={libraryFolderEditingId ? '重命名文件夹' : libraryFolderParentId ? '新建子文件夹' : '新建文件夹'}
               onPointerDown={(event) => event.stopPropagation()}
               onMouseDown={(event) => event.stopPropagation()}
               onClick={(event) => event.stopPropagation()}
             >
               <div className="diagram-dialog-header">
-                <h2>新建文件夹</h2>
+                <h2>{libraryFolderEditingId ? '重命名文件夹' : libraryFolderParentId ? '新建子文件夹' : '新建文件夹'}</h2>
                 <button type="button" onClick={closeLibraryFolderDialog}>
                   取消
                 </button>
@@ -9998,6 +10899,22 @@ function App() {
             </section>
           </div>
         ) : null}
+
+        {libraryDeleteDialog ? (
+          <div className="note-dialog-overlay" role="presentation">
+            <section className="note-dialog library-delete-dialog" aria-label="删除文献" onClick={(event) => event.stopPropagation()}>
+              <div className="diagram-dialog-header">
+                <h2>删除文献</h2>
+              </div>
+              <div className="settings-actions library-delete-actions">
+                <button type="button" className="settings-secondary-button" onClick={() => setLibraryDeleteDialog(null)}>取消</button>
+                <button type="button" className="settings-secondary-button" onClick={() => void confirmDeleteLibraryDocuments('recycle')}>仅移出文献库</button>
+                <button type="button" className="settings-primary-button" onClick={() => void confirmDeleteLibraryDocuments('permanent')}>删除文献及记录</button>
+              </div>
+            </section>
+          </div>
+        ) : null}
+
       </section>
     )
   }
@@ -10202,10 +11119,6 @@ function App() {
         setIsOcrMenuOpen(false)
       }
 
-      window.setTimeout(() => {
-        syncPageWidthRef.current?.()
-      }, 80)
-
       return nextCollapsed
     })
   }
@@ -10214,58 +11127,68 @@ function App() {
     <main className={sidebarCollapsed ? 'app sidebar-collapsed' : 'app'} ref={appRef}>
       <aside className="module-sidebar" aria-label="主模块">
         <div className="sidebar-head">
-          <div className="sidebar-brand" aria-hidden="true">
+          <div className="sidebar-brand">
             <img className="sidebar-brand-mark" src={APP_ICON_SRC} alt="" draggable="false" />
+            <span className="sidebar-brand-copy">
+              <strong>Paper Reader</strong>
+              <small>RESEARCH DESK</small>
+            </span>
           </div>
-          <button
-            type="button"
+          <IconButton
             className="module-sidebar-toggle"
             onClick={toggleSidebarCollapsed}
-            aria-label={sidebarCollapsed ? '展开左侧栏' : '折叠左侧栏'}
+            label={sidebarCollapsed ? '展开左侧栏' : '折叠左侧栏'}
             title={sidebarCollapsed ? '展开左侧栏' : '折叠左侧栏'}
           >
-            {sidebarCollapsed ? '›' : '‹'}
-          </button>
+            {sidebarCollapsed
+              ? <PanelLeftOpen size={17} strokeWidth={1.8} />
+              : <PanelLeftClose size={17} strokeWidth={1.8} />}
+          </IconButton>
         </div>
         <nav className="module-nav-list" aria-label="页面模块">
-          {MODULE_NAV_ITEMS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={activeModule === item.id ? 'module-nav-button active' : 'module-nav-button'}
-              onClick={() => switchModule(item.id)}
-              title={item.label}
-              aria-current={activeModule === item.id ? 'page' : undefined}
-            >
-              <span className="module-nav-icon" aria-hidden="true">{item.icon}</span>
-              <span className="module-nav-label">{item.label}</span>
-            </button>
-          ))}
+          {MODULE_NAV_ITEMS.map((item) => {
+            const ItemIcon = item.icon
+
+            return (
+              <button
+                key={item.id}
+                type="button"
+                className={activeModule === item.id ? 'module-nav-button active' : 'module-nav-button'}
+                onClick={() => switchModule(item.id)}
+                title={item.label}
+                aria-label={item.label}
+                aria-current={activeModule === item.id ? 'page' : undefined}
+              >
+                <span className="module-nav-icon" aria-hidden="true">
+                  <ItemIcon size={19} strokeWidth={1.75} />
+                </span>
+                <span className="module-nav-label">{item.label}</span>
+              </button>
+            )
+          })}
         </nav>
         {!tocDrawerOpen ? (
-          <button
-            type="button"
+          <IconButton
             className="toc-edge-button"
             onClick={toggleTocPanel}
-            aria-label="目录"
+            label="目录"
             title="目录"
           >
-            ›
-          </button>
+            <ListTree size={15} strokeWidth={1.8} />
+          </IconButton>
         ) : null}
       </aside>
 
       {tocDrawerOpen ? (
         <aside className="toc-drawer-panel" aria-label="目录面板">
-          <button
-            type="button"
+          <IconButton
             className="toc-edge-button toc-drawer-edge-button active"
             onClick={toggleTocPanel}
-            aria-label="收起目录"
+            label="收起目录"
             title="目录"
           >
-            ‹
-          </button>
+            <ChevronLeft size={15} strokeWidth={1.8} />
+          </IconButton>
           {renderTocPanel()}
         </aside>
       ) : null}
@@ -10281,18 +11204,26 @@ function App() {
           aria-hidden={activeModule !== 'reader'}
         >
       {toolbarCollapsed ? (
-        <button
-          type="button"
+        <IconButton
           className="toolbar-collapse-toggle collapsed"
           onClick={toggleToolbarCollapsed}
-          aria-label="展开工具栏"
+          label="展开工具栏"
           title="展开工具栏"
-        />
+        >
+          <ChevronDown size={14} strokeWidth={2} />
+        </IconButton>
       ) : null}
       <header className={toolbarCollapsed ? 'toolbar toolbar-collapsed' : 'toolbar'}>
         <section className="toolbar-group toolbar-left" aria-label="文件">
-          <button type="button" className="upload-button" onClick={handleOpenPdfClick}>
-            {UI.choosePdf}
+          <button
+            type="button"
+            className="upload-button"
+            onClick={handleOpenPdfClick}
+            aria-label={UI.choosePdf}
+            title={UI.choosePdf}
+          >
+            <FilePlus2 size={17} strokeWidth={1.9} aria-hidden="true" />
+            <span>{UI.choosePdf}</span>
           </button>
           <input
             ref={fallbackFileInputRef}
@@ -10306,18 +11237,24 @@ function App() {
             type="button"
             className={isRecentOpen ? 'secondary-toolbar-button active' : 'secondary-toolbar-button'}
             onClick={() => setIsRecentOpen((isOpen) => !isOpen)}
+            aria-label="最近打开"
+            title="最近打开"
           >
-            最近打开
+            <History size={16} strokeWidth={1.8} aria-hidden="true" />
+            <span>最近打开</span>
           </button>
           <div className="annotation-menu-wrap">
             <button
               ref={annotationButtonRef}
               type="button"
-              className={isAnnotationToolbarOpen || annotationColor ? 'ocr-button active' : 'ocr-button'}
+              className={isAnnotationToolbarOpen || annotationColor ? 'ocr-button annotation-toolbar-trigger active' : 'ocr-button annotation-toolbar-trigger'}
               onClick={() => setIsAnnotationToolbarOpen((isOpen) => !isOpen)}
               disabled={!pdfUrl}
+              aria-label="批注"
+              title="批注"
             >
-              批注
+              <Highlighter size={16} strokeWidth={1.8} aria-hidden="true" />
+              <span>批注</span>
             </button>
             {isAnnotationToolbarOpen ? (
               <div className="annotation-toolbar" ref={annotationToolbarRef}>
@@ -10328,7 +11265,7 @@ function App() {
                     onClick={() => setAnnotationColor(null)}
                     aria-label="不标记"
                   >
-                    ⊘
+                    <CircleOff size={15} strokeWidth={1.9} aria-hidden="true" />
                   </button>
                   {HIGHLIGHT_COLORS.map((highlightColor) => (
                     <button
@@ -10356,71 +11293,14 @@ function App() {
           </div>
         </section>
 
-        <section className="toolbar-group toolbar-navigation page-controls" aria-label={UI.pageControl}>
-          <button type="button" onClick={goToPreviousPage} disabled={!pdfUrl || pageNumber <= 1}>
-            {UI.previousPage}
-          </button>
-          <span>
-            {UI.page} {pdfUrl ? pageNumber : 0} {UI.pageSuffix}
-            {numPages ? ` / ${UI.totalPages} ${numPages} ${UI.pageSuffix}` : ''}
-          </span>
-          <label className="page-jump-control">
-            <input
-              type="text"
-              inputMode="numeric"
-              value={isPageJumpFocused ? pageJumpInput : String(pageNumber)}
-              onChange={(event) => setPageJumpInput(event.target.value)}
-              onFocus={() => {
-                setIsPageJumpFocused(true)
-                setPageJumpInput(String(pageNumber))
-                requestAnimationFrame(() => document.activeElement?.select?.())
-              }}
-              onKeyDown={handlePageJumpKeyDown}
-              onBlur={(event) => {
-                jumpToPage(event.currentTarget.value)
-                setIsPageJumpFocused(false)
-              }}
-              disabled={!pdfUrl || !numPages}
-              aria-label="跳转页码"
-            />
-          </label>
-          <button type="button" onClick={jumpToPage} disabled={!pdfUrl || !numPages}>
-            跳转
-          </button>
-          <button
-            type="button"
-            onClick={goToNextPage}
-            disabled={!pdfUrl || !numPages || pageNumber >= numPages}
-          >
-            {UI.nextPage}
-          </button>
-        </section>
-
-        <section className="toolbar-group toolbar-view zoom-controls" aria-label="PDF 缩放">
-          <button type="button" onClick={() => changeZoom(-ZOOM_STEP)} disabled={!pdfUrl}>
-            -
-          </button>
-          <label className="zoom-input-control">
-            <input
-              type="text"
-              inputMode="numeric"
-              value={zoomInput}
-              onChange={(event) => setZoomInput(event.target.value)}
-              onKeyDown={handleZoomInputKeyDown}
-              onBlur={() => applyZoom(zoomInput)}
-              disabled={!pdfUrl}
-              aria-label="缩放比例"
-            />
-            <span>%</span>
-          </label>
-          <button type="button" onClick={() => changeZoom(ZOOM_STEP)} disabled={!pdfUrl}>
-            +
-          </button>
-        </section>
+        <div className="reader-document-identity" title={currentDocument?.fileName || '未打开文献'}>
+          <strong>{currentDocument?.fileName || '未打开文献'}</strong>
+          <span>{pdfUrl ? `${pageNumber} / ${numPages || '—'}` : 'PDF READER'}</span>
+        </div>
 
         <section className="toolbar-group toolbar-actions view-controls" aria-label="工具与设置">
           <label className="toolbar-search-control">
-            <span aria-hidden="true">⌕</span>
+            <Search size={16} strokeWidth={1.8} aria-hidden="true" />
             <input
               type="search"
               value={readerSearchInput}
@@ -10429,6 +11309,7 @@ function App() {
               onKeyDown={handleReaderSearchKeyDown}
               disabled={!pdfUrl}
               aria-label="搜索当前 PDF"
+              placeholder="搜索"
             />
           </label>
           <div className="ocr-menu-wrap">
@@ -10437,8 +11318,11 @@ function App() {
               className={isOcrMode || isOcrMenuOpen ? 'ocr-button active' : 'ocr-button'}
               onClick={toggleOcrMode}
               disabled={!pdfUrl}
+              aria-label="区域 OCR"
+              title="区域 OCR"
             >
-              区域 OCR
+              <ScanLine size={16} strokeWidth={1.8} aria-hidden="true" />
+              <span>区域 OCR</span>
             </button>
             {isOcrMenuOpen ? (
               <div className="ocr-mode-menu">
@@ -10459,18 +11343,24 @@ function App() {
             className="fullscreen-button"
             onClick={toggleFullscreen}
             disabled={!pdfUrl}
+            aria-label={isFullscreen ? UI.exitFullscreen : UI.fullscreen}
+            title={isFullscreen ? UI.exitFullscreen : UI.fullscreen}
           >
-            {isFullscreen ? UI.exitFullscreen : UI.fullscreen}
+            {isFullscreen
+              ? <Minimize2 size={16} strokeWidth={1.8} aria-hidden="true" />
+              : <Maximize2 size={16} strokeWidth={1.8} aria-hidden="true" />}
+            <span>{isFullscreen ? UI.exitFullscreen : UI.fullscreen}</span>
           </button>
         </section>
         {!toolbarCollapsed ? (
-          <button
-            type="button"
+          <IconButton
             className="toolbar-collapse-toggle expanded"
             onClick={toggleToolbarCollapsed}
-            aria-label="收起工具栏"
+            label="收起工具栏"
             title="收起工具栏"
-          />
+          >
+            <ChevronUp size={14} strokeWidth={2} />
+          </IconButton>
         ) : null}
       </header>
 
@@ -10587,15 +11477,16 @@ function App() {
             </div>
           </section>
 
-          <button
-            type="button"
+          <IconButton
             className={rightPanelVisible ? 'panel-toggle-button visible' : 'panel-toggle-button collapsed'}
             onClick={() => setRightPanelVisible((isVisible) => !isVisible)}
-            aria-label={rightPanelVisible ? '隐藏结果栏' : '显示结果栏'}
+            label={rightPanelVisible ? '隐藏结果栏' : '显示结果栏'}
             title={rightPanelVisible ? '隐藏结果栏' : '显示结果栏'}
           >
-            {rightPanelVisible ? '›' : '‹'}
-          </button>
+            {rightPanelVisible
+              ? <ChevronRight size={15} strokeWidth={2} />
+              : <ChevronLeft size={15} strokeWidth={2} />}
+          </IconButton>
 
           {rightPanelVisible ? (
             <div
@@ -10688,6 +11579,89 @@ function App() {
           <p>{UI.emptyPdf}</p>
         </section>
       )}
+      <footer className="reader-statusbar" aria-label="阅读控制">
+        <section className="statusbar-group page-controls" aria-label={UI.pageControl}>
+          <IconButton
+            className="statusbar-icon-button"
+            onClick={goToPreviousPage}
+            disabled={!pdfUrl || pageNumber <= 1}
+            label={UI.previousPage}
+          >
+            <ChevronLeft size={16} strokeWidth={2} />
+          </IconButton>
+          <span className="page-readout">
+            {pdfUrl ? pageNumber : 0} / {numPages || 0}
+          </span>
+          <label className="page-jump-control">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={isPageJumpFocused ? pageJumpInput : String(pageNumber)}
+              onChange={(event) => setPageJumpInput(event.target.value)}
+              onFocus={() => {
+                setIsPageJumpFocused(true)
+                setPageJumpInput(String(pageNumber))
+                requestAnimationFrame(() => document.activeElement?.select?.())
+              }}
+              onKeyDown={handlePageJumpKeyDown}
+              onBlur={(event) => {
+                jumpToPage(event.currentTarget.value)
+                setIsPageJumpFocused(false)
+              }}
+              disabled={!pdfUrl || !numPages}
+              aria-label="跳转页码"
+            />
+          </label>
+          <button type="button" className="statusbar-text-button" onClick={jumpToPage} disabled={!pdfUrl || !numPages}>
+            跳转
+          </button>
+          <IconButton
+            className="statusbar-icon-button"
+            onClick={goToNextPage}
+            disabled={!pdfUrl || !numPages || pageNumber >= numPages}
+            label={UI.nextPage}
+          >
+            <ChevronRight size={16} strokeWidth={2} />
+          </IconButton>
+        </section>
+
+        <div className="reader-status-summary" aria-live="polite">
+          <span className={pdfUrl ? 'reader-status-dot ready' : 'reader-status-dot'} aria-hidden="true" />
+          <span>{pdfUrl ? '文献已加载' : '等待文献'}</span>
+        </div>
+
+        <section className="statusbar-group zoom-controls" aria-label="PDF 缩放">
+          <IconButton
+            className="statusbar-icon-button"
+            onClick={() => changeZoom(-ZOOM_STEP)}
+            disabled={!pdfUrl}
+            label="缩小"
+          >
+            <Minus size={16} strokeWidth={2} />
+          </IconButton>
+          <label className="zoom-input-control">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={zoomInput}
+              onChange={(event) => setZoomInput(event.target.value)}
+              onKeyDown={handleZoomInputKeyDown}
+              onBlur={() => applyZoom(zoomInput)}
+              disabled={!pdfUrl}
+              aria-label="缩放比例"
+            />
+            <span>%</span>
+          </label>
+          <IconButton
+            className="statusbar-icon-button"
+            onClick={() => changeZoom(ZOOM_STEP)}
+            disabled={!pdfUrl}
+            label="放大"
+          >
+            <Plus size={16} strokeWidth={2} />
+          </IconButton>
+        </section>
+      </footer>
         </section>
 
         <section
@@ -10773,7 +11747,6 @@ function App() {
                     <section className="settings-glossary">
                       <div className="settings-section-header">
                         <h3>模型参数</h3>
-                        <span>选择或输入用于翻译的模型名称</span>
                       </div>
                       <label className="settings-field">
                         <span>模型名</span>
@@ -10807,7 +11780,6 @@ function App() {
                       <label className="settings-switch-row">
                         <span>
                           <strong>启用多模态翻译</strong>
-                          <small>图解模式和对照模式会优先让支持图片的 AI 直接识别文字坐标并翻译；失败时自动回退到原 OCR 流程。</small>
                         </span>
                         <input
                           type="checkbox"
@@ -10823,7 +11795,6 @@ function App() {
                     <section className="settings-glossary">
                       <div className="settings-section-header">
                         <h3>Prompt 设置</h3>
-                        <span>用于普通划词、OCR 文本和批注翻译</span>
                       </div>
                       <label className="settings-field">
                         <span>自定义翻译 Prompt</span>

@@ -30,6 +30,10 @@ const ANNOTATION_TYPES = new Set(['text-highlight', 'ocr-note-tag'])
 const EXPORT_SCHEMA_VERSION = 1
 const EXPORT_APP_NAME = 'Paper Reader'
 const EXPORT_EXTENSION = '.paperreader.json'
+const LIBRARY_SCHEMA_VERSION = 2
+const LIBRARY_MIGRATION_VERSION = 'unified-literature-v2'
+const LITERATURE_STATUS_ACTIVE = 'active'
+const LITERATURE_STATUS_RECYCLED = 'recycled'
 const PROVIDER_DEFAULTS = {
   deepseek: {
     baseUrl: 'https://api.deepseek.com',
@@ -376,9 +380,13 @@ function normalizeLibraryFolder(folder = {}, index = 0) {
   return {
     id: String(folder.id || createLibraryFolderId()),
     name,
-    documentIds: Array.isArray(folder.documentIds) ? folder.documentIds.map(String) : [],
-    collapsed: Boolean(folder.collapsed),
-    sortOrder: Number.isFinite(Number(folder.sortOrder)) ? Number(folder.sortOrder) : index,
+    parentId: folder.parentId ? String(folder.parentId) : null,
+    order: Number.isFinite(Number(folder.order))
+      ? Number(folder.order)
+      : Number.isFinite(Number(folder.sortOrder))
+        ? Number(folder.sortOrder)
+        : index,
+    expanded: typeof folder.expanded === 'boolean' ? folder.expanded : !folder.collapsed,
     createdAt: Number(folder.createdAt) || now,
     updatedAt: Number(folder.updatedAt) || now,
   }
@@ -388,47 +396,107 @@ function normalizeLibraryDocument(document = {}, index = 0) {
   const filePath = String(document.filePath || '').trim()
   const fileName = String(document.fileName || (filePath ? path.basename(filePath) : '')).trim()
   const fileSize = Math.max(0, Number(document.fileSize) || 0)
-
-  if (!filePath || !fileName) return null
-
   const now = Date.now()
-  const documentId = String(document.documentId || createDocumentId(filePath, fileName, fileSize))
+  const literatureId = String(
+    document.literatureId ||
+    document.documentId ||
+    document.id ||
+    createDocumentId(filePath, fileName, fileSize),
+  ).trim()
+
+  if (!literatureId || !fileName) return null
+
+  const status = document.status === LITERATURE_STATUS_RECYCLED
+    ? LITERATURE_STATUS_RECYCLED
+    : LITERATURE_STATUS_ACTIVE
+  const rawFolderId = document.folderId ? String(document.folderId) : null
+  const previousFolderId = document.previousFolderId ? String(document.previousFolderId) : null
+  const createdAt = Number(document.createdAt || document.importedAt) || now
 
   return {
-    id: String(document.id || documentId),
-    documentId,
+    id: literatureId,
+    literatureId,
+    documentId: literatureId,
     filePath,
     fileName,
+    displayName: String(document.displayName || fileName).trim() || fileName,
+    fingerprint: String(document.fingerprint || '').trim(),
     fileSize,
-    folderId: String(document.folderId || ''),
-    importedAt: Number(document.importedAt) || Number(document.createdAt) || now,
+    folderId: status === LITERATURE_STATUS_ACTIVE ? rawFolderId : null,
+    previousFolderId: status === LITERATURE_STATUS_RECYCLED ? (previousFolderId || rawFolderId) : previousFolderId,
+    status,
+    recycledAt: status === LITERATURE_STATUS_RECYCLED ? (Number(document.recycledAt) || now) : null,
+    importedAt: Number(document.importedAt) || createdAt,
+    createdAt,
     updatedAt: Number(document.updatedAt) || now,
-    sortOrder: Number.isFinite(Number(document.sortOrder)) ? Number(document.sortOrder) : index,
+    order: Number.isFinite(Number(document.order))
+      ? Number(document.order)
+      : Number.isFinite(Number(document.sortOrder))
+        ? Number(document.sortOrder)
+        : index,
   }
 }
 
 function normalizeLibraryData(data = {}) {
-  const folders = Array.isArray(data.folders)
-    ? data.folders.map(normalizeLibraryFolder).filter(Boolean)
-    : []
+  const rawFolders = Array.isArray(data.folders) ? data.folders : []
+  const legacyFolderByDocumentId = new Map()
+  rawFolders.forEach((folder) => {
+    const folderId = String(folder?.id || '')
+    if (!folderId) return
+    ;(Array.isArray(folder.documentIds) ? folder.documentIds : []).forEach((documentId) => {
+      legacyFolderByDocumentId.set(String(documentId), folderId)
+    })
+  })
+
+  const folders = rawFolders.map(normalizeLibraryFolder).filter(Boolean)
   const folderIds = new Set(folders.map((folder) => folder.id))
+  const normalizedFolders = folders.map((folder) => ({
+    ...folder,
+    parentId: folder.parentId && folderIds.has(folder.parentId) && folder.parentId !== folder.id
+      ? folder.parentId
+      : null,
+  }))
+  const parentById = new Map(normalizedFolders.map((folder) => [folder.id, folder.parentId]))
+  normalizedFolders.forEach((folder) => {
+    const visited = new Set([folder.id])
+    let parentId = folder.parentId
+    while (parentId) {
+      if (visited.has(parentId)) {
+        folder.parentId = null
+        parentById.set(folder.id, null)
+        break
+      }
+      visited.add(parentId)
+      parentId = parentById.get(parentId) || null
+    }
+  })
+
   const seenDocuments = new Set()
   const documents = (Array.isArray(data.documents) ? data.documents : [])
-    .map(normalizeLibraryDocument)
+    .map((document, index) => normalizeLibraryDocument({
+      ...document,
+      folderId: document?.folderId || legacyFolderByDocumentId.get(String(document?.documentId || document?.literatureId || document?.id || '')) || null,
+    }, index))
     .filter(Boolean)
     .map((document) => ({
       ...document,
-      folderId: folderIds.has(document.folderId) ? document.folderId : '',
+      folderId: document.status === LITERATURE_STATUS_ACTIVE && folderIds.has(document.folderId) ? document.folderId : null,
+      previousFolderId: folderIds.has(document.previousFolderId) ? document.previousFolderId : null,
     }))
     .filter((document) => {
-      if (seenDocuments.has(document.documentId)) return false
-      seenDocuments.add(document.documentId)
+      if (seenDocuments.has(document.literatureId)) return false
+      seenDocuments.add(document.literatureId)
       return true
     })
 
   return {
-    folders: folders.sort((a, b) => a.sortOrder - b.sortOrder || a.createdAt - b.createdAt),
-    documents: documents.sort((a, b) => a.sortOrder - b.sortOrder || b.importedAt - a.importedAt),
+    schemaVersion: LIBRARY_SCHEMA_VERSION,
+    migrationVersion: String(data.migrationVersion || ''),
+    folders: normalizedFolders.sort((a, b) => {
+      if (a.parentId !== b.parentId) return String(a.parentId || '').localeCompare(String(b.parentId || ''))
+      return a.order - b.order || a.createdAt - b.createdAt
+    }),
+    documents: documents.sort((a, b) => a.order - b.order || b.importedAt - a.importedAt),
   }
 }
 
@@ -538,6 +606,7 @@ function normalizeDocumentHistoryItem(item = {}) {
   return {
     ...normalized,
     documentId,
+    literatureId: documentId,
     filePath: filePath || undefined,
     fileName: fileName || undefined,
   }
@@ -586,6 +655,7 @@ function normalizeNoteItem(item = {}) {
   return {
     id: String(item.id || `${createdAt}-${Math.random().toString(36).slice(2, 9)}`),
     documentId,
+    literatureId: documentId,
     filePath,
     fileName,
     type: item.type,
@@ -633,6 +703,7 @@ function normalizeAnnotationItem(item = {}) {
   const base = {
     id: String(item.id || `${createdAt}-${Math.random().toString(36).slice(2, 9)}`),
     documentId,
+    literatureId: documentId,
     filePath,
     fileName,
     type: item.type,
@@ -765,6 +836,7 @@ function normalizeBookmarkItem(item = {}) {
   return {
     id: String(item.id || `${pageNumber}-${createdAt}-${Math.random().toString(36).slice(2, 8)}`),
     documentId,
+    literatureId: documentId,
     filePath: typeof item.filePath === 'string' ? item.filePath : undefined,
     fileName: typeof item.fileName === 'string' ? item.fileName : undefined,
     pageNumber,
@@ -1586,7 +1658,117 @@ async function saveDocumentTableOfContents(documentId, payload = {}) {
 
 async function readLibraryData() {
   try {
-    return normalizeLibraryData(await readJsonFileWithRecovery(getLibraryPath(), {}, 'library'))
+    const rawLibrary = await readJsonFileWithRecovery(getLibraryPath(), {}, 'library')
+    const library = normalizeLibraryData(rawLibrary)
+
+    if (
+      Number(rawLibrary?.schemaVersion) >= LIBRARY_SCHEMA_VERSION &&
+      rawLibrary?.migrationVersion === LIBRARY_MIGRATION_VERSION
+    ) {
+      return library
+    }
+
+    const [histories, notes, annotations, bookmarks, browsingHistory] = await Promise.all([
+      readDocumentTranslationHistories(),
+      readDocumentNotes(),
+      readDocumentAnnotations(),
+      readDocumentBookmarks(),
+      readBrowsingHistory(),
+    ])
+    const documentsById = new Map(library.documents.map((document) => [document.literatureId, document]))
+    const browsingById = new Map(browsingHistory.map((record) => [record.documentId, record]))
+    const recordSources = [histories, notes, annotations, bookmarks]
+    const recordIds = new Set([
+      ...recordSources.flatMap((source) => Object.keys(source)),
+      ...browsingHistory.map((record) => record.documentId),
+    ])
+    const literatureIdMap = new Map()
+
+    recordIds.forEach((sourceLiteratureId) => {
+      if (!sourceLiteratureId) return
+
+      const containers = recordSources.map((source) => source[sourceLiteratureId] || {})
+      const browsingRecord = browsingById.get(sourceLiteratureId) || {}
+      const filePath = String(
+        browsingRecord.filePath || containers.find((container) => container.filePath)?.filePath || '',
+      ).trim()
+      const fileName = String(
+        browsingRecord.fileName ||
+        containers.find((container) => container.fileName)?.fileName ||
+        (filePath ? path.basename(filePath) : sourceLiteratureId),
+      ).trim()
+      const matched = findMatchingLiterature(Array.from(documentsById.values()), {
+        literatureId: sourceLiteratureId,
+        filePath,
+        fileName,
+        fileSize: browsingRecord.fileSize,
+      })
+      if (matched) {
+        literatureIdMap.set(sourceLiteratureId, matched.literatureId)
+        return
+      }
+      const migrated = normalizeLibraryDocument({
+        literatureId: sourceLiteratureId,
+        filePath,
+        fileName,
+        fileSize: browsingRecord.fileSize,
+        status: LITERATURE_STATUS_ACTIVE,
+        folderId: null,
+        createdAt: browsingRecord.createdAt || browsingRecord.lastOpenedAt,
+        updatedAt: Math.max(
+          Number(browsingRecord.lastOpenedAt) || 0,
+          ...containers.map((container) => Number(container.lastUpdatedAt || container.lastOpenedAt) || 0),
+        ),
+        order: documentsById.size,
+      })
+      if (migrated) {
+        documentsById.set(migrated.literatureId, migrated)
+        literatureIdMap.set(sourceLiteratureId, migrated.literatureId)
+      }
+    })
+
+    const migratedLibrary = normalizeLibraryData({
+      ...library,
+      migrationVersion: LIBRARY_MIGRATION_VERSION,
+      documents: Array.from(documentsById.values()),
+    })
+    migratedLibrary.migrationVersion = LIBRARY_MIGRATION_VERSION
+
+    const migrationTimestamp = Date.now()
+    const migrationPaths = [
+      getLibraryPath(),
+      getDocumentTranslationHistoryPath(),
+      getNotesPath(),
+      getAnnotationsPath(),
+      getBookmarksPath(),
+      getBrowsingHistoryPath(),
+    ]
+    await Promise.all(migrationPaths.map((filePath) => backupMigrationFile(filePath, migrationTimestamp)))
+    await writeJsonFileAtomic(
+      getDocumentTranslationHistoryPath(),
+      remapDocumentContainers(histories, literatureIdMap, normalizeDocumentTranslationHistories),
+    )
+    await writeJsonFileAtomic(
+      getNotesPath(),
+      remapDocumentContainers(notes, literatureIdMap, normalizeDocumentNotes),
+    )
+    await writeJsonFileAtomic(
+      getAnnotationsPath(),
+      remapDocumentContainers(annotations, literatureIdMap, normalizeDocumentAnnotations),
+    )
+    await writeJsonFileAtomic(
+      getBookmarksPath(),
+      remapDocumentContainers(bookmarks, literatureIdMap, normalizeDocumentBookmarks),
+    )
+    await writeJsonFileAtomic(
+      getBrowsingHistoryPath(),
+      normalizeBrowsingHistory(browsingHistory.map((record) => ({
+        ...record,
+        documentId: literatureIdMap.get(record.documentId) || record.documentId,
+      }))),
+    )
+    await writeJsonFileAtomic(getLibraryPath(), migratedLibrary)
+    return migratedLibrary
   } catch (error) {
     throw new Error(`读取文献库失败：${error.message}`, { cause: error })
   }
@@ -1598,67 +1780,206 @@ async function saveLibraryData(data) {
   return nextData
 }
 
+function runLibraryMutation(operation) {
+  return runStorageMutation(getLibraryPath(), operation)
+}
+
+function remapDocumentContainers(data, literatureIdMap, normalizer) {
+  const merged = {}
+  Object.entries(data).forEach(([sourceId, container]) => {
+    const literatureId = literatureIdMap.get(sourceId) || sourceId
+    const current = merged[literatureId] || {}
+    const seenItems = new Set()
+    const items = [...(current.items || []), ...(container.items || [])]
+      .map((item) => ({ ...item, documentId: literatureId, literatureId }))
+      .filter((item) => {
+        const key = String(item.id || JSON.stringify(item))
+        if (seenItems.has(key)) return false
+        seenItems.add(key)
+        return true
+      })
+    merged[literatureId] = {
+      ...container,
+      ...current,
+      filePath: current.filePath || container.filePath || '',
+      fileName: current.fileName || container.fileName || '',
+      lastOpenedAt: Math.max(Number(current.lastOpenedAt) || 0, Number(container.lastOpenedAt) || 0),
+      lastUpdatedAt: Math.max(Number(current.lastUpdatedAt) || 0, Number(container.lastUpdatedAt) || 0),
+      items,
+    }
+  })
+  return normalizer(merged)
+}
+
+async function backupMigrationFile(filePath, migrationTimestamp) {
+  try {
+    const stat = await fs.stat(filePath)
+    if (stat.isFile()) {
+      await fs.copyFile(filePath, `${filePath}.pre-${LIBRARY_MIGRATION_VERSION}-${migrationTimestamp}.bak`)
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+  }
+}
+
+function getNormalizedPathKey(filePath = '') {
+  const normalizedPath = String(filePath || '').trim()
+  return normalizedPath ? path.normalize(normalizedPath).toLowerCase() : ''
+}
+
+function findMatchingLiterature(documents, candidate = {}) {
+  const literatureId = String(candidate.literatureId || candidate.documentId || candidate.id || '').trim()
+  if (literatureId) {
+    const byId = documents.find((document) => document.literatureId === literatureId)
+    if (byId) return byId
+  }
+
+  const fingerprint = String(candidate.fingerprint || '').trim()
+  if (fingerprint) {
+    const byFingerprint = documents.find((document) => document.fingerprint && document.fingerprint === fingerprint)
+    if (byFingerprint) return byFingerprint
+  }
+
+  const filePathKey = getNormalizedPathKey(candidate.filePath)
+  if (filePathKey) {
+    const byPath = documents.find((document) => getNormalizedPathKey(document.filePath) === filePathKey)
+    if (byPath) return byPath
+  }
+
+  const fileName = String(candidate.fileName || '').trim().toLowerCase()
+  const fileSize = Math.max(0, Number(candidate.fileSize) || 0)
+  if (fileName && fileSize) {
+    const byNameAndSize = documents.find((document) => (
+      document.fileName.toLowerCase() === fileName && Number(document.fileSize) === fileSize
+    ))
+    if (byNameAndSize) return byNameAndSize
+  }
+
+  if (fileName) {
+    const byName = documents.filter((document) => document.fileName.toLowerCase() === fileName)
+    if (byName.length === 1 && !filePathKey && !fileSize) return byName[0]
+  }
+
+  return null
+}
+
+async function createFileFingerprint(filePath, fileSize = 0) {
+  const normalizedPath = String(filePath || '').trim()
+  if (!normalizedPath) return ''
+
+  const handle = await fs.open(normalizedPath, 'r')
+  try {
+    const stat = await handle.stat()
+    if (!stat.isFile()) return ''
+    const chunkSize = Math.min(64 * 1024, stat.size)
+    const firstChunk = Buffer.alloc(chunkSize)
+    const lastChunk = Buffer.alloc(chunkSize)
+    if (chunkSize) {
+      await handle.read(firstChunk, 0, chunkSize, 0)
+      await handle.read(lastChunk, 0, chunkSize, Math.max(0, stat.size - chunkSize))
+    }
+    return crypto
+      .createHash('sha256')
+      .update(String(fileSize || stat.size))
+      .update(firstChunk)
+      .update(lastChunk)
+      .digest('hex')
+  } finally {
+    await handle.close()
+  }
+}
+
 async function getEnrichedLibrary() {
-  const [library, browsingHistory, notes, annotations] = await Promise.all([
+  const [library, browsingHistory, histories, notes, annotations, bookmarks] = await Promise.all([
     readLibraryData(),
     readBrowsingHistory(),
+    readDocumentTranslationHistories(),
     readDocumentNotes(),
     readDocumentAnnotations(),
+    readDocumentBookmarks(),
   ])
   const browsingByDocumentId = new Map(browsingHistory.map((record) => [record.documentId, record]))
+  const enrichedDocuments = library.documents.map((document) => {
+    const literatureId = document.literatureId
+    const browsingRecord = browsingByDocumentId.get(literatureId)
+    const historyItems = normalizeHistoryItems(histories[literatureId]?.items || [])
+    const noteItems = normalizeNoteItems(notes[literatureId]?.items || [])
+    const annotationItems = normalizeAnnotationItems(annotations[literatureId]?.items || [])
+    const bookmarkItems = normalizeBookmarkItems(bookmarks[literatureId]?.items || [])
+
+    return {
+      ...document,
+      totalPages: browsingRecord?.totalPages || null,
+      lastPage: browsingRecord?.lastPage || 1,
+      scale: browsingRecord?.scale || 100,
+      lastOpenedAt: browsingRecord?.lastOpenedAt || null,
+      historyCount: historyItems.length,
+      notesCount: noteItems.length,
+      annotationsCount: annotationItems.length,
+      bookmarksCount: bookmarkItems.length,
+      recordCount: historyItems.length + noteItems.length + annotationItems.length + bookmarkItems.length,
+    }
+  })
 
   return {
+    schemaVersion: library.schemaVersion,
+    migrationVersion: library.migrationVersion,
     folders: library.folders,
-    documents: library.documents.map((document) => {
-      const browsingRecord = browsingByDocumentId.get(document.documentId)
-      const noteItems = normalizeNoteItems(notes[document.documentId]?.items || [])
-      const annotationItems = normalizeAnnotationItems(annotations[document.documentId]?.items || [])
-
-      return {
-        ...document,
-        totalPages: browsingRecord?.totalPages || null,
-        lastPage: browsingRecord?.lastPage || 1,
-        scale: browsingRecord?.scale || 100,
-        lastOpenedAt: browsingRecord?.lastOpenedAt || null,
-        notesCount: noteItems.length,
-        annotationsCount: annotationItems.length,
-      }
-    }),
+    documents: enrichedDocuments.filter((document) => document.status === LITERATURE_STATUS_ACTIVE),
+    literatures: enrichedDocuments,
+    recycledDocuments: enrichedDocuments
+      .filter((document) => document.status === LITERATURE_STATUS_RECYCLED)
+      .sort((a, b) => (b.recycledAt || 0) - (a.recycledAt || 0)),
   }
 }
 
 async function upsertLibraryDocument(document = {}) {
-  const library = await readLibraryData()
-  const normalizedDocument = normalizeLibraryDocument(document)
-
-  if (!normalizedDocument) {
-    throw new Error('无法添加文献到文献库')
-  }
-
-  const existing = library.documents.find((item) =>
-    item.documentId === normalizedDocument.documentId ||
-    item.filePath.toLowerCase() === normalizedDocument.filePath.toLowerCase()
-  )
-  const nextDocument = existing
-    ? {
-        ...existing,
-        ...normalizedDocument,
-        folderId: normalizedDocument.folderId || existing.folderId,
-        importedAt: existing.importedAt || normalizedDocument.importedAt,
-        sortOrder: existing.sortOrder,
-        updatedAt: Date.now(),
+  return runLibraryMutation(async () => {
+    const library = await readLibraryData()
+    let fingerprint = String(document.fingerprint || '').trim()
+    if (!fingerprint && document.filePath) {
+      try {
+        fingerprint = await createFileFingerprint(document.filePath, document.fileSize)
+      } catch {
+        fingerprint = ''
       }
-    : {
-        ...normalizedDocument,
-        sortOrder: library.documents.length,
-        updatedAt: Date.now(),
-      }
-  const nextDocuments = existing
-    ? library.documents.map((item) => (item.documentId === existing.documentId ? nextDocument : item))
-    : [nextDocument, ...library.documents]
+    }
+    const normalizedDocument = normalizeLibraryDocument({ ...document, fingerprint })
 
-  await saveLibraryData({ ...library, documents: nextDocuments })
-  return getEnrichedLibrary()
+    if (!normalizedDocument) {
+      throw new Error('无法添加文献到文献库')
+    }
+
+    const existing = findMatchingLiterature(library.documents, normalizedDocument)
+    const nextDocument = existing
+      ? {
+          ...existing,
+          ...normalizedDocument,
+          id: existing.literatureId,
+          literatureId: existing.literatureId,
+          documentId: existing.literatureId,
+          status: existing.status,
+          folderId: existing.status === LITERATURE_STATUS_ACTIVE ? existing.folderId : null,
+          previousFolderId: existing.previousFolderId,
+          recycledAt: existing.recycledAt,
+          importedAt: existing.importedAt || normalizedDocument.importedAt,
+          order: existing.order,
+          updatedAt: Date.now(),
+        }
+      : {
+          ...normalizedDocument,
+          folderId: null,
+          status: LITERATURE_STATUS_ACTIVE,
+          order: library.documents.length,
+          updatedAt: Date.now(),
+        }
+    const nextDocuments = existing
+      ? library.documents.map((item) => (item.literatureId === existing.literatureId ? nextDocument : item))
+      : [nextDocument, ...library.documents]
+
+    await saveLibraryData({ ...library, documents: nextDocuments })
+    return getEnrichedLibrary()
+  })
 }
 
 async function importLibraryPdfs() {
@@ -1672,108 +1993,741 @@ async function importLibraryPdfs() {
     return { canceled: true, ...(await getEnrichedLibrary()) }
   }
 
-  const library = await readLibraryData()
-  const documentsById = new Map(library.documents.map((document) => [document.documentId, document]))
+  return runLibraryMutation(async () => {
+    const library = await readLibraryData()
+    const nextDocuments = [...library.documents]
 
-  for (const filePath of result.filePaths) {
-    const stat = await fs.stat(filePath)
+    for (const filePath of result.filePaths) {
+      const stat = await fs.stat(filePath)
 
-    if (!stat.isFile()) continue
+      if (!stat.isFile()) continue
 
-    const normalizedPath = String(filePath || '').trim()
-    const fileName = path.basename(normalizedPath)
-    const fileSize = stat.size
-    const documentId = await resolveDocumentIdForPdf(normalizedPath, fileName, fileSize)
-    const existing = documentsById.get(documentId)
-    documentsById.set(documentId, {
-      ...(existing || {}),
-      id: documentId,
-      documentId,
-      filePath: normalizedPath,
-      fileName,
-      fileSize,
-      folderId: existing?.folderId || '',
-      importedAt: existing?.importedAt || Date.now(),
-      updatedAt: Date.now(),
-      sortOrder: existing?.sortOrder ?? documentsById.size,
-    })
-  }
+      const normalizedPath = String(filePath || '').trim()
+      const fileName = path.basename(normalizedPath)
+      const fileSize = stat.size
+      const documentId = await resolveDocumentIdForPdf(normalizedPath, fileName, fileSize)
+      const fingerprint = await createFileFingerprint(normalizedPath, fileSize)
+      const existing = findMatchingLiterature(nextDocuments, {
+        literatureId: documentId,
+        filePath: normalizedPath,
+        fileName,
+        fileSize,
+        fingerprint,
+      })
+      const literatureId = existing?.literatureId || documentId
+      const nextDocument = normalizeLibraryDocument({
+        ...(existing || {}),
+        id: literatureId,
+        literatureId,
+        documentId: literatureId,
+        filePath: normalizedPath,
+        fileName,
+        displayName: existing?.displayName || fileName,
+        fingerprint,
+        fileSize,
+        folderId: existing?.folderId || null,
+        status: existing?.status || LITERATURE_STATUS_ACTIVE,
+        previousFolderId: existing?.previousFolderId || null,
+        recycledAt: existing?.recycledAt || null,
+        importedAt: existing?.importedAt || Date.now(),
+        updatedAt: Date.now(),
+        order: existing?.order ?? nextDocuments.length,
+      })
+      if (existing) {
+        const existingIndex = nextDocuments.findIndex((document) => document.literatureId === existing.literatureId)
+        nextDocuments.splice(existingIndex, 1, nextDocument)
+      } else {
+        nextDocuments.push(nextDocument)
+      }
+    }
 
-  await saveLibraryData({ ...library, documents: Array.from(documentsById.values()) })
-  return { canceled: false, ...(await getEnrichedLibrary()) }
+    await saveLibraryData({ ...library, documents: nextDocuments })
+    return { canceled: false, ...(await getEnrichedLibrary()) }
+  })
 }
 
-async function createLibraryFolder(name) {
-  const library = await readLibraryData()
-  const normalizedName = String(name || '').trim()
+async function createLibraryFolder(input) {
+  return runLibraryMutation(async () => {
+    const library = await readLibraryData()
+    const folderInput = typeof input === 'string' ? { name: input } : (input || {})
+    const name = folderInput.name
+    const normalizedName = String(name || '').trim()
+    const parentId = folderInput.parentId && library.folders.some((folder) => folder.id === String(folderInput.parentId))
+      ? String(folderInput.parentId)
+      : null
 
-  if (!normalizedName) {
-    throw new Error('文件夹名称不能为空')
-  }
+    if (!normalizedName) {
+      throw new Error('文件夹名称不能为空')
+    }
 
-  if (library.folders.some((folder) => folder.name.trim().toLowerCase() === normalizedName.toLowerCase())) {
-    throw new Error('已存在同名文件夹')
-  }
+    if (library.folders.some((folder) => (
+      folder.parentId === parentId && folder.name.trim().toLowerCase() === normalizedName.toLowerCase()
+    ))) {
+      throw new Error('已存在同名文件夹')
+    }
 
-  const folder = normalizeLibraryFolder({
-    name: normalizedName,
-    documentIds: [],
-    sortOrder: library.folders.length,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
+    const siblingCount = library.folders.filter((folder) => folder.parentId === parentId).length
+    const folder = normalizeLibraryFolder({
+      name: normalizedName,
+      parentId,
+      order: siblingCount,
+      expanded: true,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    })
+
+    const nextFolders = library.folders.map((item) => (
+      item.id === parentId
+        ? { ...item, expanded: true, updatedAt: Date.now() }
+        : item
+    ))
+
+    await saveLibraryData({ ...library, folders: [...nextFolders, folder] })
+    return getEnrichedLibrary()
   })
-
-  await saveLibraryData({ ...library, folders: [...library.folders, folder] })
-  return getEnrichedLibrary()
 }
 
 async function updateLibraryFolder(folderId, updates = {}) {
-  const library = await readLibraryData()
-  const normalizedFolderId = String(folderId || '')
-  const nextFolders = library.folders.map((folder) => (
-    folder.id === normalizedFolderId
-      ? {
-          ...folder,
-          name: String(updates.name || folder.name).trim() || folder.name,
-          collapsed: typeof updates.collapsed === 'boolean' ? updates.collapsed : folder.collapsed,
-          updatedAt: Date.now(),
-        }
-      : folder
-  ))
+  return runLibraryMutation(async () => {
+    const library = await readLibraryData()
+    const normalizedFolderId = String(folderId || '')
+    const currentFolder = library.folders.find((folder) => folder.id === normalizedFolderId)
+    if (!currentFolder) throw new Error('文件夹不存在')
 
-  await saveLibraryData({ ...library, folders: nextFolders })
-  return getEnrichedLibrary()
+    let parentId = currentFolder.parentId
+    if (Object.hasOwn(updates, 'parentId')) {
+      const requestedParentId = updates.parentId ? String(updates.parentId) : null
+      if (requestedParentId === normalizedFolderId) throw new Error('不能将文件夹移动到自身')
+      if (requestedParentId && !library.folders.some((folder) => folder.id === requestedParentId)) {
+        throw new Error('目标文件夹不存在')
+      }
+      let ancestorId = requestedParentId
+      while (ancestorId) {
+        if (ancestorId === normalizedFolderId) throw new Error('不能将文件夹移动到其子文件夹')
+        ancestorId = library.folders.find((folder) => folder.id === ancestorId)?.parentId || null
+      }
+      parentId = requestedParentId
+    }
+
+    const name = String(updates.name || currentFolder.name).trim() || currentFolder.name
+    if (library.folders.some((folder) => (
+      folder.id !== normalizedFolderId &&
+      folder.parentId === parentId &&
+      folder.name.trim().toLowerCase() === name.toLowerCase()
+    ))) {
+      throw new Error('同一层级已存在同名文件夹')
+    }
+    const nextFolders = library.folders.map((folder) => (
+      folder.id === normalizedFolderId
+        ? {
+            ...folder,
+            name,
+            parentId,
+            order: Number.isFinite(Number(updates.order)) ? Number(updates.order) : folder.order,
+            expanded: typeof updates.expanded === 'boolean'
+              ? updates.expanded
+              : typeof updates.collapsed === 'boolean'
+                ? !updates.collapsed
+                : folder.expanded,
+            updatedAt: Date.now(),
+          }
+        : folder
+    ))
+
+    await saveLibraryData({ ...library, folders: nextFolders })
+    return getEnrichedLibrary()
+  })
+}
+
+async function reorderLibraryFolder(folderId, targetFolderId, placement = 'before') {
+  return runLibraryMutation(async () => {
+    const library = await readLibraryData()
+    const normalizedFolderId = String(folderId || '')
+    const normalizedTargetFolderId = String(targetFolderId || '')
+    const current = library.folders.find((folder) => folder.id === normalizedFolderId)
+    const target = library.folders.find((folder) => folder.id === normalizedTargetFolderId)
+    if (!current) throw new Error('文件夹不存在')
+    if (!target) throw new Error('排序目标文件夹不存在')
+    if (current.id === target.id) return getEnrichedLibrary()
+    if (current.parentId !== target.parentId) {
+      throw new Error('只能调整同级文件夹的顺序')
+    }
+
+    const siblings = library.folders
+      .filter((folder) => folder.parentId === current.parentId)
+      .sort((a, b) => a.order - b.order || a.createdAt - b.createdAt)
+    const remainingSiblings = siblings.filter((folder) => folder.id !== current.id)
+    const targetIndex = remainingSiblings.findIndex((folder) => folder.id === target.id)
+    const insertIndex = placement === 'after' ? targetIndex + 1 : targetIndex
+    const reorderedSiblings = [...remainingSiblings]
+    reorderedSiblings.splice(insertIndex, 0, current)
+    const orderById = new Map(reorderedSiblings.map((folder, index) => [folder.id, index]))
+    const updatedAt = Date.now()
+
+    const nextFolders = library.folders.map((folder) => {
+      if (orderById.has(folder.id)) {
+        return { ...folder, order: orderById.get(folder.id), updatedAt }
+      }
+      return folder
+    })
+    await saveLibraryData({ ...library, folders: nextFolders })
+    return getEnrichedLibrary()
+  })
+}
+
+async function moveLibraryFolder(folderId, parentId = null) {
+  return runLibraryMutation(async () => {
+    const library = await readLibraryData()
+    const normalizedFolderId = String(folderId || '')
+    const current = library.folders.find((folder) => folder.id === normalizedFolderId)
+    if (!current) throw new Error('文件夹不存在')
+
+    const requestedParentId = parentId ? String(parentId) : null
+    if (requestedParentId === current.id) throw new Error('不能将文件夹移动到自身')
+    if (requestedParentId && !library.folders.some((folder) => folder.id === requestedParentId)) {
+      throw new Error('目标文件夹不存在')
+    }
+    if (requestedParentId === current.parentId) {
+      throw new Error('文件夹已经位于该层级')
+    }
+
+    let ancestorId = requestedParentId
+    while (ancestorId) {
+      if (ancestorId === current.id) throw new Error('不能将文件夹移动到其子文件夹')
+      ancestorId = library.folders.find((folder) => folder.id === ancestorId)?.parentId || null
+    }
+
+    if (library.folders.some((folder) => (
+      folder.id !== current.id
+      && folder.parentId === requestedParentId
+      && folder.name.trim().toLowerCase() === current.name.trim().toLowerCase()
+    ))) {
+      throw new Error('目标层级已存在同名文件夹')
+    }
+
+    const sourceSiblings = library.folders
+      .filter((folder) => folder.parentId === current.parentId && folder.id !== current.id)
+      .sort((a, b) => a.order - b.order || a.createdAt - b.createdAt)
+    const targetSiblings = library.folders
+      .filter((folder) => folder.parentId === requestedParentId && folder.id !== current.id)
+      .sort((a, b) => a.order - b.order || a.createdAt - b.createdAt)
+    const sourceOrderById = new Map(sourceSiblings.map((folder, index) => [folder.id, index]))
+    const targetOrderById = new Map(targetSiblings.map((folder, index) => [folder.id, index]))
+    const updatedAt = Date.now()
+
+    const nextFolders = library.folders.map((folder) => {
+      if (folder.id === current.id) {
+        return { ...folder, parentId: requestedParentId, order: targetSiblings.length, updatedAt }
+      }
+      if (folder.parentId === current.parentId && sourceOrderById.has(folder.id)) {
+        return { ...folder, order: sourceOrderById.get(folder.id), updatedAt }
+      }
+      if (folder.parentId === requestedParentId && targetOrderById.has(folder.id)) {
+        return { ...folder, order: targetOrderById.get(folder.id), updatedAt }
+      }
+      if (folder.id === requestedParentId) {
+        return { ...folder, expanded: true, updatedAt }
+      }
+      return folder
+    })
+
+    await saveLibraryData({ ...library, folders: nextFolders })
+    return getEnrichedLibrary()
+  })
+}
+
+async function deleteLibraryFolder(folderId) {
+  return runLibraryMutation(async () => {
+    const library = await readLibraryData()
+    const normalizedFolderId = String(folderId || '')
+    const folderExists = library.folders.some((folder) => folder.id === normalizedFolderId)
+
+    if (!folderExists) {
+      throw new Error('\u6587\u4ef6\u5939\u4e0d\u5b58\u5728')
+    }
+
+    const removedFolderIds = new Set([normalizedFolderId])
+    let foundChildren = true
+    while (foundChildren) {
+      foundChildren = false
+      library.folders.forEach((folder) => {
+        if (folder.parentId && removedFolderIds.has(folder.parentId) && !removedFolderIds.has(folder.id)) {
+          removedFolderIds.add(folder.id)
+          foundChildren = true
+        }
+      })
+    }
+
+    const nextDocuments = library.documents.map((document) => (
+      document.status === LITERATURE_STATUS_ACTIVE && removedFolderIds.has(document.folderId)
+        ? { ...document, folderId: '', updatedAt: Date.now() }
+        : document
+    ))
+
+    await saveLibraryData({
+      ...library,
+      folders: library.folders.filter((folder) => !removedFolderIds.has(folder.id)),
+      documents: nextDocuments,
+    })
+    return getEnrichedLibrary()
+  })
 }
 
 async function moveLibraryDocuments(documentIds = [], folderId = '') {
-  const library = await readLibraryData()
-  const ids = new Set((Array.isArray(documentIds) ? documentIds : []).map(String))
-  const folderIds = new Set(library.folders.map((folder) => folder.id))
-  const normalizedFolderId = folderIds.has(String(folderId)) ? String(folderId) : ''
+  return runLibraryMutation(async () => {
+    const library = await readLibraryData()
+    const ids = new Set((Array.isArray(documentIds) ? documentIds : []).map(String))
+    const folderIds = new Set(library.folders.map((folder) => folder.id))
+    const normalizedFolderId = folderIds.has(String(folderId)) ? String(folderId) : null
 
-  if (!ids.size) return getEnrichedLibrary()
+    if (!ids.size) return getEnrichedLibrary()
 
-  const nextDocuments = library.documents.map((document) => (
-    ids.has(document.documentId)
-      ? { ...document, folderId: normalizedFolderId, updatedAt: Date.now() }
-      : document
-  ))
+    const nextDocuments = library.documents.map((document) => (
+      ids.has(document.literatureId) && document.status === LITERATURE_STATUS_ACTIVE
+        ? { ...document, folderId: normalizedFolderId, updatedAt: Date.now() }
+        : document
+    ))
 
-  await saveLibraryData({ ...library, documents: nextDocuments })
-  return getEnrichedLibrary()
+    await saveLibraryData({ ...library, documents: nextDocuments })
+    return getEnrichedLibrary()
+  })
 }
 
 async function deleteLibraryDocuments(documentIds = []) {
-  const library = await readLibraryData()
-  const ids = new Set((Array.isArray(documentIds) ? documentIds : []).map(String))
+  return runLibraryMutation(async () => {
+    const library = await readLibraryData()
+    const ids = new Set((Array.isArray(documentIds) ? documentIds : []).map(String))
 
-  if (!ids.size) return getEnrichedLibrary()
+    if (!ids.size) return getEnrichedLibrary()
 
-  await saveLibraryData({
-    ...library,
-    documents: library.documents.filter((document) => !ids.has(document.documentId)),
+    const recycledAt = Date.now()
+    await saveLibraryData({
+      ...library,
+      documents: library.documents.map((document) => (
+        ids.has(document.literatureId) && document.status === LITERATURE_STATUS_ACTIVE
+          ? {
+              ...document,
+              previousFolderId: document.folderId,
+              folderId: null,
+              status: LITERATURE_STATUS_RECYCLED,
+              recycledAt,
+              updatedAt: recycledAt,
+            }
+        : document
+      )),
+    })
+    await runStorageMutation(getBrowsingHistoryPath(), async () => {
+      const browsingHistory = await readBrowsingHistory()
+      await writeJsonFileAtomic(
+        getBrowsingHistoryPath(),
+        normalizeBrowsingHistory(browsingHistory.filter((record) => !ids.has(record.documentId))),
+      )
+    })
+    return getEnrichedLibrary()
   })
-  return getEnrichedLibrary()
+}
+
+async function updateLibraryDocument(literatureId, updates = {}) {
+  return runLibraryMutation(async () => {
+    const library = await readLibraryData()
+    const normalizedId = String(literatureId || '')
+    const current = library.documents.find((document) => document.literatureId === normalizedId)
+    if (!current) throw new Error('文献不存在')
+
+    const displayName = String(updates.displayName || updates.fileName || current.displayName || current.fileName).trim()
+    const nextDocuments = library.documents.map((document) => (
+      document.literatureId === normalizedId
+        ? {
+            ...document,
+            displayName: displayName || document.displayName,
+            updatedAt: Date.now(),
+          }
+        : document
+    ))
+    await saveLibraryData({ ...library, documents: nextDocuments })
+    return getEnrichedLibrary()
+  })
+}
+
+async function restoreLibraryDocuments(documentIds = []) {
+  return runLibraryMutation(async () => {
+    const library = await readLibraryData()
+    const ids = new Set((Array.isArray(documentIds) ? documentIds : [documentIds]).map(String))
+    const folderIds = new Set(library.folders.map((folder) => folder.id))
+    const now = Date.now()
+    const nextDocuments = library.documents.map((document) => {
+      if (!ids.has(document.literatureId) || document.status !== LITERATURE_STATUS_RECYCLED) return document
+      return {
+        ...document,
+        status: LITERATURE_STATUS_ACTIVE,
+        folderId: folderIds.has(document.previousFolderId) ? document.previousFolderId : null,
+        previousFolderId: null,
+        recycledAt: null,
+        updatedAt: now,
+      }
+    })
+    await saveLibraryData({ ...library, documents: nextDocuments })
+    return getEnrichedLibrary()
+  })
+}
+
+function omitDocumentContainers(source, ids) {
+  return Object.fromEntries(Object.entries(source).filter(([documentId]) => !ids.has(documentId)))
+}
+
+async function permanentlyDeleteLibraryDocuments(documentIds = []) {
+  return runLibraryMutation(async () => {
+    const ids = new Set((Array.isArray(documentIds) ? documentIds : [documentIds]).map(String).filter(Boolean))
+    if (!ids.size) return getEnrichedLibrary()
+
+    const [library, histories, notes, annotations, bookmarks, tableOfContents, browsingHistory, pdfSession, globalHistory] = await Promise.all([
+      readLibraryData(),
+      readDocumentTranslationHistories(),
+      readDocumentNotes(),
+      readDocumentAnnotations(),
+      readDocumentBookmarks(),
+      readDocumentTableOfContents(),
+      readBrowsingHistory(),
+      readPdfSession(),
+      readHistory(),
+    ])
+    const nextLibrary = {
+      ...library,
+      documents: library.documents.filter((document) => !ids.has(document.literatureId)),
+    }
+    const nextHistories = omitDocumentContainers(histories, ids)
+    const nextNotes = omitDocumentContainers(notes, ids)
+    const nextAnnotations = omitDocumentContainers(annotations, ids)
+    const nextBookmarks = omitDocumentContainers(bookmarks, ids)
+    const nextTableOfContents = omitDocumentContainers(tableOfContents, ids)
+    const nextBrowsingHistory = browsingHistory.filter((record) => !ids.has(record.documentId))
+    const nextGlobalHistory = globalHistory.filter((item) => !ids.has(String(item.documentId || item.literatureId || '')))
+    const nextTabs = (pdfSession.tabs || []).filter((tab) => !ids.has(tab.documentId))
+    const nextPdfSession = {
+      ...pdfSession,
+      tabs: nextTabs,
+      activeTabId: nextTabs.some((tab) => tab.id === pdfSession.activeTabId) ? pdfSession.activeTabId : (nextTabs[0]?.id || ''),
+    }
+
+    const writes = [
+      [getLibraryPath(), normalizeLibraryData(nextLibrary)],
+      [getDocumentTranslationHistoryPath(), normalizeDocumentTranslationHistories(nextHistories)],
+      [getNotesPath(), normalizeDocumentNotes(nextNotes)],
+      [getAnnotationsPath(), normalizeDocumentAnnotations(nextAnnotations)],
+      [getBookmarksPath(), normalizeDocumentBookmarks(nextBookmarks)],
+      [getTableOfContentsPath(), normalizeDocumentTableOfContents(nextTableOfContents)],
+      [getBrowsingHistoryPath(), normalizeBrowsingHistory(nextBrowsingHistory)],
+      [getPdfSessionPath(), normalizePdfSession(nextPdfSession)],
+      [getHistoryPath(), normalizeHistoryItems(nextGlobalHistory)],
+    ]
+    const rollbackWrites = [
+      [getLibraryPath(), library],
+      [getDocumentTranslationHistoryPath(), histories],
+      [getNotesPath(), notes],
+      [getAnnotationsPath(), annotations],
+      [getBookmarksPath(), bookmarks],
+      [getTableOfContentsPath(), tableOfContents],
+      [getBrowsingHistoryPath(), browsingHistory],
+      [getPdfSessionPath(), pdfSession],
+      [getHistoryPath(), globalHistory],
+    ]
+
+    try {
+      for (const [filePath, value] of writes) {
+        await writeJsonFileAtomic(filePath, value)
+      }
+    } catch (error) {
+      await Promise.allSettled(rollbackWrites.map(([filePath, value]) => writeJsonFileAtomic(filePath, value)))
+      throw new Error(`永久删除失败：${error.message}`, { cause: error })
+    }
+
+    return getEnrichedLibrary()
+  })
+}
+
+async function deleteLiterature(literatureIds, mode = 'recycle') {
+  return mode === 'permanent'
+    ? permanentlyDeleteLibraryDocuments(literatureIds)
+    : deleteLibraryDocuments(literatureIds)
+}
+
+function collectDescendantFolderIds(folders, folderId) {
+  const ids = new Set(folderId ? [String(folderId)] : [])
+  let changed = true
+  while (changed) {
+    changed = false
+    folders.forEach((folder) => {
+      if (folder.parentId && ids.has(folder.parentId) && !ids.has(folder.id)) {
+        ids.add(folder.id)
+        changed = true
+      }
+    })
+  }
+  return ids
+}
+
+function getExportRecordPage(item) {
+  return Math.max(1, Number(item?.pageNumber) || 1)
+}
+
+function formatMarkdownRecord(item) {
+  const page = getExportRecordPage(item)
+  const createdAt = Number(item?.createdAt || item?.timestamp || item?.updatedAt) || 0
+  const body = String(
+    item?.noteText || item?.translation || item?.selectedText || item?.ocrText || item?.title || '',
+  ).trim()
+  return `- 第 ${page} 页${createdAt ? ` · ${formatExportDateText(new Date(createdAt))}` : ''}${body ? `\n\n  ${body.replace(/\n/g, '\n  ')}` : ''}`
+}
+
+function buildLiteratureMarkdown(document, payload, folderPath) {
+  const lines = [
+    `# ${document.displayName || document.fileName}`,
+    '',
+    `- 文件夹：${folderPath}`,
+    `- 文件名：${document.fileName}`,
+    `- 导出时间：${formatExportDateText()}`,
+  ]
+  if (document.status === LITERATURE_STATUS_RECYCLED) {
+    lines.push('- 状态：回收箱')
+    lines.push(`- 原文件夹：${folderPath}`)
+    lines.push(`- 移入时间：${formatExportDateText(new Date(document.recycledAt || Date.now()))}`)
+  }
+
+  const sections = [
+    ['笔记', payload.data.notes || []],
+    ['翻译记录', payload.data.translationHistory || []],
+    ['高亮', (payload.data.annotations || []).filter((item) => item.type === 'text-highlight')],
+    ['批注', (payload.data.annotations || []).filter((item) => item.type !== 'text-highlight')],
+    ['书签', payload.data.bookmarks || []],
+  ]
+  sections.forEach(([title, items]) => {
+    if (!items.length) return
+    lines.push('', `## ${title}`, '')
+    items
+      .slice()
+      .sort((a, b) => getExportRecordPage(a) - getExportRecordPage(b) || (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0))
+      .forEach((item) => lines.push(formatMarkdownRecord(item), ''))
+  })
+  return `${lines.join('\n').trim()}\n`
+}
+
+function filterLiteratureExportPayload(payload, selectedContents) {
+  const contents = new Set(Array.isArray(selectedContents) ? selectedContents : [])
+  const includeAll = !contents.size
+  const annotations = payload.data.annotations || []
+  return {
+    ...payload,
+    data: {
+      ...payload.data,
+      notes: includeAll || contents.has('notes') ? (payload.data.notes || []) : [],
+      translationHistory: includeAll || contents.has('translations') ? (payload.data.translationHistory || []) : [],
+      annotations: annotations.filter((annotation) => (
+        annotation.type === 'text-highlight'
+          ? includeAll || contents.has('highlights')
+          : includeAll || contents.has('annotations')
+      )),
+      bookmarks: includeAll || contents.has('bookmarks') ? (payload.data.bookmarks || []) : [],
+    },
+  }
+}
+
+function escapeLiteratureHtml(value = '') {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function buildLiteraturePdfHtml(document, payload, folderPath) {
+  const sections = [
+    ['笔记', payload.data.notes || []],
+    ['翻译记录', payload.data.translationHistory || []],
+    ['高亮', (payload.data.annotations || []).filter((item) => item.type === 'text-highlight')],
+    ['批注', (payload.data.annotations || []).filter((item) => item.type !== 'text-highlight')],
+    ['书签', payload.data.bookmarks || []],
+  ].filter(([, items]) => items.length)
+  const sectionHtml = sections.map(([title, items]) => `
+    <section>
+      <h2>${escapeLiteratureHtml(title)}</h2>
+      ${items.slice().sort((a, b) => getExportRecordPage(a) - getExportRecordPage(b) || (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0)).map((item) => `
+        <article>
+          <strong>第 ${getExportRecordPage(item)} 页</strong>
+          <p>${escapeLiteratureHtml(item.noteText || item.translation || item.selectedText || item.ocrText || item.title || '').replace(/\n/g, '<br>')}</p>
+        </article>`).join('')}
+    </section>`).join('')
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
+    @page { size: A4; margin: 18mm; }
+    body { color: #20231f; font-family: "Microsoft YaHei", "Segoe UI", sans-serif; font-size: 12px; line-height: 1.65; }
+    h1 { margin: 0 0 10px; font-size: 24px; } h2 { margin: 22px 0 8px; font-size: 16px; border-bottom: 1px solid #d9ddd7; padding-bottom: 5px; }
+    .meta { color: #666d65; margin-bottom: 18px; } article { break-inside: avoid; padding: 7px 0; border-bottom: 1px solid #edf0ec; }
+    article p { margin: 3px 0 0; white-space: normal; }
+  </style></head><body><h1>${escapeLiteratureHtml(document.displayName || document.fileName)}</h1>
+  <div class="meta">文件夹：${escapeLiteratureHtml(folderPath)}<br>文件名：${escapeLiteratureHtml(document.fileName)}<br>导出时间：${escapeLiteratureHtml(formatExportDateText())}</div>
+  ${sectionHtml}</body></html>`
+}
+
+async function getAvailableExportFilePath(directory, baseName, extension, usedPaths) {
+  const safeBaseName = sanitizeExportName(baseName, 'document')
+  let suffix = 0
+  while (true) {
+    const candidateName = `${safeBaseName}${suffix ? `_${suffix + 1}` : ''}${extension}`
+    const candidatePath = path.join(directory, candidateName)
+    const key = candidatePath.toLowerCase()
+    if (!usedPaths.has(key)) {
+      try {
+        await fs.access(candidatePath)
+      } catch {
+        usedPaths.add(key)
+        return candidatePath
+      }
+    }
+    suffix += 1
+  }
+}
+
+async function exportLiteratureScope(options = {}) {
+  const library = await readLibraryData()
+  const scope = options.scope === 'recycle'
+    ? 'recycle'
+    : options.scope === 'all'
+      ? 'all'
+      : options.scope === 'selection'
+        ? 'selection'
+        : 'folder'
+  const includeDescendants = options.includeDescendants !== false
+  const selectedIds = new Set((Array.isArray(options.literatureIds) ? options.literatureIds : []).map(String))
+  let documents
+  let rootName
+  let rootFolderPath = ''
+
+  if (scope === 'recycle') {
+    documents = library.documents
+      .filter((document) => document.status === LITERATURE_STATUS_RECYCLED)
+      .filter((document) => !selectedIds.size || selectedIds.has(document.literatureId))
+      .sort((a, b) => (b.recycledAt || 0) - (a.recycledAt || 0))
+    rootName = '回收箱'
+  } else if (scope === 'selection') {
+    documents = library.documents.filter((document) => selectedIds.has(document.literatureId))
+    rootName = String(options.outputName || '导出文件').trim() || '导出文件'
+  } else if (scope === 'all') {
+    documents = library.documents.filter((document) => document.status === LITERATURE_STATUS_ACTIVE)
+    rootName = '全部文献'
+  } else {
+    const folderId = options.folderId ? String(options.folderId) : null
+    const folder = library.folders.find((item) => item.id === folderId)
+    const folderIds = folderId
+      ? includeDescendants
+        ? collectDescendantFolderIds(library.folders, folderId)
+        : new Set([folderId])
+      : new Set()
+    documents = library.documents.filter((document) => (
+      document.status === LITERATURE_STATUS_ACTIVE &&
+      (folderId ? folderIds.has(document.folderId) : !document.folderId)
+    ))
+    rootName = folder?.name || '未分类'
+    rootFolderPath = folder ? getLibraryFolderPath(library.folders, folder.id) : '未分类'
+  }
+
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: scope === 'recycle' ? '导出回收箱' : scope === 'all' ? '导出全部文献' : '导出文件夹',
+    properties: ['openDirectory', 'createDirectory'],
+  })
+  if (result.canceled || !result.filePaths[0]) return { canceled: true }
+
+  const requestedRootName = String(options.outputName || rootName).trim() || rootName
+  const rootDirectory = path.join(result.filePaths[0], sanitizeExportName(requestedRootName, scope === 'recycle' ? '回收箱' : '导出文件'))
+  await fs.mkdir(rootDirectory, { recursive: true })
+  const formats = new Set(Array.isArray(options.formats) && options.formats.length ? options.formats : ['markdown', 'json'])
+  const usedPaths = new Set()
+  const failures = []
+  const indexRows = []
+  let exportedDocuments = 0
+  let exportedRecords = 0
+
+  for (const document of documents) {
+    const folderPath = getLibraryFolderPath(
+      library.folders,
+      document.status === LITERATURE_STATUS_ACTIVE ? document.folderId : document.previousFolderId,
+    )
+    const scopedFolderPath = rootFolderPath && folderPath.startsWith(`${rootFolderPath}/`)
+      ? folderPath.slice(rootFolderPath.length + 1)
+      : folderPath === rootFolderPath
+        ? ''
+        : folderPath
+    const relativeFolderPath = scope === 'recycle'
+      ? ''
+      : document.status === LITERATURE_STATUS_RECYCLED
+        ? '回收箱'
+        : scopedFolderPath === '未分类'
+          ? ''
+          : scopedFolderPath.split('/').filter(Boolean).map((name) => sanitizeExportName(name, 'folder')).join(path.sep)
+    const outputDirectory = relativeFolderPath ? path.join(rootDirectory, relativeFolderPath) : rootDirectory
+    await fs.mkdir(outputDirectory, { recursive: true })
+
+    try {
+      const payload = filterLiteratureExportPayload(
+        await collectDocumentExportData(document.literatureId, 'full'),
+        options.contents,
+      )
+      const recordCount = (payload.data.translationHistory?.length || 0) +
+        (payload.data.notes?.length || 0) +
+        (payload.data.annotations?.length || 0) +
+        (payload.data.bookmarks?.length || 0)
+      exportedRecords += recordCount
+      const baseName = `${document.displayName || document.fileName}_${getShortDocumentId(document.literatureId)}`
+
+      if (formats.has('markdown')) {
+        const markdownPath = await getAvailableExportFilePath(outputDirectory, baseName, '.md', usedPaths)
+        await fs.writeFile(markdownPath, buildLiteratureMarkdown(document, payload, folderPath), 'utf8')
+      }
+      if (formats.has('json')) {
+        const jsonPath = await getAvailableExportFilePath(outputDirectory, baseName, '.paperreader.json', usedPaths)
+        const exportObject = buildSingleDocumentExport(document.literatureId, 'full', payload)
+        await fs.writeFile(jsonPath, JSON.stringify(exportObject, null, 2), 'utf8')
+      }
+      if (formats.has('pdf')) {
+        const pdfPath = await getAvailableExportFilePath(outputDirectory, baseName, '.pdf', usedPaths)
+        const pdfBuffer = await printHtmlToPdfBuffer(buildLiteraturePdfHtml(document, payload, folderPath))
+        await fs.writeFile(pdfPath, pdfBuffer)
+      }
+      if (formats.has('original')) {
+        try {
+          if (!document.filePath) throw new Error('原始文献路径不存在')
+          const sourceStat = await fs.stat(document.filePath)
+          if (!sourceStat.isFile()) throw new Error('原始文献不存在')
+          const extension = path.extname(document.fileName) || '.pdf'
+          const originalPath = await getAvailableExportFilePath(outputDirectory, path.basename(document.fileName, extension), extension, usedPaths)
+          await fs.copyFile(document.filePath, originalPath)
+        } catch (error) {
+          failures.push({ literatureId: document.literatureId, fileName: document.fileName, error: error.message })
+        }
+      }
+      indexRows.push(`- ${document.displayName || document.fileName} · ${folderPath} · ${recordCount}`)
+      exportedDocuments += 1
+    } catch (error) {
+      failures.push({ literatureId: document.literatureId, fileName: document.fileName, error: error.message })
+    }
+  }
+
+  const readmeLines = [
+    `# ${rootName}`,
+    '',
+    ...indexRows,
+  ]
+  if (failures.length) {
+    readmeLines.push('', '## 失败', '', ...failures.map((item) => `- ${item.fileName}：${item.error}`))
+  }
+  await fs.writeFile(path.join(rootDirectory, 'README.md'), `${readmeLines.join('\n').trim()}\n`, 'utf8')
+
+  return {
+    canceled: false,
+    outputDir: rootDirectory,
+    documents: exportedDocuments,
+    records: exportedRecords,
+    failures,
+  }
 }
 
 function formatExportTimestamp(date = new Date()) {
@@ -1915,6 +2869,20 @@ function buildDocumentMeta(documentId, containers = {}, browsingRecord = null) {
   }
 }
 
+function getLibraryFolderPath(folders, folderId) {
+  const byId = new Map(folders.map((folder) => [folder.id, folder]))
+  const names = []
+  const visited = new Set()
+  let currentId = folderId
+  while (currentId && byId.has(currentId) && !visited.has(currentId)) {
+    visited.add(currentId)
+    const folder = byId.get(currentId)
+    names.unshift(folder.name)
+    currentId = folder.parentId
+  }
+  return names.join('/') || '未分类'
+}
+
 function getRelatedAnnotations(notes = [], annotations = []) {
   const noteIds = new Set(notes.map((note) => note.id))
   const highlightIds = new Set(notes.map((note) => note.highlightId).filter(Boolean))
@@ -1929,11 +2897,14 @@ function getRelatedAnnotations(notes = [], annotations = []) {
 }
 
 async function collectDocumentExportData(documentId, exportType = 'full') {
-  const histories = await readDocumentTranslationHistories()
-  const notesData = await readDocumentNotes()
-  const annotationsData = await readDocumentAnnotations()
-  const bookmarksData = await readDocumentBookmarks()
-  const browsingHistory = await readBrowsingHistory()
+  const [library, histories, notesData, annotationsData, bookmarksData, browsingHistory] = await Promise.all([
+    readLibraryData(),
+    readDocumentTranslationHistories(),
+    readDocumentNotes(),
+    readDocumentAnnotations(),
+    readDocumentBookmarks(),
+    readBrowsingHistory(),
+  ])
   const browsingRecord = browsingHistory.find((record) => record.documentId === documentId)
   const historyContainer = histories[documentId] || {}
   const noteContainer = notesData[documentId] || {}
@@ -1943,7 +2914,8 @@ async function collectDocumentExportData(documentId, exportType = 'full') {
   const noteItems = normalizeNoteItems(noteContainer.items || [])
   const annotationItems = normalizeAnnotationItems(annotationContainer.items || [])
   const bookmarkItems = normalizeBookmarkItems(bookmarkContainer.items || [])
-  const document = buildDocumentMeta(documentId, {
+  const storedLiterature = library.documents.find((item) => item.literatureId === documentId)
+  const recordDocument = buildDocumentMeta(documentId, {
     filePath: historyContainer.filePath || noteContainer.filePath || annotationContainer.filePath || bookmarkContainer.filePath,
     fileName: historyContainer.fileName || noteContainer.fileName || annotationContainer.fileName || bookmarkContainer.fileName,
     lastUpdatedAt: Math.max(
@@ -1953,6 +2925,19 @@ async function collectDocumentExportData(documentId, exportType = 'full') {
       Number(bookmarkContainer.lastUpdatedAt) || 0,
     ),
   }, browsingRecord)
+  const document = storedLiterature
+    ? {
+        ...recordDocument,
+        ...storedLiterature,
+        documentId: storedLiterature.literatureId,
+        literatureId: storedLiterature.literatureId,
+        fileName: storedLiterature.displayName || storedLiterature.fileName,
+        sourceFileName: storedLiterature.fileName,
+        folderPath: getLibraryFolderPath(library.folders, storedLiterature.status === LITERATURE_STATUS_ACTIVE
+          ? storedLiterature.folderId
+          : storedLiterature.previousFolderId),
+      }
+    : recordDocument
 
   return {
     document,
@@ -2024,6 +3009,54 @@ function buildMultiDocumentExport(documents, exportType, userExportName, merged 
       entryExportType: entry.entryExportType || entry.exportType || exportType,
       entryExportName: entry.entryExportName || entry.exportName,
     })),
+  }
+}
+
+function getBackupFolderIds(folders, documents) {
+  const byId = new Map(folders.map((folder) => [folder.id, folder]))
+  const ids = new Set()
+  documents.forEach((document) => {
+    let folderId = document.status === LITERATURE_STATUS_RECYCLED ? document.previousFolderId : document.folderId
+    while (folderId && byId.has(folderId) && !ids.has(folderId)) {
+      ids.add(folderId)
+      folderId = byId.get(folderId).parentId
+    }
+  })
+  return ids
+}
+
+async function collectApplicationBackupState(documentIds = []) {
+  const selectedIds = new Set((Array.isArray(documentIds) ? documentIds : []).map(String))
+  const [library, browsingHistory, pdfSession, tableOfContents, config] = await Promise.all([
+    readLibraryData(),
+    readBrowsingHistory(),
+    readPdfSession(),
+    readDocumentTableOfContents(),
+    readConfig(),
+  ])
+  const documents = library.documents.filter((document) => !selectedIds.size || selectedIds.has(document.literatureId))
+  const includedIds = new Set(documents.map((document) => document.literatureId))
+  const folderIds = getBackupFolderIds(library.folders, documents)
+  const safeConfig = { ...config }
+  delete safeConfig.apiKey
+
+  return {
+    backupVersion: 1,
+    createdAt: Date.now(),
+    library: {
+      schemaVersion: library.schemaVersion,
+      migrationVersion: library.migrationVersion,
+      folders: library.folders.filter((folder) => folderIds.has(folder.id)),
+      documents,
+    },
+    browsingHistory: browsingHistory.filter((record) => includedIds.has(record.documentId)),
+    pdfSession: {
+      ...pdfSession,
+      tabs: (pdfSession.tabs || []).filter((tab) => includedIds.has(tab.documentId)),
+      activeTabId: '',
+    },
+    tableOfContents: Object.fromEntries(Object.entries(tableOfContents).filter(([documentId]) => includedIds.has(documentId))),
+    config: safeConfig,
   }
 }
 
@@ -2111,6 +3144,7 @@ async function saveMarkdownBatchFiles(payload = {}) {
       .map((file) => ({
         fileName: getMarkdownBaseName(file?.fileName || file?.defaultFileName || 'PaperReader_Markdown'),
         markdown: String(file?.markdown || '').trim(),
+        relativePath: String(file?.relativePath || ''),
       }))
       .filter((file) => file.markdown)
     : []
@@ -2126,18 +3160,34 @@ async function saveMarkdownBatchFiles(payload = {}) {
 
   if (result.canceled || !result.filePaths[0]) return { canceled: true }
 
-  const outputDir = result.filePaths[0]
+  const outputDir = payload.outputName
+    ? path.join(result.filePaths[0], sanitizeExportName(payload.outputName, '批量导出'))
+    : result.filePaths[0]
   await fs.mkdir(outputDir, { recursive: true })
 
   const usedPaths = new Set()
   const filePaths = []
+  const errors = []
   for (const file of files) {
-    const targetFilePath = await getAvailableMarkdownPath(outputDir, file.fileName, usedPaths)
-    await fs.writeFile(targetFilePath, `${file.markdown}\n`, 'utf8')
-    filePaths.push(targetFilePath)
+    try {
+      const relativePath = file.relativePath.split(/[\\/]+/).filter(Boolean).map((segment) => sanitizeExportName(segment, 'folder'))
+      const fileOutputDir = relativePath.length ? path.join(outputDir, ...relativePath) : outputDir
+      await fs.mkdir(fileOutputDir, { recursive: true })
+      const targetFilePath = await getAvailableMarkdownPath(fileOutputDir, file.fileName, usedPaths)
+      await fs.writeFile(targetFilePath, `${file.markdown}\n`, 'utf8')
+      filePaths.push(targetFilePath)
+    } catch (error) {
+      errors.push({ fileName: file.fileName, error: getErrorMessage(error) })
+    }
   }
 
-  return { canceled: false, outputDir, filePaths }
+  return {
+    canceled: false,
+    outputDir,
+    filePaths,
+    errors,
+    error: !filePaths.length && errors.length ? '全部 Markdown 文件导出失败' : undefined,
+  }
 }
 
 function getPdfReportBaseName(value, fallback = 'PaperReader_Report') {
@@ -2317,6 +3367,7 @@ async function renderHtmlToPdfFiles(payload = {}) {
       .map((file) => ({
         fileName: getPdfReportBaseName(file?.fileName || file?.defaultFileName || 'PaperReader_Report'),
         html: String(file?.html || '').trim(),
+        relativePath: String(file?.relativePath || ''),
       }))
     : []
 
@@ -2331,7 +3382,9 @@ async function renderHtmlToPdfFiles(payload = {}) {
 
   if (result.canceled || !result.filePaths[0]) return { canceled: true }
 
-  const outputDir = result.filePaths[0]
+  const outputDir = payload.outputName
+    ? path.join(result.filePaths[0], sanitizeExportName(payload.outputName, '批量导出'))
+    : result.filePaths[0]
   await fs.mkdir(outputDir, { recursive: true })
 
   const usedPaths = new Set()
@@ -2344,7 +3397,10 @@ async function renderHtmlToPdfFiles(payload = {}) {
     }
 
     try {
-      const targetFilePath = await getAvailablePdfReportPath(outputDir, file.fileName, usedPaths)
+      const relativePath = file.relativePath.split(/[\\/]+/).filter(Boolean).map((segment) => sanitizeExportName(segment, 'folder'))
+      const fileOutputDir = relativePath.length ? path.join(outputDir, ...relativePath) : outputDir
+      await fs.mkdir(fileOutputDir, { recursive: true })
+      const targetFilePath = await getAvailablePdfReportPath(fileOutputDir, file.fileName, usedPaths)
       const pdfBuffer = await printHtmlToPdfBuffer(file.html)
       await fs.writeFile(targetFilePath, pdfBuffer)
       filePaths.push(targetFilePath)
@@ -2480,20 +3536,80 @@ function bookmarkSignature(item) {
 }
 
 async function importExportDocuments(documents, forcedDocumentId = null, forcedType = null) {
-  const histories = await readDocumentTranslationHistories()
-  const notesData = await readDocumentNotes()
-  const annotationsData = await readDocumentAnnotations()
-  const bookmarksData = await readDocumentBookmarks()
+  const [library, histories, notesData, annotationsData, bookmarksData] = await Promise.all([
+    readLibraryData(),
+    readDocumentTranslationHistories(),
+    readDocumentNotes(),
+    readDocumentAnnotations(),
+    readDocumentBookmarks(),
+  ])
+  let nextLiteratures = [...library.documents]
   const importType = forcedType ? normalizeDataExportType(forcedType) : null
-  const summary = { documents: 0, translationHistory: 0, notes: 0, annotations: 0, bookmarks: 0, skipped: 0 }
+  const summary = {
+    documents: 0,
+    addedLiteratures: 0,
+    mergedLiteratures: 0,
+    translationHistory: 0,
+    notes: 0,
+    annotations: 0,
+    bookmarks: 0,
+    skipped: 0,
+  }
   const touchedDocuments = new Set()
 
   documents.forEach((entry) => {
     const sourceDocument = entry.document || {}
-    const documentId = forcedDocumentId || String(sourceDocument.documentId || '').trim()
-    if (!documentId) return
+    const sourceLiteratureId = String(sourceDocument.literatureId || sourceDocument.documentId || '').trim()
+    const requestedLiteratureId = forcedDocumentId || sourceLiteratureId || createDocumentId(
+      sourceDocument.filePath,
+      sourceDocument.fileName,
+      sourceDocument.fileSize,
+    )
+    if (!requestedLiteratureId) return
+
+    const matchedLiterature = forcedDocumentId
+      ? nextLiteratures.find((item) => item.literatureId === forcedDocumentId)
+      : findMatchingLiterature(nextLiteratures, { ...sourceDocument, literatureId: requestedLiteratureId })
+    const documentId = matchedLiterature?.literatureId || requestedLiteratureId
+    const importedStatus = sourceDocument.status === LITERATURE_STATUS_RECYCLED
+      ? LITERATURE_STATUS_RECYCLED
+      : LITERATURE_STATUS_ACTIVE
+    if (matchedLiterature) {
+      summary.mergedLiteratures += 1
+      nextLiteratures = nextLiteratures.map((item) => (
+        item.literatureId === matchedLiterature.literatureId
+          ? {
+              ...item,
+              filePath: item.filePath || String(sourceDocument.filePath || ''),
+              fileName: item.fileName || String(sourceDocument.fileName || documentId),
+              displayName: item.displayName || String(sourceDocument.displayName || sourceDocument.fileName || documentId),
+              fingerprint: item.fingerprint || String(sourceDocument.fingerprint || ''),
+              fileSize: item.fileSize || Number(sourceDocument.fileSize) || 0,
+              updatedAt: Date.now(),
+            }
+          : item
+      ))
+    } else {
+      const newLiterature = normalizeLibraryDocument({
+        ...sourceDocument,
+        id: documentId,
+        literatureId: documentId,
+        documentId,
+        fileName: sourceDocument.fileName || documentId,
+        status: importedStatus,
+        folderId: importedStatus === LITERATURE_STATUS_ACTIVE ? null : null,
+        previousFolderId: importedStatus === LITERATURE_STATUS_RECYCLED ? sourceDocument.previousFolderId : null,
+        recycledAt: importedStatus === LITERATURE_STATUS_RECYCLED ? (sourceDocument.recycledAt || Date.now()) : null,
+        order: nextLiteratures.length,
+      })
+      if (newLiterature) {
+        nextLiteratures.push(newLiterature)
+        summary.addedLiteratures += 1
+      }
+    }
 
     const document = {
+      literatureId: documentId,
       documentId,
       filePath: String(sourceDocument.filePath || ''),
       fileName: String(sourceDocument.fileName || documentId),
@@ -2573,6 +3689,7 @@ async function importExportDocuments(documents, forcedDocumentId = null, forcedT
   await saveDocumentNotesData(notesData)
   await saveDocumentAnnotationsData(annotationsData)
   await saveDocumentBookmarksData(bookmarksData)
+  await saveLibraryData({ ...library, documents: nextLiteratures })
   summary.documents = touchedDocuments.size
   return summary
 }
@@ -2610,43 +3727,20 @@ async function importDataToCurrentDocument(documentId, exportType) {
 }
 
 async function getExportableDocuments() {
-  const histories = await readDocumentTranslationHistories()
-  const notes = await readDocumentNotes()
-  const annotations = await readDocumentAnnotations()
-  const bookmarks = await readDocumentBookmarks()
-  const browsingHistory = await readBrowsingHistory()
-  const ids = new Set([
-    ...Object.keys(histories),
-    ...Object.keys(notes),
-    ...Object.keys(annotations),
-    ...Object.keys(bookmarks),
-    ...browsingHistory.map((record) => record.documentId),
-  ])
-
-  return Array.from(ids).map((documentId) => {
-    const historyContainer = histories[documentId] || {}
-    const noteContainer = notes[documentId] || {}
-    const annotationContainer = annotations[documentId] || {}
-    const bookmarkContainer = bookmarks[documentId] || {}
-    const browsingRecord = browsingHistory.find((record) => record.documentId === documentId)
-    const document = buildDocumentMeta(documentId, {
-      filePath: historyContainer.filePath || noteContainer.filePath || annotationContainer.filePath || bookmarkContainer.filePath,
-      fileName: historyContainer.fileName || noteContainer.fileName || annotationContainer.fileName || bookmarkContainer.fileName,
-      lastUpdatedAt: Math.max(
-        Number(historyContainer.lastOpenedAt) || 0,
-        Number(noteContainer.lastUpdatedAt) || 0,
-        Number(annotationContainer.lastUpdatedAt) || 0,
-        Number(bookmarkContainer.lastUpdatedAt) || 0,
-      ),
-    }, browsingRecord)
-    return {
+  const library = await getEnrichedLibrary()
+  return library.literatures
+    .map((document) => ({
       ...document,
-      historyCount: normalizeHistoryItems(historyContainer.items || []).length,
-      notesCount: normalizeNoteItems(noteContainer.items || []).length,
-      annotationsCount: normalizeAnnotationItems(annotationContainer.items || []).length,
-      bookmarksCount: normalizeBookmarkItems(bookmarkContainer.items || []).length,
-    }
-  }).sort((a, b) => b.lastUpdatedAt - a.lastUpdatedAt)
+      documentId: document.literatureId,
+      sourceFileName: document.fileName,
+      fileName: document.displayName || document.fileName,
+      lastUpdatedAt: document.updatedAt || document.lastOpenedAt || document.createdAt,
+    }))
+    .sort((a, b) => {
+      if (a.status !== b.status) return a.status === LITERATURE_STATUS_ACTIVE ? -1 : 1
+      if (a.status === LITERATURE_STATUS_RECYCLED) return (b.recycledAt || 0) - (a.recycledAt || 0)
+      return b.lastUpdatedAt - a.lastUpdatedAt
+    })
 }
 
 async function batchExportPaperReaderData(options = {}) {
@@ -2684,8 +3778,131 @@ async function batchExportPaperReaderData(options = {}) {
   }
 
   const exportObject = buildMultiDocumentExport(documents, exportType, options.userExportName || '未命名合集')
+  if (options.includeAppState === true && exportType === 'full') {
+    exportObject.backupType = 'application'
+    exportObject.applicationState = await collectApplicationBackupState(documentIds)
+  }
   const saved = await writeExportJson(exportObject)
   return { ...saved, filePaths: saved.filePath ? [saved.filePath] : [] }
+}
+
+function getFolderDepth(folder, byId) {
+  let depth = 0
+  let parentId = folder.parentId
+  const visited = new Set([folder.id])
+  while (parentId && byId.has(parentId) && !visited.has(parentId)) {
+    visited.add(parentId)
+    depth += 1
+    parentId = byId.get(parentId).parentId
+  }
+  return depth
+}
+
+async function mergeApplicationBackupStates(states, existingLiteratureIds) {
+  const applicationStates = states.filter((state) => state?.backupVersion === 1 && state.library)
+  if (!applicationStates.length) return { folders: 0, restoredStates: 0 }
+
+  const [currentLibrary, currentBrowsing, currentToc, currentConfig] = await Promise.all([
+    readLibraryData(),
+    readBrowsingHistory(),
+    readDocumentTableOfContents(),
+    readConfig(),
+  ])
+  let nextFolders = [...currentLibrary.folders]
+  let nextDocuments = [...currentLibrary.documents]
+  const nextBrowsing = [...currentBrowsing]
+  const nextToc = { ...currentToc }
+  const literatureIdMap = new Map()
+  let addedFolders = 0
+
+  for (const state of applicationStates) {
+    const sourceFolders = normalizeLibraryData(state.library).folders
+    const sourceFolderById = new Map(sourceFolders.map((folder) => [folder.id, folder]))
+    const folderIdMap = new Map()
+    const orderedFolders = sourceFolders.slice().sort((a, b) => getFolderDepth(a, sourceFolderById) - getFolderDepth(b, sourceFolderById) || a.order - b.order)
+
+    orderedFolders.forEach((folder) => {
+      const mappedParentId = folder.parentId ? (folderIdMap.get(folder.parentId) || null) : null
+      const exact = nextFolders.find((item) => item.id === folder.id)
+      const sameSibling = nextFolders.find((item) => (
+        (item.parentId || null) === mappedParentId && item.name.trim().toLowerCase() === folder.name.trim().toLowerCase()
+      ))
+      if (exact || sameSibling) {
+        folderIdMap.set(folder.id, (exact || sameSibling).id)
+        return
+      }
+      const id = nextFolders.some((item) => item.id === folder.id)
+        ? `${folder.id}-import-${Date.now()}-${addedFolders}`
+        : folder.id
+      nextFolders.push({ ...folder, id, parentId: mappedParentId, order: nextFolders.filter((item) => (item.parentId || null) === mappedParentId).length })
+      folderIdMap.set(folder.id, id)
+      addedFolders += 1
+    })
+
+    const sourceDocuments = normalizeLibraryData(state.library).documents
+    sourceDocuments.forEach((sourceDocument) => {
+      const target = findMatchingLiterature(nextDocuments, sourceDocument)
+      if (!target) return
+      literatureIdMap.set(sourceDocument.literatureId, target.literatureId)
+      if (existingLiteratureIds.has(target.literatureId)) return
+      nextDocuments = nextDocuments.map((document) => {
+        if (document.literatureId !== target.literatureId) return document
+        const sourceFolderId = sourceDocument.status === LITERATURE_STATUS_RECYCLED
+          ? sourceDocument.previousFolderId
+          : sourceDocument.folderId
+        const mappedFolderId = sourceFolderId ? (folderIdMap.get(sourceFolderId) || null) : null
+        return {
+          ...document,
+          status: sourceDocument.status,
+          folderId: sourceDocument.status === LITERATURE_STATUS_ACTIVE ? mappedFolderId : null,
+          previousFolderId: sourceDocument.status === LITERATURE_STATUS_RECYCLED ? mappedFolderId : null,
+          recycledAt: sourceDocument.status === LITERATURE_STATUS_RECYCLED ? sourceDocument.recycledAt : null,
+        }
+      })
+    })
+
+    ;(state.browsingHistory || []).forEach((record) => {
+      const documentId = literatureIdMap.get(record.documentId) || record.documentId
+      if (!nextBrowsing.some((item) => item.documentId === documentId)) {
+        nextBrowsing.push({ ...record, documentId, id: documentId })
+      }
+    })
+    Object.entries(state.tableOfContents || {}).forEach(([sourceId, value]) => {
+      const documentId = literatureIdMap.get(sourceId) || sourceId
+      if (!nextToc[documentId]) nextToc[documentId] = value
+    })
+  }
+
+  const importedConfig = applicationStates.find((state) => state.config)?.config || {}
+  const nextConfig = existingLiteratureIds.size
+    ? {
+        ...currentConfig,
+        exportDefaultDir: currentConfig.exportDefaultDir || String(importedConfig.exportDefaultDir || ''),
+      }
+    : {
+        ...currentConfig,
+        ...importedConfig,
+        apiKey: currentConfig.apiKey,
+      }
+  const writes = [
+    [getLibraryPath(), normalizeLibraryData({ ...currentLibrary, folders: nextFolders, documents: nextDocuments })],
+    [getBrowsingHistoryPath(), normalizeBrowsingHistory(nextBrowsing)],
+    [getTableOfContentsPath(), normalizeDocumentTableOfContents(nextToc)],
+    [getConfigPath(), normalizeConfig(nextConfig)],
+  ]
+  const rollback = [
+    [getLibraryPath(), currentLibrary],
+    [getBrowsingHistoryPath(), currentBrowsing],
+    [getTableOfContentsPath(), currentToc],
+    [getConfigPath(), currentConfig],
+  ]
+  try {
+    for (const [filePath, value] of writes) await writeJsonFileAtomic(filePath, value)
+  } catch (error) {
+    await Promise.allSettled(rollback.map(([filePath, value]) => writeJsonFileAtomic(filePath, value)))
+    throw new Error(`恢复应用状态失败：${error.message}`, { cause: error })
+  }
+  return { folders: addedFolders, restoredStates: applicationStates.length }
 }
 
 async function batchImportPaperReaderData() {
@@ -2697,11 +3914,20 @@ async function batchImportPaperReaderData() {
   if (result.canceled || !result.filePaths.length) return { canceled: true }
 
   const allDocuments = []
+  const applicationStates = []
   for (const filePath of result.filePaths) {
     const exportObject = await readExportFile(filePath)
     allDocuments.push(...getExportDocuments(exportObject))
+    if (exportObject.backupType === 'application' && exportObject.applicationState) {
+      applicationStates.push(exportObject.applicationState)
+    }
   }
+  const existingLibrary = await readLibraryData()
+  const existingLiteratureIds = new Set(existingLibrary.documents.map((document) => document.literatureId))
   const summary = await importExportDocuments(allDocuments)
+  const restored = await mergeApplicationBackupStates(applicationStates, existingLiteratureIds)
+  summary.folders = restored.folders
+  summary.restoredStates = restored.restoredStates
   return { canceled: false, summary }
 }
 
@@ -3205,10 +4431,20 @@ function registerIpcHandlers() {
   ipcMain.handle('library:get', async () => getEnrichedLibrary())
   ipcMain.handle('library:import-pdfs', async () => importLibraryPdfs())
   ipcMain.handle('library:upsert-document', async (_event, document) => upsertLibraryDocument(document))
-  ipcMain.handle('library:create-folder', async (_event, name) => createLibraryFolder(name))
+  ipcMain.handle('library:create-folder', async (_event, input) => createLibraryFolder(input))
   ipcMain.handle('library:update-folder', async (_event, folderId, updates) => updateLibraryFolder(folderId, updates))
+  ipcMain.handle('library:reorder-folder', async (_event, folderId, targetFolderId, placement) => (
+    reorderLibraryFolder(folderId, targetFolderId, placement)
+  ))
+  ipcMain.handle('library:move-folder', async (_event, folderId, parentId) => moveLibraryFolder(folderId, parentId))
+  ipcMain.handle('library:delete-folder', async (_event, folderId) => deleteLibraryFolder(folderId))
+  ipcMain.handle('library:update-document', async (_event, literatureId, updates) => updateLibraryDocument(literatureId, updates))
   ipcMain.handle('library:move-documents', async (_event, documentIds, folderId) => moveLibraryDocuments(documentIds, folderId))
   ipcMain.handle('library:delete-documents', async (_event, documentIds) => deleteLibraryDocuments(documentIds))
+  ipcMain.handle('library:delete-literature', async (_event, literatureIds, mode) => deleteLiterature(literatureIds, mode))
+  ipcMain.handle('library:restore-documents', async (_event, documentIds) => restoreLibraryDocuments(documentIds))
+  ipcMain.handle('library:permanently-delete-documents', async (_event, documentIds) => permanentlyDeleteLibraryDocuments(documentIds))
+  ipcMain.handle('library:export-scope', async (_event, options) => exportLiteratureScope(options))
   ipcMain.handle('pdf-session:get', async () => readPdfSession())
   ipcMain.handle('pdf-session:save', async (_event, session) => savePdfSession(session))
   ipcMain.handle('pdf:open-dialog', async () => openPdfDialog())
