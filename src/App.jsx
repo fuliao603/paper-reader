@@ -1045,6 +1045,21 @@ function App() {
     setPreviewHighlight(null)
   }, [])
 
+  const suspendPdfTextSelection = useCallback(() => {
+    annotationInteractionSuspendedRef.current = true
+    selectionInteractionVersionRef.current += 1
+
+    if (selectionFrameRef.current) {
+      cancelAnimationFrame(selectionFrameRef.current)
+      selectionFrameRef.current = null
+    }
+
+    // Do not clear the native selection while a text field is processing its
+    // pointer sequence. On Windows, doing so during pointerdown/mouseup can
+    // leave Chromium's caret visible without activating the IME text session.
+    isSelectingRef.current = false
+  }, [])
+
   const cancelTransientPointerInteractions = useCallback(() => {
     releasePdfTextSelection()
     ocrStartPointRef.current = null
@@ -3033,26 +3048,16 @@ function App() {
   }, [settingsForm, rightPanelWidth])
 
   useEffect(() => {
-    let focusFrameId = null
-    let releaseFocusFrameId = null
+    let blurFrameId = null
 
     function handleTextEntryPointerDown(event) {
       const textEntry = getTextEntryElement(event.target)
       if (!textEntry) return
 
-      annotationInteractionSuspendedRef.current = true
-      selectionInteractionVersionRef.current += 1
-      cancelTransientPointerInteractions()
-      setIsAnnotationToolbarOpen(false)
-      setHighlightContextMenu(null)
-
-      if (focusFrameId) cancelAnimationFrame(focusFrameId)
-      focusFrameId = requestAnimationFrame(() => {
-        focusFrameId = null
-        if (textEntry.isConnected && document.activeElement !== textEntry) {
-          textEntry.focus({ preventScroll: true })
-        }
-      })
+      // Keep the native pointer sequence intact so Chromium can focus the
+      // field normally. State updates here can re-render between pointerdown
+      // and mouseup and intermittently discard the user's click.
+      suspendPdfTextSelection()
     }
 
     function handleTextEntryFocusIn(event) {
@@ -3061,38 +3066,38 @@ function App() {
       annotationInteractionSuspendedRef.current = true
     }
 
-    function handleTextEntryFocusOut(event) {
-      if (!getTextEntryElement(event.target)) return
-
-      if (releaseFocusFrameId) cancelAnimationFrame(releaseFocusFrameId)
-      releaseFocusFrameId = requestAnimationFrame(() => {
-        releaseFocusFrameId = null
-        annotationInteractionSuspendedRef.current = Boolean(
-          noteDialogRef.current || getTextEntryElement(document.activeElement),
-        )
-      })
-    }
-
     function handleWindowBlur() {
-      cancelTransientPointerInteractions()
+      if (blurFrameId) cancelAnimationFrame(blurFrameId)
+      blurFrameId = requestAnimationFrame(() => {
+        blurFrameId = null
+
+        // Chromium can briefly report BODY as the active element while a
+        // mouse click transfers focus into a text field. Cleaning React state
+        // during that gap breaks the native mousedown/mouseup focus sequence.
+        if (document.hasFocus() || getTextEntryElement(document.activeElement)) {
+          annotationInteractionSuspendedRef.current = Boolean(
+            getTextEntryElement(document.activeElement),
+          )
+          return
+        }
+
+        cancelTransientPointerInteractions()
+      })
     }
 
     document.addEventListener('pointerdown', handleTextEntryPointerDown, true)
     document.addEventListener('focusin', handleTextEntryFocusIn, true)
-    document.addEventListener('focusout', handleTextEntryFocusOut, true)
     document.addEventListener('pointercancel', cancelTransientPointerInteractions)
     window.addEventListener('blur', handleWindowBlur)
 
     return () => {
-      if (focusFrameId) cancelAnimationFrame(focusFrameId)
-      if (releaseFocusFrameId) cancelAnimationFrame(releaseFocusFrameId)
+      if (blurFrameId) cancelAnimationFrame(blurFrameId)
       document.removeEventListener('pointerdown', handleTextEntryPointerDown, true)
       document.removeEventListener('focusin', handleTextEntryFocusIn, true)
-      document.removeEventListener('focusout', handleTextEntryFocusOut, true)
       document.removeEventListener('pointercancel', cancelTransientPointerInteractions)
       window.removeEventListener('blur', handleWindowBlur)
     }
-  }, [cancelTransientPointerInteractions])
+  }, [cancelTransientPointerInteractions, suspendPdfTextSelection])
 
   useEffect(() => {
     if (settingsTab === 'importExport') {
@@ -3565,18 +3570,6 @@ function App() {
       setHighlightContextMenu(null)
     }
   }, [isAnnotationToolbarOpen])
-
-  useEffect(() => {
-    if (!noteDialog) return undefined
-
-    const focusTimer = window.setTimeout(() => {
-      const targetInput = noteTitleInputRef.current || noteTextareaRef.current
-
-      targetInput?.focus({ preventScroll: true })
-    }, 50)
-
-    return () => window.clearTimeout(focusTimer)
-  }, [noteDialog])
 
   useEffect(() => {
     if (!bookmarkDialogOpen) return undefined
@@ -8638,6 +8631,11 @@ function App() {
     }
 
     function handleDocumentMouseUp(event) {
+      if (getTextEntryElement(event.target)) {
+        suspendPdfTextSelection()
+        return
+      }
+
       if (isInteractiveElement(event.target)) {
         releasePdfTextSelection()
         return
@@ -11980,8 +11978,6 @@ function App() {
             onMouseDown={(event) => event.stopPropagation()}
             onMouseUp={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
-            onBeforeInput={(event) => event.stopPropagation()}
-            onInput={(event) => event.stopPropagation()}
             onKeyDown={(event) => event.stopPropagation()}
             onKeyUp={(event) => event.stopPropagation()}
           >
@@ -11997,6 +11993,7 @@ function App() {
               <input
                 ref={noteTitleInputRef}
                 type="text"
+                autoFocus
                 defaultValue={noteDialog.draft?.title ?? noteDraft.title}
                 onFocus={() => setNotesStatus('')}
                 placeholder="输入笔记标题"
