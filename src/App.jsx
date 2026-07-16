@@ -810,6 +810,8 @@ function App() {
   const isSelectingRef = useRef(false)
   const selectionFrameRef = useRef(null)
   const selectionInteractionVersionRef = useRef(0)
+  // Text entry pauses PDF selection without clearing the user's annotation color.
+  const annotationInteractionSuspendedRef = useRef(false)
   const ocrStartPointRef = useRef(null)
   const panelResizeStartRef = useRef(null)
   const settingsFormRef = useRef(DEFAULT_SETTINGS)
@@ -2219,11 +2221,13 @@ function App() {
   }
 
   function closeNoteDialog() {
+    annotationInteractionSuspendedRef.current = false
     setNoteDialog(null)
     setNoteDraft({ title: '', noteText: '' })
   }
 
   function openNoteDialog(mode, note) {
+    annotationInteractionSuspendedRef.current = true
     clearNoteDialogBlockers()
 
     const draft = {
@@ -3030,11 +3034,13 @@ function App() {
 
   useEffect(() => {
     let focusFrameId = null
+    let releaseFocusFrameId = null
 
     function handleTextEntryPointerDown(event) {
       const textEntry = getTextEntryElement(event.target)
       if (!textEntry) return
 
+      annotationInteractionSuspendedRef.current = true
       selectionInteractionVersionRef.current += 1
       cancelTransientPointerInteractions()
       setIsAnnotationToolbarOpen(false)
@@ -3049,17 +3055,40 @@ function App() {
       })
     }
 
+    function handleTextEntryFocusIn(event) {
+      if (!getTextEntryElement(event.target)) return
+
+      annotationInteractionSuspendedRef.current = true
+    }
+
+    function handleTextEntryFocusOut(event) {
+      if (!getTextEntryElement(event.target)) return
+
+      if (releaseFocusFrameId) cancelAnimationFrame(releaseFocusFrameId)
+      releaseFocusFrameId = requestAnimationFrame(() => {
+        releaseFocusFrameId = null
+        annotationInteractionSuspendedRef.current = Boolean(
+          noteDialogRef.current || getTextEntryElement(document.activeElement),
+        )
+      })
+    }
+
     function handleWindowBlur() {
       cancelTransientPointerInteractions()
     }
 
     document.addEventListener('pointerdown', handleTextEntryPointerDown, true)
+    document.addEventListener('focusin', handleTextEntryFocusIn, true)
+    document.addEventListener('focusout', handleTextEntryFocusOut, true)
     document.addEventListener('pointercancel', cancelTransientPointerInteractions)
     window.addEventListener('blur', handleWindowBlur)
 
     return () => {
       if (focusFrameId) cancelAnimationFrame(focusFrameId)
+      if (releaseFocusFrameId) cancelAnimationFrame(releaseFocusFrameId)
       document.removeEventListener('pointerdown', handleTextEntryPointerDown, true)
+      document.removeEventListener('focusin', handleTextEntryFocusIn, true)
+      document.removeEventListener('focusout', handleTextEntryFocusOut, true)
       document.removeEventListener('pointercancel', cancelTransientPointerInteractions)
       window.removeEventListener('blur', handleWindowBlur)
     }
@@ -5966,6 +5995,12 @@ function App() {
   }
 
   function updateSelectionHighlights() {
+    if (annotationInteractionSuspendedRef.current) {
+      setHighlightRects([])
+      setPreviewHighlight(null)
+      return
+    }
+
     const selection = window.getSelection()
 
     if (!selection || selection.isCollapsed) {
@@ -8455,6 +8490,8 @@ function App() {
   function handleSelectionStart(event) {
     if (isInteractiveElement(event.target)) return
 
+    annotationInteractionSuspendedRef.current = false
+
     if (isOcrMode) {
       handleOcrSelectionStart(event)
       return
@@ -8469,6 +8506,8 @@ function App() {
   function handleSelectionMove(event) {
     if (isInteractiveElement(event.target)) return
 
+    if (annotationInteractionSuspendedRef.current) return
+
     if (isOcrMode) {
       handleOcrSelectionMove(event)
       return
@@ -8480,6 +8519,11 @@ function App() {
   }
 
   async function handleTextSelection(event) {
+    if (annotationInteractionSuspendedRef.current) {
+      releasePdfTextSelection()
+      return
+    }
+
     if (event?.target && isInteractiveElement(event.target)) {
       releasePdfTextSelection()
       return
