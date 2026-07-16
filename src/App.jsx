@@ -1069,7 +1069,6 @@ function App() {
     setActiveAnnotationId('')
     setHighlightContextMenu(null)
     setIsAnnotationToolbarOpen(false)
-    setAnnotationColor(null)
     setAnnotationStatus('')
     setIsOcrMode(false)
     setIsOcrMenuOpen(false)
@@ -2622,7 +2621,6 @@ function App() {
   function handleAnnotationClick(annotation) {
     selectionInteractionVersionRef.current += 1
     releasePdfTextSelection()
-    setAnnotationColor(null)
     setIsAnnotationToolbarOpen(false)
     setActiveAnnotationId(annotation.id)
 
@@ -3039,7 +3037,6 @@ function App() {
 
       selectionInteractionVersionRef.current += 1
       cancelTransientPointerInteractions()
-      setAnnotationColor(null)
       setIsAnnotationToolbarOpen(false)
       setHighlightContextMenu(null)
 
