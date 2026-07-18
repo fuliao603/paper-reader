@@ -838,6 +838,7 @@ function App() {
   const noteDialogRef = useRef(null)
   const noteTitleInputRef = useRef(null)
   const noteTextareaRef = useRef(null)
+  const pdfHighlightWritePromptRef = useRef(null)
   const bookmarkTitleInputRef = useRef(null)
   const libraryFolderNameInputRef = useRef(null)
   const retainedRightPanelActionsRef = useRef(null)
@@ -958,6 +959,7 @@ function App() {
   const [isAnnotationToolbarOpen, setIsAnnotationToolbarOpen] = useState(false)
   const [annotationColor, setAnnotationColor] = useState(null)
   const [pdfHighlightWriteMode, setPdfHighlightWriteMode] = useState('ask')
+  const [pdfHighlightWritePromptOpen, setPdfHighlightWritePromptOpen] = useState(false)
   const [documentAnnotations, setDocumentAnnotations] = useState([])
   const [previewHighlight, setPreviewHighlight] = useState(null)
   const [activeAnnotationId, setActiveAnnotationId] = useState('')
@@ -2482,16 +2484,37 @@ function App() {
     }
   }
 
+  function requestPdfHighlightWriteMode() {
+    if (pdfHighlightWritePromptRef.current?.promise) {
+      return pdfHighlightWritePromptRef.current.promise
+    }
+
+    let resolvePrompt
+    const promise = new Promise((resolve) => {
+      resolvePrompt = resolve
+    })
+
+    pdfHighlightWritePromptRef.current = { promise, resolve: resolvePrompt }
+    setPdfHighlightWritePromptOpen(true)
+    return promise
+  }
+
+  function resolvePdfHighlightWritePrompt(mode) {
+    const pendingPrompt = pdfHighlightWritePromptRef.current
+    if (!pendingPrompt) return
+
+    pdfHighlightWritePromptRef.current = null
+    setPdfHighlightWritePromptOpen(false)
+    pendingPrompt.resolve(mode)
+  }
+
   async function maybeEmbedHighlightInPdf(annotation) {
     if (!annotation || annotation.type !== 'text-highlight' || !window.electronAPI?.embedPdfHighlightAnnotation) return annotation
     if (!currentDocument?.filePath || currentDocument.filePath === currentDocument.fileName) return annotation
 
     let nextWriteMode = pdfHighlightWriteMode
     if (nextWriteMode === 'ask') {
-      const shouldWrite = window.confirm(
-        '是否将后续高亮写入 PDF 文件本体？写入后用其他 PDF 软件打开也能看到。建议先备份原文件。\n\n确定：写入当前 PDF，并自动创建 .paper-reader-backup.pdf 备份。\n取消：仅在 Paper Reader 内显示高亮。',
-      )
-      nextWriteMode = shouldWrite ? 'write' : 'internal'
+      nextWriteMode = await requestPdfHighlightWriteMode()
       setPdfHighlightWriteMode(nextWriteMode)
     }
 
@@ -2579,12 +2602,11 @@ function App() {
     setPageJumpInput(String(nextPage))
   }
 
-  function getActiveHighlight() {
-    return documentAnnotations.find((item) => item.id === activeAnnotationId && item.type === 'text-highlight')
-  }
-
-  async function translateActiveHighlight() {
-    const highlight = getActiveHighlight()
+  async function translateHighlightFromContextMenu() {
+    const highlight = documentAnnotations.find(
+      (item) => item.id === highlightContextMenu?.highlightId && item.type === 'text-highlight',
+    )
+    setHighlightContextMenu(null)
 
     if (!highlight?.selectedText) {
       setAnnotationStatus('请先选择需要批注的文字')
@@ -2611,17 +2633,6 @@ function App() {
     } catch (error) {
       setAnnotationStatus(error.message || UI.translateError)
     }
-  }
-
-  function addNoteForActiveHighlight() {
-    const highlight = getActiveHighlight()
-
-    if (!highlight) {
-      setAnnotationStatus('请先选择需要批注的文字')
-      return
-    }
-
-    openAnnotationNoteDialog(highlight)
   }
 
   function openNoteById(noteId) {
@@ -2657,7 +2668,7 @@ function App() {
     if (annotation?.type !== 'text-highlight') return
 
     const menuWidth = 132
-    const menuHeight = 46
+    const menuHeight = 80
 
     setActiveAnnotationId(annotation.id)
     setHighlightContextMenu({
@@ -11317,12 +11328,6 @@ function App() {
                     />
                   ))}
                 </div>
-                <button type="button" onClick={translateActiveHighlight}>
-                  翻译
-                </button>
-                <button type="button" onClick={addNoteForActiveHighlight}>
-                  笔记
-                </button>
                 <button type="button" onClick={() => setHideOcrNoteTags((isHidden) => !isHidden)}>
                   {hideOcrNoteTags ? '显示笔记标签' : '隐藏笔记标签'}
                 </button>
@@ -11920,8 +11925,59 @@ function App() {
           onPointerDown={(event) => event.stopPropagation()}
         >
           <button type="button" onClick={() => deleteHighlightAnnotation(highlightContextMenu.highlightId)}>
-            取消高亮
+            取消
           </button>
+          <button type="button" onClick={translateHighlightFromContextMenu}>
+            翻译
+          </button>
+        </div>
+      ) : null}
+
+      {pdfHighlightWritePromptOpen ? (
+        <div className="note-dialog-overlay" role="presentation">
+          <section
+            className="note-dialog pdf-highlight-write-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="pdf-highlight-write-dialog-title"
+            onPointerDown={(event) => event.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
+            onMouseUp={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key !== 'Escape') return
+              event.preventDefault()
+              event.stopPropagation()
+              resolvePdfHighlightWritePrompt('internal')
+            }}
+          >
+            <div className="diagram-dialog-header">
+              <h2 id="pdf-highlight-write-dialog-title">高亮写入方式</h2>
+            </div>
+
+            <div className="note-dialog-source">
+              <strong>是否将后续高亮写入 PDF 文件本体？</strong>
+              <p>写入后用其他 PDF 软件打开也能看到，并会自动创建 .paper-reader-backup.pdf 备份。</p>
+            </div>
+
+            <div className="settings-actions">
+              <button
+                type="button"
+                className="settings-secondary-button"
+                autoFocus
+                onClick={() => resolvePdfHighlightWritePrompt('internal')}
+              >
+                仅在 Paper Reader 内显示
+              </button>
+              <button
+                type="button"
+                className="settings-primary-button"
+                onClick={() => resolvePdfHighlightWritePrompt('write')}
+              >
+                写入 PDF 并创建备份
+              </button>
+            </div>
+          </section>
         </div>
       ) : null}
 
