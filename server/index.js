@@ -120,11 +120,33 @@ function getProviderFromConfig() {
   }
 }
 
+function getProviderFromRequestConfig(config = {}) {
+  const aiConfig = normalizeProviderConfig(config, {})
+
+  return {
+    config: aiConfig,
+    provider: ProviderRouter.create(aiConfig),
+  }
+}
+
 function getImagePayload(req) {
   const image = String(req.body?.image || '').trim()
-  const mode = req.body?.mode === 'compare' ? 'compare' : 'diagram'
+  const mode = ['selection', 'text', 'compare', 'diagram'].includes(req.body?.mode)
+    ? req.body.mode
+    : 'diagram'
   const imageWidth = Number(req.body?.imageWidth) || 0
   const imageHeight = Number(req.body?.imageHeight) || 0
+  const rawReviewContext = req.body?.reviewContext
+  const reviewContext = rawReviewContext && typeof rawReviewContext === 'object'
+    ? {
+        attempt: Math.max(1, Math.min(2, Math.floor(Number(rawReviewContext.attempt) || 1))),
+        reason: String(rawReviewContext.reason || '').slice(0, 120),
+        targetModule: rawReviewContext.targetModule || null,
+        neighborModules: Array.isArray(rawReviewContext.neighborModules)
+          ? rawReviewContext.neighborModules.slice(0, 12)
+          : [],
+      }
+    : null
 
   if (!image) throw new Error('image cannot be empty')
   if (!imageWidth || !imageHeight) throw new Error('image size cannot be empty')
@@ -134,6 +156,7 @@ function getImagePayload(req) {
     mode,
     imageWidth,
     imageHeight,
+    reviewContext,
   }
 }
 
@@ -171,14 +194,41 @@ async function handleTranslateText(req, res) {
   }
 }
 
+async function handleListModels(req, res) {
+  try {
+    const { config, provider } = getProviderFromRequestConfig(req.body?.config)
+    const models = await provider.listModels()
+
+    return res.json({
+      models,
+      provider: config.provider,
+      baseUrl: config.baseUrl,
+    })
+  } catch (error) {
+    console.error('Model list request failed:', {
+      message: getProviderErrorMessage(error),
+    })
+    return sendProviderError(
+      res,
+      error,
+      '获取模型列表失败，请检查 API Key、Base URL 和 Provider。',
+    )
+  }
+}
+
 async function handleImageTranslation(req, res, targetMode) {
   try {
-    const { image, mode, imageWidth, imageHeight } = getImagePayload(req)
+    const { image, mode, imageWidth, imageHeight, reviewContext } = getImagePayload(req)
     const { config, provider } = getProviderFromConfig()
     const options = {
-      mode: targetMode === 'diagram' ? 'diagram' : mode === 'compare' ? 'compare' : 'compare',
+      mode: targetMode === 'diagram'
+        ? 'diagram'
+        : ['selection', 'text', 'compare'].includes(mode)
+          ? mode
+          : 'compare',
       imageWidth,
       imageHeight,
+      reviewContext,
       systemPrompt: buildSystemPrompt(config),
     }
     const result = targetMode === 'diagram'
@@ -250,6 +300,7 @@ export function createServer() {
   app.post('/ai/translate-image-ocr', async (req, res) => handleImageTranslation(req, res, 'ocr'))
   app.post('/ai/translate-image-diagram', async (req, res) => handleImageTranslation(req, res, 'diagram'))
   app.post('/ai/recognize-toc', handleRecognizeToc)
+  app.post('/ai/models', handleListModels)
 
   // Legacy renderer/browser endpoints kept for compatibility.
   app.post('/translate', handleTranslateText)

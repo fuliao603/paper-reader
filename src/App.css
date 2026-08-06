@@ -2223,10 +2223,111 @@ button.file-export-folder-node:hover,
   line-height: 1.5;
 }
 
-.settings-model-row {
+.settings-model-combobox {
+  position: relative;
+}
+
+.settings-model-combobox > input {
+  padding-right: 42px;
+}
+
+.settings-model-toggle {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  bottom: 1px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.55fr);
-  gap: 10px;
+  width: 40px;
+  place-items: center;
+  border: 0;
+  border-left: 1px solid transparent;
+  border-radius: 0 var(--radius-control) var(--radius-control) 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    color var(--transition-fast),
+    background var(--transition-fast);
+}
+
+.settings-model-toggle:hover,
+.settings-model-toggle[aria-expanded='true'] {
+  background: var(--surface-soft);
+  color: var(--text);
+}
+
+.settings-model-toggle:focus-visible {
+  outline: 2px solid var(--primary-soft-strong);
+  outline-offset: -3px;
+}
+
+.settings-model-toggle[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+
+.settings-model-toggle svg {
+  transition: transform var(--transition-fast);
+}
+
+.settings-model-options {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 100%;
+  max-height: min(320px, 45vh);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-floating);
+}
+
+.settings-model-option {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: 2px;
+  padding: 9px 11px;
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-model-option:last-child {
+  border-bottom: 0;
+}
+
+.settings-model-option:hover,
+.settings-model-option.selected {
+  background: var(--primary-soft);
+}
+
+.settings-model-option span,
+.settings-model-option small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-model-option small {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.settings-model-empty {
+  margin: 0;
+  padding: 12px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.settings-model-empty.error {
+  color: var(--danger);
 }
 
 .settings-switch-row {
@@ -2239,6 +2340,32 @@ button.file-export-folder-node:hover,
   border-radius: var(--radius-control);
   background: var(--surface);
   color: var(--text);
+}
+
+.settings-advanced-parameters {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+}
+
+.settings-advanced-parameters > summary {
+  padding: 10px 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  user-select: none;
+}
+
+.settings-advanced-parameters[open] > summary {
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text);
+}
+
+.settings-advanced-parameters-body {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
 }
 
 .settings-switch-row > span {
@@ -4515,8 +4642,7 @@ button:disabled:hover {
   }
 
   .settings-dialog-header,
-  .settings-actions,
-  .settings-model-row {
+  .settings-actions {
     align-items: stretch;
     flex-direction: column;
   }
@@ -4542,10 +4668,6 @@ button:disabled:hover {
   .settings-tab {
     flex: 0 0 auto;
     min-height: 42px;
-  }
-
-  .settings-model-row {
-    grid-template-columns: 1fr;
   }
 
   .app:fullscreen .reader-layout {
@@ -5909,7 +6031,6 @@ input[type='radio'] {
     padding: 20px 16px 32px;
   }
 
-  .settings-model-row,
   .export-options-grid {
     grid-template-columns: 1fr;
   }

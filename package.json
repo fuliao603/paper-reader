@@ -43,6 +43,7 @@
     }
   },
   "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
     "@tesseract.js-data/eng": "^1.0.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",

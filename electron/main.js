@@ -17,6 +17,9 @@ const DEFAULT_CONFIG = {
   apiKey: '',
   baseUrl: 'https://api.deepseek.com',
   model: 'deepseek-v4-flash',
+  modelSupportsMultimodal: null,
+  temperatureMode: 'auto',
+  temperature: 0.2,
   prompt: '',
   enableMultimodalTranslation: false,
   rightPanelWidth: 420,
@@ -47,17 +50,36 @@ const PROVIDER_DEFAULTS = {
     baseUrl: 'https://api.anthropic.com',
     model: 'claude-3-5-sonnet-latest',
   },
+  glm: {
+    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    model: '',
+  },
+  gemini: {
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    model: '',
+  },
+  qwen: {
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    model: '',
+  },
+  kimi: {
+    baseUrl: 'https://api.moonshot.cn/v1',
+    model: '',
+  },
+  openrouter: {
+    baseUrl: 'https://openrouter.ai/api/v1',
+    model: '',
+  },
+  siliconflow: {
+    baseUrl: 'https://api.siliconflow.cn/v1',
+    model: '',
+  },
   custom: {
     baseUrl: '',
     model: '',
   },
 }
-const LEGACY_PROVIDER_DEFAULTS = {
-  openrouter: {
-    baseUrl: 'https://openrouter.ai/api/v1',
-    model: 'openrouter/auto',
-  },
-}
+const VALID_PROVIDER_IDS = new Set(Object.keys(PROVIDER_DEFAULTS))
 
 function getEnvPath() {
   if (app.isPackaged) {
@@ -240,18 +262,22 @@ function createDocumentId(filePath, fileName = '', fileSize = 0) {
 
 function normalizeConfig(config = {}) {
   const rawProvider = String(config.provider || '').trim()
-  const provider = rawProvider === 'openrouter'
-    ? 'openai-compatible'
-    : ['deepseek', 'openai-compatible', 'anthropic-compatible', 'custom'].includes(rawProvider)
-      ? rawProvider
-      : 'deepseek'
-  const providerDefaults = LEGACY_PROVIDER_DEFAULTS[rawProvider] || PROVIDER_DEFAULTS[provider]
+  const provider = VALID_PROVIDER_IDS.has(rawProvider) ? rawProvider : 'deepseek'
+  const providerDefaults = PROVIDER_DEFAULTS[provider]
 
   return {
     provider,
     apiKey: String(config.apiKey || config.deepseekApiKey || '').trim(),
     baseUrl: String(config.baseUrl || config.deepseekBaseUrl || providerDefaults.baseUrl).trim(),
     model: String(config.model || config.deepseekModel || providerDefaults.model).trim(),
+    modelSupportsMultimodal:
+      typeof config.modelSupportsMultimodal === 'boolean'
+        ? config.modelSupportsMultimodal
+        : null,
+    temperatureMode: config.temperatureMode === 'custom' ? 'custom' : 'auto',
+    temperature: Number.isFinite(Number(config.temperature))
+      ? Math.max(0, Math.min(2, Number(config.temperature)))
+      : 0.2,
     prompt: String(config.prompt || '').trim(),
     enableMultimodalTranslation: config.enableMultimodalTranslation === true,
     rightPanelWidth: Math.min(700, Math.max(280, Number(config.rightPanelWidth) || 420)),
@@ -4027,13 +4053,6 @@ async function embedPdfHighlightAnnotation(annotation) {
   if (!filePath) throw new Error('当前 PDF 路径无效，无法写入 PDF 本体')
 
   const sourceBytes = await fs.readFile(filePath)
-  const backupPath = `${filePath}.paper-reader-backup.pdf`
-  try {
-    await fs.access(backupPath)
-  } catch {
-    await fs.copyFile(filePath, backupPath)
-  }
-
   const pdfDoc = await PDFDocument.load(sourceBytes, { ignoreEncryption: true })
   const pageIndex = Math.max(0, Number(annotation.pageNumber || 1) - 1)
   const page = pdfDoc.getPages()[pageIndex]
@@ -4065,7 +4084,6 @@ async function embedPdfHighlightAnnotation(annotation) {
     embeddedInPdf: true,
     pdfAnnotationId,
     pdfFilePath: filePath,
-    pdfBackupPath: backupPath,
     updatedAt: Date.now(),
   }
 }
@@ -4417,6 +4435,7 @@ function registerIpcHandlers() {
   ipcMain.handle('ai:translate-image-ocr', async (_event, payload) => postBackendJson('/ai/translate-image-ocr', payload))
   ipcMain.handle('ai:translate-image-diagram', async (_event, payload) => postBackendJson('/ai/translate-image-diagram', payload))
   ipcMain.handle('ai:recognize-toc', async (_event, payload) => postBackendJson('/ai/recognize-toc', payload))
+  ipcMain.handle('ai:list-models', async (_event, payload) => postBackendJson('/ai/models', payload))
   ipcMain.handle('glossary:import', async () => importGlossary())
   ipcMain.handle('glossary:get', async () => readGlossary())
   ipcMain.handle('glossary:clear', async () => clearGlossary())

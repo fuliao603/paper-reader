@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   translateImageOCR: (payload) => ipcRenderer.invoke('ai:translate-image-ocr', payload),
   translateImageDiagram: (payload) => ipcRenderer.invoke('ai:translate-image-diagram', payload),
   recognizeTableOfContents: (payload) => ipcRenderer.invoke('ai:recognize-toc', payload),
+  listAiModels: (payload) => ipcRenderer.invoke('ai:list-models', payload),
   importGlossary: () => ipcRenderer.invoke('glossary:import'),
   getGlossary: () => ipcRenderer.invoke('glossary:get'),
   clearGlossary: () => ipcRenderer.invoke('glossary:clear'),

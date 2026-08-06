@@ -132,8 +132,42 @@ const UI = {
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001'
 const TESSERACT_ASSET_BASE = `${import.meta.env.BASE_URL || '/'}tesseract`
 const MULTIMODAL_OCR_DEBUG = import.meta.env.VITE_MULTIMODAL_OCR_DEBUG === 'true'
+const MULTIMODAL_VISUAL_OCR_ENABLED = import.meta.env.VITE_ENABLE_MULTIMODAL_VISUAL_OCR === 'true'
+const INLINE_FORMULA_OCR_MODEL = 'onnx-community/TexTeller-ONNX'
+let inlineFormulaOcrPipelinePromise = null
 const DEFAULT_TRANSLATION_PROMPT =
   '你是通用学术翻译助手。请把用户提供的英文学术文本翻译成准确、自然、符合中文学术表达习惯的中文。保留必要的专业术语、英文缩写、公式、指数、上下标、单位、变量名和专有名词。遇到 10^16、10^{-6}、H_2O、CO_2 等表达时，不要改写成普通数字。不要扩写，不要总结，不要添加解释，只输出译文。'
+
+async function getInlineFormulaOcrPipeline() {
+  if (!inlineFormulaOcrPipelinePromise) {
+    inlineFormulaOcrPipelinePromise = import('@huggingface/transformers')
+      .then(({ env, pipeline }) => {
+        env.allowLocalModels = true
+        env.allowRemoteModels = true
+        env.useBrowserCache = true
+
+        return pipeline('image-to-text', INLINE_FORMULA_OCR_MODEL, {
+          device: 'wasm',
+          dtype: 'q8',
+          progress_callback: (progress) => {
+            if (progress?.status === 'progress') {
+              console.debug('行内公式 OCR 模型加载', {
+                file: progress.file,
+                progress: progress.progress,
+              })
+            }
+          },
+        })
+      })
+      .catch((error) => {
+        inlineFormulaOcrPipelinePromise = null
+        throw error
+      })
+  }
+
+  return inlineFormulaOcrPipelinePromise
+}
+
 const DEFAULT_CONTENT_EXPORT_OPTIONS = {
   exportHistories: true,
   exportNotes: true,
@@ -207,52 +241,61 @@ const PROVIDERS = {
     label: 'DeepSeek',
     baseUrl: 'https://api.deepseek.com',
     model: 'deepseek-v4-flash',
-    presets: ['deepseek-v4-flash', 'deepseek-v4-pro'],
     supportsMultimodal: true,
   },
   'openai-compatible': {
-    label: 'OpenAI-compatible',
+    label: 'OpenAI / GPT',
     baseUrl: 'https://api.openai.com/v1',
     model: 'gpt-4o-mini',
-    presets: [
-      'gpt-4o-mini',
-      'gpt-4.1-mini',
-      'gpt-5-mini',
-      'openrouter/auto',
-      'openai/gpt-5.2',
-      'google/gemini-2.5-pro',
-      'google/gemini-2.5-flash',
-      'anthropic/claude-sonnet-4.5',
-      'qwen/qwen3',
-      'deepseek/deepseek-v4-flash',
-    ],
     supportsMultimodal: true,
   },
   'anthropic-compatible': {
-    label: 'Anthropic-compatible',
+    label: 'Anthropic / Claude',
     baseUrl: 'https://api.anthropic.com',
     model: 'claude-3-5-sonnet-latest',
-    presets: [
-      'claude-3-5-sonnet-latest',
-      'claude-3-5-haiku-latest',
-      'claude-sonnet-4-5',
-      'anthropic/claude-sonnet-4.5',
-    ],
+    supportsMultimodal: true,
+  },
+  glm: {
+    label: '智谱 AI / GLM',
+    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    model: '',
+    supportsMultimodal: true,
+  },
+  gemini: {
+    label: 'Google / Gemini',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    model: '',
+    supportsMultimodal: true,
+  },
+  qwen: {
+    label: '阿里云百炼 / Qwen',
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    model: '',
+    supportsMultimodal: true,
+  },
+  kimi: {
+    label: '月之暗面 / Kimi',
+    baseUrl: 'https://api.moonshot.cn/v1',
+    model: '',
+    supportsMultimodal: true,
+  },
+  openrouter: {
+    label: 'OpenRouter',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    model: '',
+    supportsMultimodal: true,
+  },
+  siliconflow: {
+    label: '硅基流动 / SiliconFlow',
+    baseUrl: 'https://api.siliconflow.cn/v1',
+    model: '',
     supportsMultimodal: true,
   },
   custom: {
     label: '自定义',
     baseUrl: '',
     model: '',
-    presets: [],
     supportsMultimodal: true,
-  },
-}
-const LEGACY_PROVIDER_DEFAULTS = {
-  openrouter: {
-    provider: 'openai-compatible',
-    baseUrl: 'https://openrouter.ai/api/v1',
-    model: 'openrouter/auto',
   },
 }
 const DEFAULT_SETTINGS = {
@@ -260,6 +303,9 @@ const DEFAULT_SETTINGS = {
   apiKey: '',
   baseUrl: PROVIDERS.deepseek.baseUrl,
   model: PROVIDERS.deepseek.model,
+  modelSupportsMultimodal: null,
+  temperatureMode: 'auto',
+  temperature: 0.2,
   prompt: DEFAULT_TRANSLATION_PROMPT,
   enableMultimodalTranslation: false,
   rightPanelWidth: 420,
@@ -267,40 +313,12 @@ const DEFAULT_SETTINGS = {
 }
 
 function normalizeProviderKey(provider) {
-  if (provider === 'openrouter') return 'openai-compatible'
   return Object.hasOwn(PROVIDERS, provider) ? provider : 'deepseek'
-}
-
-function modelNameLooksMultimodal(model) {
-  const normalizedModel = String(model || '').toLowerCase()
-  if (!normalizedModel) return false
-
-  return [
-    '4o',
-    '4.1',
-    'gpt-5',
-    'o3',
-    'o4',
-    'vision',
-    'vl',
-    'gemini',
-    'claude-3',
-    'claude-sonnet',
-    'claude-opus',
-    'claude-haiku',
-    'llama-4',
-    'qwen-vl',
-    'kimi-vl',
-    'openrouter/auto',
-  ].some((token) => normalizedModel.includes(token))
 }
 
 function settingsCanEnableMultimodal(settings) {
   const provider = normalizeProviderKey(settings?.provider)
-  if (!PROVIDERS[provider].supportsMultimodal) return false
-  if (provider === 'deepseek' || provider === 'custom') return true
-
-  return modelNameLooksMultimodal(settings?.model) || !settings?.model
+  return PROVIDERS[provider].supportsMultimodal
 }
 
 function settingsSupportMultimodal(settings) {
@@ -799,6 +817,111 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url,
 ).toString()
 
+function SettingsModelCombobox({
+  value,
+  models,
+  status,
+  error,
+  placeholder,
+  onChange,
+}) {
+  const rootRef = useRef(null)
+  const [isOpen, setIsOpen] = useState(false)
+  const listboxId = 'settings-model-listbox'
+
+  useEffect(() => {
+    if (!isOpen) return undefined
+
+    function handlePointerDown(event) {
+      if (!rootRef.current?.contains(event.target)) {
+        setIsOpen(false)
+      }
+    }
+
+    function handleKeyDown(event) {
+      if (event.key === 'Escape') {
+        setIsOpen(false)
+      }
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [isOpen])
+
+  const emptyMessage = status === 'loading'
+    ? '正在获取模型…'
+    : status === 'error'
+      ? error || '获取模型列表失败，可手动输入'
+      : status === 'success'
+        ? '未获取到可用模型，可手动输入'
+        : '填写 API Key 后获取模型'
+
+  return (
+    <div className="settings-model-combobox" ref={rootRef}>
+      <input
+        id="settings-model-input"
+        type="text"
+        value={value}
+        role="combobox"
+        aria-label="模型名称"
+        aria-autocomplete="list"
+        aria-controls={listboxId}
+        aria-expanded={isOpen}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowDown') {
+            event.preventDefault()
+            setIsOpen(true)
+          }
+        }}
+        placeholder={placeholder}
+      />
+      <button
+        type="button"
+        className="settings-model-toggle"
+        aria-label={isOpen ? '收起模型列表' : '展开模型列表'}
+        aria-controls={listboxId}
+        aria-expanded={isOpen}
+        onClick={() => setIsOpen((currentValue) => !currentValue)}
+      >
+        <ChevronDown size={16} aria-hidden="true" />
+      </button>
+      {isOpen ? (
+        <div className="settings-model-options" id={listboxId} role="listbox">
+          {models.length ? (
+            models.map((model) => (
+              <button
+                type="button"
+                className={model.id === value ? 'settings-model-option selected' : 'settings-model-option'}
+                key={model.id}
+                role="option"
+                aria-selected={model.id === value}
+                title={model.name && model.name !== model.id ? `${model.name} · ${model.id}` : model.id}
+                onClick={() => {
+                  onChange(model.id)
+                  setIsOpen(false)
+                }}
+              >
+                <span>{model.id}</span>
+                {model.name && model.name !== model.id ? <small>{model.name}</small> : null}
+              </button>
+            ))
+          ) : (
+            <p className={status === 'error' ? 'settings-model-empty error' : 'settings-model-empty'}>
+              {emptyMessage}
+            </p>
+          )}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function App() {
   const appRef = useRef(null)
   const readerLayoutRef = useRef(null)
@@ -815,6 +938,7 @@ function App() {
   const ocrStartPointRef = useRef(null)
   const panelResizeStartRef = useRef(null)
   const settingsFormRef = useRef(DEFAULT_SETTINGS)
+  const modelListRequestIdRef = useRef(0)
   const rightPanelWidthRef = useRef(DEFAULT_SETTINGS.rightPanelWidth)
   const readingRecordSaveTimerRef = useRef(null)
   const pendingReadingRestoreRef = useRef(null)
@@ -850,6 +974,7 @@ function App() {
   const tocGenerationKeyRef = useRef('')
   const tocGenerationRequestRef = useRef(0)
   const generateTableOfContentsRef = useRef(null)
+  const prepareSelectionTranslationRef = useRef(null)
 
   const [pdfUrl, setPdfUrl] = useState('')
   const [currentDocument, setCurrentDocument] = useState(null)
@@ -895,6 +1020,7 @@ function App() {
   const [pageNumber, setPageNumber] = useState(1)
   const [numPages, setNumPages] = useState(null)
   const [selectedText, setSelectedText] = useState('')
+  const [selectionCapture, setSelectionCapture] = useState(null)
   const [highlightRects, setHighlightRects] = useState([])
   const [translation, setTranslation] = useState('')
   const [translationStatus, setTranslationStatus] = useState('idle')
@@ -993,6 +1119,9 @@ function App() {
   const [settingsForm, setSettingsForm] = useState(DEFAULT_SETTINGS)
   const [settingsStatus, setSettingsStatus] = useState('')
   const [isSavingSettings, setIsSavingSettings] = useState(false)
+  const [availableModels, setAvailableModels] = useState([])
+  const [modelListStatus, setModelListStatus] = useState('idle')
+  const [modelListError, setModelListError] = useState('')
   const [glossary, setGlossary] = useState([])
   const [glossaryStatus, setGlossaryStatus] = useState('未导入术语库')
   const [isGlossaryVisible, setIsGlossaryVisible] = useState(false)
@@ -1008,6 +1137,7 @@ function App() {
   function clearTranslation() {
     requestIdRef.current += 1
     setSelectedText('')
+    setSelectionCapture(null)
     setHighlightRects([])
     setTranslation('')
     setTranslationStatus('idle')
@@ -1083,6 +1213,7 @@ function App() {
     requestIdRef.current += 1
 
     setSelectedText('')
+    setSelectionCapture(null)
     setHighlightRects([])
     setPreviewHighlight(null)
     setActiveAnnotationId('')
@@ -1115,6 +1246,7 @@ function App() {
     window.getSelection()?.removeAllRanges()
     isSelectingRef.current = false
     setSelectedText('')
+    setSelectionCapture(null)
     setHighlightRects([])
     setPreviewHighlight(null)
     setHighlightContextMenu(null)
@@ -1372,6 +1504,7 @@ function App() {
     window.getSelection()?.removeAllRanges()
     ocrStartPointRef.current = null
     setSelectedText('')
+    setSelectionCapture(null)
     setHighlightRects([])
     setTranslation('')
     setTranslationStatus('idle')
@@ -2616,11 +2749,18 @@ function App() {
     setAnnotationStatus('翻译中...')
 
     try {
-      const nextTranslation = await requestTranslation(highlight.selectedText)
+      const sourceText = cleanOcrSourceForTranslation(highlight.selectedText)
+      const inlineFormulas = getInlineFormulaMetadataFromText(sourceText, 'highlight-text')
+      const preserveOriginal =
+        isScientificExpressionOnly(sourceText) ||
+        isDenseFormulaOrSymbolText(sourceText)
+      const nextTranslation = preserveOriginal
+        ? sourceText
+        : await translateOcrBlockText(sourceText, inlineFormulas)
       const nextResult = {
         type: 'text-selection',
         title: '批注翻译结果',
-        selectedText: highlight.selectedText,
+        selectedText: sourceText,
         translation: nextTranslation,
         pageNumber: highlight.pageNumber,
         timestamp: Date.now(),
@@ -4236,6 +4376,87 @@ function App() {
     return data
   }, [])
 
+  useEffect(() => {
+    const provider = normalizeProviderKey(settingsForm.provider)
+    const baseUrl = String(settingsForm.baseUrl || '').trim()
+    const apiKey = String(settingsForm.apiKey || '').trim()
+    const currentRequestId = modelListRequestIdRef.current + 1
+    modelListRequestIdRef.current = currentRequestId
+
+    setAvailableModels([])
+    setModelListError('')
+
+    if (!baseUrl || !apiKey) {
+      setModelListStatus('idle')
+      return undefined
+    }
+
+    setModelListStatus('loading')
+
+    const timeoutId = window.setTimeout(async () => {
+      try {
+        const payload = {
+          config: {
+            provider,
+            baseUrl,
+            apiKey,
+          },
+        }
+        const data = window.electronAPI?.listAiModels
+          ? await window.electronAPI.listAiModels(payload)
+          : await requestBackendJson('/ai/models', payload)
+
+        if (modelListRequestIdRef.current !== currentRequestId) return
+
+        const modelsById = new Map()
+        ;(Array.isArray(data.models) ? data.models : []).forEach((rawModel) => {
+          const model = typeof rawModel === 'string' ? { id: rawModel } : rawModel
+          const id = String(model?.id || '').trim()
+          if (!id || modelsById.has(id)) return
+          modelsById.set(id, {
+            id,
+            name: String(model?.name || '').trim(),
+            inputModalities: Array.isArray(model?.inputModalities)
+              ? model.inputModalities.map(String)
+              : [],
+            supportsMultimodal:
+              typeof model?.supportsMultimodal === 'boolean'
+                ? model.supportsMultimodal
+                : null,
+          })
+        })
+
+        const nextModels = Array.from(modelsById.values())
+        setAvailableModels(nextModels)
+        setSettingsForm((currentSettings) => {
+          const currentModel = nextModels.find((model) => model.id === currentSettings.model)
+          if (!currentModel || typeof currentModel.supportsMultimodal !== 'boolean') {
+            return currentSettings
+          }
+          return {
+            ...currentSettings,
+            modelSupportsMultimodal: currentModel.supportsMultimodal,
+          }
+        })
+        setModelListStatus('success')
+      } catch (error) {
+        if (modelListRequestIdRef.current !== currentRequestId) return
+        setAvailableModels([])
+        setModelListStatus('error')
+        setModelListError(error.message || '获取模型列表失败')
+      }
+    }, 700)
+
+    return () => {
+      window.clearTimeout(timeoutId)
+    }
+  }, [
+    requestBackendJson,
+    settingsForm.apiKey,
+    settingsForm.baseUrl,
+    settingsForm.provider,
+  ])
+
   const requestTranslation = useCallback(async (text) => {
     const payload = { text }
     const data = window.electronAPI?.translateText
@@ -4268,7 +4489,8 @@ function App() {
       setTranslationStatus('loading')
 
       try {
-        const nextTranslation = await requestTranslation(text)
+        const preparedResult = await prepareSelectionTranslationRef.current(text, selectionCapture)
+        const nextTranslation = cleanResultText(preparedResult.translation)
 
         if (currentRequestId !== requestIdRef.current) return
 
@@ -4278,8 +4500,10 @@ function App() {
         setSuccessfulRightPanelResult({
           type: 'text-selection',
           title: '翻译结果',
-          selectedText: text,
+          selectedText: preparedResult.sourceText,
           translation: nextTranslation,
+          inlineFormulas: preparedResult.inlineFormulas,
+          preserveOriginalFormula: preparedResult.preserveOriginal,
           timestamp: Date.now(),
         })
       } catch (error) {
@@ -4291,7 +4515,7 @@ function App() {
     }, 300)
 
     return () => clearTimeout(timerId)
-  }, [selectedText, setSuccessfulRightPanelResult, requestTranslation])
+  }, [selectedText, selectionCapture, setSuccessfulRightPanelResult])
 
   function applyOpenedPdf(pdfFile, restoreRecord = null) {
     if (!pdfFile?.dataUrl && !pdfFile?.url) return
@@ -5393,15 +5617,22 @@ function App() {
 
   function normalizeSettings(config = {}) {
     const rawProvider = String(config.provider || '').trim()
-    const legacyDefaults = LEGACY_PROVIDER_DEFAULTS[rawProvider]
-    const provider = legacyDefaults?.provider || normalizeProviderKey(rawProvider)
-    const providerDefaults = legacyDefaults || PROVIDERS[provider]
+    const provider = normalizeProviderKey(rawProvider)
+    const providerDefaults = PROVIDERS[provider]
 
     return {
       provider,
       apiKey: config.apiKey || config.deepseekApiKey || '',
       baseUrl: config.baseUrl || config.deepseekBaseUrl || providerDefaults.baseUrl,
       model: config.model || config.deepseekModel || providerDefaults.model,
+      modelSupportsMultimodal:
+        typeof config.modelSupportsMultimodal === 'boolean'
+          ? config.modelSupportsMultimodal
+          : null,
+      temperatureMode: config.temperatureMode === 'custom' ? 'custom' : 'auto',
+      temperature: Number.isFinite(Number(config.temperature))
+        ? clampNumber(Number(config.temperature), 0, 2)
+        : DEFAULT_SETTINGS.temperature,
       prompt: config.prompt || DEFAULT_TRANSLATION_PROMPT,
       enableMultimodalTranslation: config.enableMultimodalTranslation === true,
       rightPanelWidth: clampNumber(
@@ -5467,6 +5698,20 @@ function App() {
     }))
   }
 
+  function updateSettingsModel(modelId) {
+    const normalizedModelId = String(modelId || '')
+    const modelMetadata = availableModels.find((model) => model.id === normalizedModelId)
+
+    setSettingsForm((currentSettings) => ({
+      ...currentSettings,
+      model: normalizedModelId,
+      modelSupportsMultimodal:
+        typeof modelMetadata?.supportsMultimodal === 'boolean'
+          ? modelMetadata.supportsMultimodal
+          : null,
+    }))
+  }
+
   function updateSettingsProvider(provider) {
     const nextProvider = normalizeProviderKey(provider)
 
@@ -5474,7 +5719,11 @@ function App() {
       ...currentSettings,
       provider: nextProvider,
       baseUrl: PROVIDERS[nextProvider].baseUrl,
-      model: PROVIDERS[nextProvider].model,
+      apiKey: '',
+      model: '',
+      modelSupportsMultimodal: null,
+      temperatureMode: 'auto',
+      temperature: DEFAULT_SETTINGS.temperature,
       enableMultimodalTranslation:
         currentSettings.enableMultimodalTranslation && PROVIDERS[nextProvider].supportsMultimodal,
     }))
@@ -5523,6 +5772,19 @@ function App() {
     if (!window.electronAPI) {
       setSettingsStatus(UI.settingsDesktopOnly)
       return
+    }
+
+    if (settingsForm.temperatureMode === 'custom') {
+      const temperature = Number(settingsForm.temperature)
+      if (
+        String(settingsForm.temperature).trim() === '' ||
+        !Number.isFinite(temperature) ||
+        temperature < 0 ||
+        temperature > 2
+      ) {
+        setSettingsStatus('Temperature 必须是 0 到 2 之间的数字')
+        return
+      }
     }
 
     setIsSavingSettings(true)
@@ -6297,6 +6559,680 @@ function App() {
     }
   }
 
+  function cropSelectionRectsImage(rects = []) {
+    const pdfViewer = pdfViewerRef.current
+    const canvas = pdfViewer?.querySelector('.react-pdf__Page canvas')
+    if (!pdfViewer || !canvas || !rects.length) return null
+
+    const viewerRect = pdfViewer.getBoundingClientRect()
+    const canvasRect = canvas.getBoundingClientRect()
+    const scaleX = canvas.width / Math.max(canvasRect.width, 1)
+    const scaleY = canvas.height / Math.max(canvasRect.height, 1)
+    const lineCrops = rects
+      .map((rect) => {
+        const paddingX = Math.max(3, rect.height * 0.3)
+        const paddingY = Math.max(3, rect.height * 0.5)
+        const viewportRect = {
+          left: viewerRect.left - pdfViewer.scrollLeft + rect.left - paddingX,
+          top: viewerRect.top - pdfViewer.scrollTop + rect.top - paddingY,
+          right: viewerRect.left - pdfViewer.scrollLeft + rect.left + rect.width + paddingX,
+          bottom: viewerRect.top - pdfViewer.scrollTop + rect.top + rect.height + paddingY,
+        }
+        const clippedRect = {
+          left: Math.max(viewportRect.left, canvasRect.left),
+          top: Math.max(viewportRect.top, canvasRect.top),
+          right: Math.min(viewportRect.right, canvasRect.right),
+          bottom: Math.min(viewportRect.bottom, canvasRect.bottom),
+        }
+        if (clippedRect.right - clippedRect.left < 4 || clippedRect.bottom - clippedRect.top < 4) {
+          return null
+        }
+
+        const sourceX = Math.max(0, Math.floor((clippedRect.left - canvasRect.left) * scaleX))
+        const sourceY = Math.max(0, Math.floor((clippedRect.top - canvasRect.top) * scaleY))
+        const sourceWidth = Math.min(
+          canvas.width - sourceX,
+          Math.max(1, Math.ceil((clippedRect.right - clippedRect.left) * scaleX)),
+        )
+        const sourceHeight = Math.min(
+          canvas.height - sourceY,
+          Math.max(1, Math.ceil((clippedRect.bottom - clippedRect.top) * scaleY)),
+        )
+
+        return { sourceX, sourceY, sourceWidth, sourceHeight }
+      })
+      .filter(Boolean)
+
+    if (!lineCrops.length) return null
+
+    const gap = 6
+    const outputCanvas = document.createElement('canvas')
+    outputCanvas.width = Math.max(...lineCrops.map((crop) => crop.sourceWidth))
+    outputCanvas.height =
+      lineCrops.reduce((height, crop) => height + crop.sourceHeight, 0) +
+      gap * Math.max(0, lineCrops.length - 1)
+    const context = outputCanvas.getContext('2d')
+    context.fillStyle = '#ffffff'
+    context.fillRect(0, 0, outputCanvas.width, outputCanvas.height)
+
+    let targetY = 0
+    lineCrops.forEach((crop) => {
+      context.drawImage(
+        canvas,
+        crop.sourceX,
+        crop.sourceY,
+        crop.sourceWidth,
+        crop.sourceHeight,
+        0,
+        targetY,
+        crop.sourceWidth,
+        crop.sourceHeight,
+      )
+      targetY += crop.sourceHeight + gap
+    })
+
+    return {
+      image: outputCanvas.toDataURL('image/png'),
+      width: outputCanvas.width,
+      height: outputCanvas.height,
+      lineCount: lineCrops.length,
+    }
+  }
+
+  function getOcrRectIntersectionArea(firstRect, secondRect) {
+    const firstRight = firstRect.x + firstRect.width
+    const firstBottom = firstRect.y + firstRect.height
+    const secondRight = secondRect.x + secondRect.width
+    const secondBottom = secondRect.y + secondRect.height
+
+    return Math.max(0, Math.min(firstRight, secondRight) - Math.max(firstRect.x, secondRect.x)) *
+      Math.max(0, Math.min(firstBottom, secondBottom) - Math.max(firstRect.y, secondRect.y))
+  }
+
+  function getPdfTextLayerOcrBlocks(croppedImage) {
+    const pdfViewer = pdfViewerRef.current
+    const canvas = pdfViewer?.querySelector('.react-pdf__Page canvas')
+    if (!pdfViewer || !canvas) return []
+
+    const canvasRect = canvas.getBoundingClientRect()
+    const pageElement = canvas.closest('.react-pdf__Page') || pdfViewer
+    const scaleX = Number(croppedImage.scaleX) || canvas.width / Math.max(canvasRect.width, 1)
+    const scaleY = Number(croppedImage.scaleY) || canvas.height / Math.max(canvasRect.height, 1)
+    const cropRect = {
+      x: Number(croppedImage.sourceX) || 0,
+      y: Number(croppedImage.sourceY) || 0,
+      width: Number(croppedImage.sourceWidth) || croppedImage.width,
+      height: Number(croppedImage.sourceHeight) || croppedImage.height,
+    }
+    const tokens = Array.from(
+      pageElement.querySelectorAll('.textLayer span, .react-pdf__Page__textContent span'),
+    )
+      .map((span) => {
+        const text = String(span.textContent || '').replace(/\s+/g, ' ').trim()
+        const hasInvalidCharacter = Array.from(text).some((character) => {
+          const characterCode = character.charCodeAt(0)
+          return (
+            character === '\ufffd' ||
+            characterCode <= 8 ||
+            characterCode === 11 ||
+            characterCode === 12 ||
+            (characterCode >= 14 && characterCode <= 31)
+          )
+        })
+        if (!text || hasInvalidCharacter) return null
+
+        const rect = span.getBoundingClientRect()
+        const tokenRectOnCanvas = {
+          x: (rect.left - canvasRect.left) * scaleX,
+          y: (rect.top - canvasRect.top) * scaleY,
+          width: rect.width * scaleX,
+          height: rect.height * scaleY,
+        }
+        const intersectionArea = getOcrRectIntersectionArea(tokenRectOnCanvas, cropRect)
+        const tokenArea = Math.max(tokenRectOnCanvas.width * tokenRectOnCanvas.height, 1)
+        if (intersectionArea / tokenArea < 0.42) return null
+
+        const style = window.getComputedStyle(span)
+        const renderedFontSize = (Number.parseFloat(style.fontSize) || rect.height) * scaleY
+        const left = tokenRectOnCanvas.x - cropRect.x
+        const top = tokenRectOnCanvas.y - cropRect.y
+
+        return {
+          text,
+          left,
+          top,
+          right: left + tokenRectOnCanvas.width,
+          bottom: top + tokenRectOnCanvas.height,
+          width: tokenRectOnCanvas.width,
+          height: Math.max(tokenRectOnCanvas.height, renderedFontSize),
+          fontSize: Math.max(1, renderedFontSize),
+        }
+      })
+      .filter(Boolean)
+
+    const blocks = []
+
+    groupTokensByLine(
+      tokens.sort((firstToken, secondToken) => firstToken.top - secondToken.top || firstToken.left - secondToken.left),
+    ).forEach((line) => {
+      const sortedTokens = line.tokens.sort((firstToken, secondToken) => firstToken.left - secondToken.left)
+      const tokenGroups = []
+
+      sortedTokens.forEach((token) => {
+        const currentGroup = tokenGroups[tokenGroups.length - 1]
+        const previousToken = currentGroup?.[currentGroup.length - 1]
+        const gap = previousToken ? token.left - previousToken.right : 0
+        const splitGap = Math.max(18, line.maxHeight * 2.1)
+
+        if (!currentGroup || (previousToken && gap > splitGap)) {
+          tokenGroups.push([token])
+        } else {
+          currentGroup.push(token)
+        }
+      })
+
+      tokenGroups.forEach((group) => {
+        const x0 = Math.min(...group.map((token) => token.left))
+        const y0 = Math.min(...group.map((token) => token.top))
+        const x1 = Math.max(...group.map((token) => token.right))
+        const y1 = Math.max(...group.map((token) => token.bottom))
+        const formattedText = renderFormattedLine(group)
+        const hasFormulaSyntax =
+          /\\[A-Za-z]+|[_^]\{|[=<>±×÷→←↔ΔμΩλπσ∑∫√∞≈≠≤≥·′°₀-₉⁰-⁹]/.test(formattedText) ||
+          /(?:[A-Za-z]\d|\d[A-Za-z])/.test(formattedText)
+        const normalizedFormula = hasFormulaSyntax ? normalizeSimpleInlineLatex(formattedText) : null
+        const text = normalizedFormula?.text || formattedText.replace(/\s+/g, ' ').trim()
+        if (!text) return
+        const x = clampNumber(x0, 0, Math.max(croppedImage.width - 1, 0))
+        const y = clampNumber(y0, 0, Math.max(croppedImage.height - 1, 0))
+
+        blocks.push({
+          index: blocks.length,
+          text,
+          sourceText: text,
+          x,
+          y,
+          width: Math.max(1, Math.min(x1 - x0, croppedImage.width - x)),
+          height: Math.max(1, Math.min(y1 - y0, croppedImage.height - y)),
+          fontSize: median(group.map((token) => token.fontSize)) || Math.max(1, y1 - y0),
+          confidence: 100,
+          nearEdge: false,
+          pdfTextLayer: true,
+          pdfTextTokens: group,
+          inlineFormulas: getInlineFormulaMetadataFromText(text, 'pdf-text-layer'),
+        })
+      })
+    })
+
+    return blocks.sort((firstBlock, secondBlock) => firstBlock.y - secondBlock.y || firstBlock.x - secondBlock.x)
+  }
+
+  function getUsefulOcrCharacterCount(text) {
+    return (String(text || '').match(/[A-Za-z0-9\u0370-\u03ff]/g) || []).length
+  }
+
+  function shouldPreferPdfTextLayer(pdfTextBlocks, tesseractText) {
+    const pdfText = pdfTextBlocks.map((block) => block.text).join(' ')
+    const pdfCharacters = getUsefulOcrCharacterCount(pdfText)
+    const tesseractCharacters = getUsefulOcrCharacterCount(tesseractText)
+
+    if (pdfCharacters < 2) return false
+    if (tesseractCharacters < 2) return true
+
+    return pdfCharacters / Math.max(pdfCharacters, tesseractCharacters) >= 0.55
+  }
+
+  function isDenseFormulaOrSymbolText(text) {
+    const normalizedText = normalizeScientificText(String(text || ''))
+    const compactText = normalizedText.replace(/\s+/g, '')
+    if (!compactText) return false
+    if (isScientificExpressionOnly(normalizedText)) return true
+
+    const normalWords = normalizedText.match(/[A-Za-z][A-Za-z'-]{2,}/g) || []
+    const formulaSymbols = normalizedText.match(/[=<>±×÷→←↔^_{}[\]ΔμΩλπσ∑∫√∞≈≠≤≥·′°₀-₉⁰-⁹]/g) || []
+    const operators = normalizedText.match(/[=<>±×÷→←↔^_+\-*/∑∫√∞≈≠≤≥·]/g) || []
+    const formulaRatio = formulaSymbols.length / Math.max(compactText.length, 1)
+
+    if (formulaSymbols.length >= 4 && formulaRatio >= 0.24 && normalWords.length < 5) return true
+    if (operators.length >= 4 && normalWords.length < 6) return true
+    if (/\\(?:begin|end|frac|dfrac|tfrac|matrix|cases|sum|prod|int|lim)\b/.test(normalizedText)) return true
+
+    return false
+  }
+
+  function hasInlineFormulaClue(word) {
+    const text = String(word?.text || '').trim()
+    if (!text) return false
+
+    const hasScientificSymbol = /[=<>±×÷→←↔^_{}[\]ΔμΩλπσ∑∫√∞≈≠≤≥·′°₀-₉⁰-⁹]/.test(text)
+    const hasMixedLetterNumber = /(?:[A-Za-z]\d|\d[A-Za-z])/.test(text)
+    const hasGarbledSymbol =
+      /[�|\\~`]/.test(text) ||
+      /[^\u0020-\u007e\u0370-\u03ff\u2070-\u209f±×÷→←↔∑∫√∞≈≠≤≥·′°]/.test(text)
+    const lowConfidenceWithNonLetter =
+      Number(word.confidence) < 55 &&
+      /[^A-Za-z.,;:'"!?()-]/.test(text)
+
+    return hasScientificSymbol || hasMixedLetterNumber || hasGarbledSymbol || lowConfidenceWithNonLetter
+  }
+
+  function getInlineFormulaMetadataFromText(text, source) {
+    return String(text || '')
+      .split(/\s+/)
+      .map((token) => token.replace(/^[,.;:!?()[\]"']+|[,.;:!?()[\]"']+$/g, ''))
+      .filter((token) => token && hasInlineFormulaClue({ text: token, confidence: 100 }))
+      .map((token) => {
+        const normalized = normalizeSimpleInlineLatex(token)
+        return normalized?.text
+          ? {
+              text: normalized.text,
+              latex: normalized.latex,
+              source,
+            }
+          : null
+      })
+      .filter(Boolean)
+      .filter((formula, index, formulas) =>
+        formulas.findIndex((candidate) => candidate.text === formula.text) === index)
+  }
+
+  function getInlineFormulaCandidates(data, imageSize) {
+    const candidates = []
+    const words = getAllOcrWords(data)
+      .map((word) => normalizeOcrWord(word, imageSize))
+      .filter(Boolean)
+
+    groupOcrWordsIntoRows(words).forEach((row) => {
+      const sortedWords = row.words.slice().sort((firstWord, secondWord) => firstWord.x0 - secondWord.x0)
+      const rowText = sortedWords.map((word) => word.text).join(' ')
+      const normalWordIndexes = sortedWords
+        .map((word, index) => (/^[A-Za-z][A-Za-z'-]{2,}[,.;:]?$/.test(word.text) ? index : -1))
+        .filter((index) => index >= 0)
+      if (normalWordIndexes.length < 2 || isDenseFormulaOrSymbolText(rowText)) return
+
+      const suspiciousIndexes = sortedWords
+        .map((word, index) => (hasInlineFormulaClue(word) ? index : -1))
+        .filter((index) => index >= 0)
+      if (!suspiciousIndexes.length || suspiciousIndexes.length > Math.max(4, sortedWords.length * 0.34)) return
+
+      const groups = []
+      suspiciousIndexes.forEach((wordIndex) => {
+        const currentGroup = groups[groups.length - 1]
+        if (!currentGroup || wordIndex > currentGroup[currentGroup.length - 1] + 1) {
+          groups.push([wordIndex])
+        } else {
+          currentGroup.push(wordIndex)
+        }
+      })
+
+      const rowLeft = Math.min(...sortedWords.map((word) => word.x0))
+      const rowRight = Math.max(...sortedWords.map((word) => word.x1))
+      const rowWidth = Math.max(rowRight - rowLeft, 1)
+
+      groups.forEach((group) => {
+        const firstIndex = group[0]
+        const lastIndex = group[group.length - 1]
+        const hasNormalBefore = normalWordIndexes.some((index) => index < firstIndex)
+        const hasNormalAfter = normalWordIndexes.some((index) => index > lastIndex)
+        if ((!hasNormalBefore && !hasNormalAfter) || group.length > 3) return
+
+        const candidateWords = group.map((index) => sortedWords[index])
+        const x0 = Math.min(...candidateWords.map((word) => word.x0))
+        const y0 = Math.min(...candidateWords.map((word) => word.y0))
+        const x1 = Math.max(...candidateWords.map((word) => word.x1))
+        const y1 = Math.max(...candidateWords.map((word) => word.y1))
+        if ((x1 - x0) / rowWidth > 0.38) return
+
+        candidates.push({
+          id: `formula-${candidates.length + 1}`,
+          text: candidateWords.map((word) => word.text).join(' ').trim(),
+          x: x0,
+          y: y0,
+          width: x1 - x0,
+          height: y1 - y0,
+          confidence:
+            candidateWords.reduce((sum, word) => sum + Number(word.confidence || 0), 0) /
+            Math.max(candidateWords.length, 1),
+        })
+      })
+    })
+
+    return candidates.slice(0, 12)
+  }
+
+  function getPdfTextForFormulaCandidate(candidate, pdfTextBlocks) {
+    let bestMatch = null
+    let bestRatio = 0
+
+    pdfTextBlocks.forEach((block) => {
+      const matchingTokens = (block.pdfTextTokens || []).filter((token) => {
+        const tokenRect = {
+          x: token.left,
+          y: token.top,
+          width: token.width,
+          height: token.height,
+        }
+        const intersection = getOcrRectIntersectionArea(candidate, tokenRect)
+
+        return intersection / Math.max(Math.min(candidate.width * candidate.height, token.width * token.height), 1) >= 0.35
+      })
+      if (!matchingTokens.length) return
+
+      const matchedRect = {
+        x: Math.min(...matchingTokens.map((token) => token.left)),
+        y: Math.min(...matchingTokens.map((token) => token.top)),
+        width:
+          Math.max(...matchingTokens.map((token) => token.right)) -
+          Math.min(...matchingTokens.map((token) => token.left)),
+        height:
+          Math.max(...matchingTokens.map((token) => token.bottom)) -
+          Math.min(...matchingTokens.map((token) => token.top)),
+      }
+      const ratio =
+        getOcrRectIntersectionArea(candidate, matchedRect) /
+        Math.max(candidate.width * candidate.height, 1)
+      if (ratio <= bestRatio) return
+
+      bestRatio = ratio
+      bestMatch = renderFormattedLine(matchingTokens)
+    })
+
+    if (!bestMatch || bestRatio < 0.45) return null
+    return normalizeSimpleInlineLatex(bestMatch) || {
+      latex: '',
+      text: bestMatch.replace(/\s+/g, ' ').trim(),
+    }
+  }
+
+  function normalizeSimpleInlineLatex(rawLatex) {
+    let latex = String(rawLatex || '')
+      .replace(/^```(?:latex|tex)?\s*/i, '')
+      .replace(/```$/i, '')
+      .replace(/^generated[_\s-]*text\s*[:：]\s*/i, '')
+      .replace(/^\s*(?:\\\[|\\\(|\$\$?)/, '')
+      .replace(/(?:\\\]|\\\)|\$\$?)\s*$/, '')
+      .trim()
+    latex = latex
+      .replace(/\\([A-Za-z]+)\s+\{/g, '\\$1{')
+      .replace(/([_^])\s*\{\s*/g, '$1{')
+      .replace(/\s+\}/g, '}')
+    if (!latex || latex.length > 140 || /[\r\n]/.test(latex)) return null
+    if (/\\(?:begin|end|frac|dfrac|tfrac|matrix|cases|sum|prod|int|lim|overset|underset)\b/.test(latex)) {
+      return null
+    }
+
+    const allowedCommands = new Set([
+      'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'theta', 'lambda', 'mu', 'nu', 'pi', 'rho',
+      'sigma', 'tau', 'phi', 'chi', 'psi', 'omega', 'Gamma', 'Delta', 'Theta', 'Lambda', 'Xi', 'Pi',
+      'Sigma', 'Phi', 'Psi', 'Omega', 'pm', 'mp', 'times', 'cdot', 'div', 'le', 'leq', 'ge', 'geq',
+      'neq', 'approx', 'sim', 'infty', 'to', 'rightarrow', 'leftarrow', 'leftrightarrow', 'degree',
+      'prime', 'sqrt', 'mathrm', 'mathbf', 'mathit', 'text',
+    ])
+    const commands = [...latex.matchAll(/\\([A-Za-z]+)/g)].map((match) => match[1])
+    if (commands.some((command) => !allowedCommands.has(command))) return null
+    if (commands.length > 6) return null
+
+    const replacements = {
+      '\\leftrightarrow': '↔',
+      '\\rightarrow': '→',
+      '\\leftarrow': '←',
+      '\\times': '×',
+      '\\cdot': '·',
+      '\\approx': '≈',
+      '\\infty': '∞',
+      '\\degree': '°',
+      '\\prime': '′',
+      '\\alpha': 'α',
+      '\\beta': 'β',
+      '\\gamma': 'γ',
+      '\\delta': 'δ',
+      '\\epsilon': 'ε',
+      '\\theta': 'θ',
+      '\\lambda': 'λ',
+      '\\mu': 'μ',
+      '\\nu': 'ν',
+      '\\pi': 'π',
+      '\\rho': 'ρ',
+      '\\sigma': 'σ',
+      '\\tau': 'τ',
+      '\\phi': 'φ',
+      '\\chi': 'χ',
+      '\\psi': 'ψ',
+      '\\omega': 'ω',
+      '\\Gamma': 'Γ',
+      '\\Delta': 'Δ',
+      '\\Theta': 'Θ',
+      '\\Lambda': 'Λ',
+      '\\Xi': 'Ξ',
+      '\\Pi': 'Π',
+      '\\Sigma': 'Σ',
+      '\\Phi': 'Φ',
+      '\\Psi': 'Ψ',
+      '\\Omega': 'Ω',
+      '\\pm': '±',
+      '\\mp': '∓',
+      '\\div': '÷',
+      '\\leq': '≤',
+      '\\le': '≤',
+      '\\geq': '≥',
+      '\\ge': '≥',
+      '\\neq': '≠',
+      '\\sim': '∼',
+      '\\to': '→',
+    }
+
+    Object.entries(replacements)
+      .sort(([firstCommand], [secondCommand]) => secondCommand.length - firstCommand.length)
+      .forEach(([command, character]) => {
+        latex = latex.replaceAll(command, character)
+      })
+
+    for (let iteration = 0; iteration < 3; iteration += 1) {
+      latex = latex.replace(/\\(?:mathrm|mathbf|mathit|text)\{([^{}]*)\}/g, '$1')
+      latex = latex.replace(/\\sqrt\{([^{}]+)\}/g, '√($1)')
+    }
+
+    const superscriptMap = {
+      0: '⁰', 1: '¹', 2: '²', 3: '³', 4: '⁴', 5: '⁵', 6: '⁶', 7: '⁷', 8: '⁸', 9: '⁹',
+      '+': '⁺', '-': '⁻', '=': '⁼', '(': '⁽', ')': '⁾', n: 'ⁿ', i: 'ⁱ',
+    }
+    const subscriptMap = {
+      0: '₀', 1: '₁', 2: '₂', 3: '₃', 4: '₄', 5: '₅', 6: '₆', 7: '₇', 8: '₈', 9: '₉',
+      '+': '₊', '-': '₋', '=': '₌', '(': '₍', ')': '₎', a: 'ₐ', e: 'ₑ', h: 'ₕ', i: 'ᵢ',
+      j: 'ⱼ', k: 'ₖ', l: 'ₗ', m: 'ₘ', n: 'ₙ', o: 'ₒ', p: 'ₚ', r: 'ᵣ', s: 'ₛ', t: 'ₜ',
+      u: 'ᵤ', v: 'ᵥ', x: 'ₓ',
+    }
+    const convertScript = (value, characterMap, marker) => {
+      const normalizedValue = String(value || '').trim()
+      const characters = Array.from(normalizedValue)
+      return characters.every((character) => characterMap[character])
+        ? characters.map((character) => characterMap[character]).join('')
+        : `${marker}(${normalizedValue})`
+    }
+
+    latex = latex
+      .replace(/\^\{([^{}]{1,12})\}/g, (_match, value) => convertScript(value, superscriptMap, '^'))
+      .replace(/_\{([^{}]{1,12})\}/g, (_match, value) => convertScript(value, subscriptMap, '_'))
+      .replace(/\^([A-Za-z0-9+\-=])/g, (_match, value) => convertScript(value, superscriptMap, '^'))
+      .replace(/_([A-Za-z0-9+\-=])/g, (_match, value) => convertScript(value, subscriptMap, '_'))
+      .replace(/\\[,;! ]/g, ' ')
+      .replace(/[{}]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+    if (!latex || /\\[A-Za-z]+/.test(latex) || /[�]/.test(latex)) return null
+    const operators = latex.match(/[=<>±×÷→←↔^_+\-*/√∞≈≠≤≥·]/g) || []
+    if (latex.length > 56 || operators.length > 4) return null
+
+    return {
+      latex: String(rawLatex || '').trim(),
+      text: latex,
+    }
+  }
+
+  async function cropInlineFormulaImage(imageUrl, candidate) {
+    const sourceImage = await loadImage(imageUrl)
+    const paddingX = Math.max(3, candidate.height * 0.32)
+    const paddingY = Math.max(3, candidate.height * 0.26)
+    const sourceX = clampNumber(Math.floor(candidate.x - paddingX), 0, sourceImage.naturalWidth - 1)
+    const sourceY = clampNumber(Math.floor(candidate.y - paddingY), 0, sourceImage.naturalHeight - 1)
+    const sourceRight = clampNumber(
+      Math.ceil(candidate.x + candidate.width + paddingX),
+      sourceX + 1,
+      sourceImage.naturalWidth,
+    )
+    const sourceBottom = clampNumber(
+      Math.ceil(candidate.y + candidate.height + paddingY),
+      sourceY + 1,
+      sourceImage.naturalHeight,
+    )
+    const sourceWidth = sourceRight - sourceX
+    const sourceHeight = sourceBottom - sourceY
+    const scale = clampNumber(72 / Math.max(sourceHeight, 1), 1, 4)
+    const canvas = document.createElement('canvas')
+    const context = canvas.getContext('2d')
+
+    canvas.width = Math.max(1, Math.round(sourceWidth * scale))
+    canvas.height = Math.max(1, Math.round(sourceHeight * scale))
+    context.fillStyle = '#ffffff'
+    context.fillRect(0, 0, canvas.width, canvas.height)
+    context.imageSmoothingEnabled = true
+    context.imageSmoothingQuality = 'high'
+    context.drawImage(
+      sourceImage,
+      sourceX,
+      sourceY,
+      sourceWidth,
+      sourceHeight,
+      0,
+      0,
+      canvas.width,
+      canvas.height,
+    )
+
+    return canvas.toDataURL('image/png')
+  }
+
+  async function recognizeInlineFormulaCandidates(data, imageUrl, imageSize, pdfTextBlocks) {
+    const candidates = getInlineFormulaCandidates(data, imageSize)
+    const corrections = []
+    const unresolvedRects = []
+    let formulaPipeline = null
+
+    for (const candidate of candidates) {
+      const pdfFormula = getPdfTextForFormulaCandidate(candidate, pdfTextBlocks)
+      if (pdfFormula?.text) {
+        corrections.push({
+          ...candidate,
+          replacement: pdfFormula.text,
+          latex: pdfFormula.latex,
+          source: 'pdf-text-layer',
+        })
+        continue
+      }
+
+      try {
+        formulaPipeline ||= await getInlineFormulaOcrPipeline()
+        const formulaImage = await cropInlineFormulaImage(imageUrl, candidate)
+        const output = await formulaPipeline(formulaImage, {
+          max_new_tokens: 96,
+          num_beams: 2,
+        })
+        const generatedText = Array.isArray(output)
+          ? output[0]?.generated_text || output[0]?.text
+          : output?.generated_text || output?.text
+        const normalizedFormula = normalizeSimpleInlineLatex(generatedText)
+
+        if (!normalizedFormula?.text) {
+          unresolvedRects.push(candidate)
+          continue
+        }
+
+        corrections.push({
+          ...candidate,
+          replacement: normalizedFormula.text,
+          latex: normalizedFormula.latex,
+          source: 'local-formula-ocr',
+        })
+      } catch (error) {
+        console.warn('本地行内公式 OCR 失败，该模块将保持原图且不翻译', {
+          text: candidate.text,
+          error: error.message,
+        })
+        unresolvedRects.push(candidate)
+      }
+    }
+
+    return { corrections, unresolvedRects }
+  }
+
+  function applyInlineFormulaCorrections(blocks, formulaResult) {
+    const corrections = formulaResult?.corrections || []
+    const unresolvedRects = formulaResult?.unresolvedRects || []
+
+    return blocks.map((block) => {
+      const sourceLines = getCompareSourceBlocks(block).map((line) => ({ ...line }))
+      const inlineFormulas = [...(block.inlineFormulas || [])]
+      let skipTranslation = Boolean(block.skipTranslation)
+
+      unresolvedRects.forEach((unresolvedRect) => {
+        const overlapsBlock =
+          getOcrRectIntersectionArea(block, unresolvedRect) /
+          Math.max(unresolvedRect.width * unresolvedRect.height, 1) >= 0.3
+        if (overlapsBlock) skipTranslation = true
+      })
+
+      corrections.forEach((correction) => {
+        let bestLineIndex = -1
+        let bestOverlap = 0
+
+        sourceLines.forEach((line, lineIndex) => {
+          const overlap =
+            getOcrRectIntersectionArea(line, correction) /
+            Math.max(correction.width * correction.height, 1)
+          if (overlap <= bestOverlap) return
+          bestLineIndex = lineIndex
+          bestOverlap = overlap
+        })
+
+        if (bestLineIndex < 0 || bestOverlap < 0.3) return
+        const line = sourceLines[bestLineIndex]
+        const escapedText = correction.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        const nextText = line.text.replace(new RegExp(escapedText, 'i'), correction.replacement)
+
+        if (nextText === line.text && correction.text !== correction.replacement) {
+          skipTranslation = true
+          return
+        }
+
+        line.text = nextText
+        line.sourceText = nextText
+        inlineFormulas.push({
+          text: correction.replacement,
+          latex: correction.latex,
+          source: correction.source,
+          bbox: {
+            x: correction.x,
+            y: correction.y,
+            width: correction.width,
+            height: correction.height,
+          },
+        })
+      })
+
+      const mergedBlock = sourceLines.length
+        ? mergeOcrBlocks(sourceLines, block.index)
+        : block
+
+      return {
+        ...block,
+        ...mergedBlock,
+        inlineFormulas,
+        skipTranslation,
+      }
+    })
+  }
+
   function isNumberedLine(line) {
     return /^\s*(?:\d+[\s.)、-]+|[A-Z][.)、-]+\s*)/.test(line)
   }
@@ -6415,7 +7351,7 @@ function App() {
     const usefulAcademicPhrase =
       /\b(enzyme|substrate|product|transition|ground|state|reaction|coordinate|coenzyme|cofactor|metal|ion|ions|precursor|activity|rate|energy|enhancement|carbonic|anhydrase|isomerase|transfer|chemical|group|groups|dietary|heat|light|work|cell|cells|signal|signals|transduction|production|motion|protein|proteins|gene|genes|dna|rna)\b/i
 
-    if (isScientificExpressionOnly(normalizedText)) return false
+    if (isScientificExpressionOnly(normalizedText) || isDenseFormulaOrSymbolText(normalizedText)) return false
     if (usefulShortTerms) return true
     if (compactText.length < 3) return false
 
@@ -6479,6 +7415,7 @@ function App() {
 
   function shouldTranslateOcrBlock(block) {
     if (!block?.text) return false
+    if (block.skipTranslation || isDenseFormulaOrSymbolText(block.text)) return false
     const isNearEdge = block.nearEdge || (block.sourceBlocks || []).some((sourceBlock) => sourceBlock.nearEdge)
     const isShortLabel = isUsefulShortOcrLabel(block.text)
     if (isLikelyOcrNoiseText(block.text, block.confidence, isNearEdge)) return false
@@ -6487,18 +7424,155 @@ function App() {
     return isMeaningfulEnglishText(block.text)
   }
 
-  function getTranslatableOcrText(text) {
-    const lines = text
-      .split('\n')
-      .map((line) => line.trim())
+  function getOcrBlockContentType(block) {
+    const text = cleanOcrSourceForTranslation(block?.text || '')
+    const declaredType = String(block?.type || '').toLowerCase()
+    const sourceTypes = (block?.sourceBlocks || [])
+      .map((line) => String(line?.type || '').toLowerCase())
       .filter(Boolean)
-    const validLines = lines.filter((line) => isMeaningfulEnglishText(line))
+    const allSourceLinesAreFormula =
+      sourceTypes.length > 0 &&
+      sourceTypes.every((type) =>
+        type.includes('formula') || type.includes('equation') || type.includes('dense_symbol'),
+      )
+    if (!text) return 'noise'
+    if (
+      declaredType.includes('formula') ||
+      declaredType.includes('equation') ||
+      declaredType.includes('dense_symbol') ||
+      allSourceLinesAreFormula ||
+      isScientificExpressionOnly(text) ||
+      isDenseFormulaOrSymbolText(text)
+    ) {
+      return 'formula'
+    }
+    if (shouldTranslateOcrBlock({ ...block, text })) return 'text'
+    if (block?.skipTranslation && isMeaningfulEnglishText(text)) return 'text'
+    return 'noise'
+  }
 
-    if (validLines.length) {
-      return validLines.join('\n')
+  function getBlockInlineFormulas(block) {
+    const formulas = [
+      ...(Array.isArray(block?.inlineFormulas) ? block.inlineFormulas : []),
+      ...(Array.isArray(block?.formulaRegions) ? block.formulaRegions : []),
+      ...(block?.sourceBlocks || [])
+        .flatMap((line) => Array.isArray(line?.formulaRegions) ? line.formulaRegions : []),
+      ...(block?.sourceBlocks || [])
+        .filter((line) => String(line?.type || '').toLowerCase().includes('inline_formula'))
+        .map((line) => ({
+          text: line.text,
+          latex: line.latex,
+          source: 'multimodal',
+        })),
+      ...getInlineFormulaMetadataFromText(block?.text || '', 'detected-text'),
+    ]
+    const formulaKeys = new Set()
+
+    return formulas.filter((formula) => {
+      const text = String(formula?.text || '').trim()
+      if (!text || formulaKeys.has(text)) return false
+      formulaKeys.add(text)
+      return true
+    })
+  }
+
+  function isVisualTranslationBlock(block) {
+    const declaredType = String(block?.type || '').toLowerCase()
+    if (
+      declaredType.includes('formula') ||
+      declaredType.includes('dense_symbol') ||
+      declaredType.includes('noise') ||
+      Number(block?.symbolDensity) >= 0.55
+    ) {
+      return false
+    }
+    if (
+      block?.multimodal &&
+      ['text', 'paragraph', 'title', 'label', 'legend'].includes(declaredType)
+    ) {
+      return Boolean(cleanOcrSourceForTranslation(block.text)) &&
+        normalizeMultimodalConfidence(block.confidence) >= 18
     }
 
-    return isMeaningfulEnglishText(text) ? text : ''
+    return getOcrBlockContentType(block) === 'text'
+  }
+
+  function isVisualTranslationLine(line) {
+    const type = String(line?.type || 'text').toLowerCase()
+    if (
+      type.includes('formula') ||
+      type.includes('dense_symbol') ||
+      type.includes('noise')
+    ) {
+      return false
+    }
+
+    return !isScientificExpressionOnly(line?.text || '') &&
+      !isDenseFormulaOrSymbolText(line?.text || '')
+  }
+
+  async function translateOcrBlocksPreservingFormulas(blocks = []) {
+    const orderedBlocks = blocks
+      .filter(Boolean)
+      .slice()
+      .sort((firstBlock, secondBlock) =>
+        (Number(firstBlock.y) || 0) - (Number(secondBlock.y) || 0) ||
+        (Number(firstBlock.x) || 0) - (Number(secondBlock.x) || 0),
+      )
+    const segments = []
+
+    for (const block of orderedBlocks) {
+      const sourceText = cleanOcrSourceForTranslation(block.text)
+      const contentType = getOcrBlockContentType(block)
+      if (!sourceText || contentType === 'noise') continue
+
+      if (contentType === 'formula') {
+        segments.push({
+          type: 'formula',
+          sourceText,
+          outputText: sourceText,
+          preserveOriginal: true,
+          latex: String(block.latex || '').trim(),
+        })
+        continue
+      }
+
+      const inlineFormulas = getBlockInlineFormulas(block)
+      const translation = cleanResultText(
+        await translateOcrBlockText(sourceText, inlineFormulas),
+      )
+      if (isUselessTranslationResult(translation)) {
+        throw new Error('模型未返回有效译文')
+      }
+      segments.push({
+        type: 'text',
+        sourceText,
+        outputText: translation,
+        preserveOriginal: false,
+        inlineFormulas,
+      })
+    }
+
+    return {
+      segments,
+      translation: cleanResultText(segments.map((segment) => segment.outputText).join('\n')),
+    }
+  }
+
+  function selectionTextNeedsVisualRepair(text) {
+    const value = String(text || '').trim()
+    if (!value) return false
+
+    const invalidCharacters = Array.from(value).filter((character) => {
+      const code = character.charCodeAt(0)
+      return character === '�' || (code <= 31 && ![9, 10, 13].includes(code))
+    })
+    const unusualRuns = value.match(/(?:[|\\~`_^{}<>]|\[|\]){2,}/g) || []
+    const formulaClues = value
+      .split(/\s+/)
+      .filter((token) => hasInlineFormulaClue({ text: token, confidence: 100 }))
+
+    return invalidCharacters.length > 0 || unusualRuns.length > 0 || formulaClues.length > 0
   }
 
   function isUselessTranslationResult(text) {
@@ -6629,6 +7703,7 @@ function App() {
       y0: clippedBox.y0,
       x1: clippedBox.x1,
       y1: clippedBox.y1,
+      fontSize: Math.max(1, (clippedBox.y1 - clippedBox.y0) * 0.82),
       nearEdge: clippedBox.nearEdge,
       confidence: Number(word.confidence) || 0,
     }
@@ -6671,6 +7746,7 @@ function App() {
 
   function createBlockFromWords(words, index) {
     const sortedWords = words.slice().sort((firstWord, secondWord) => firstWord.x0 - secondWord.x0)
+    const wordHeights = sortedWords.map((word) => word.y1 - word.y0).filter((height) => height > 0)
     const text = sortedWords
       .map((word) => word.text)
       .join(' ')
@@ -6688,6 +7764,7 @@ function App() {
       y: box.y0,
       width: box.x1 - box.x0,
       height: box.y1 - box.y0,
+      fontSize: Math.max(1, (median(wordHeights) || box.y1 - box.y0) * 0.82),
       nearEdge: sortedWords.some((word) => word.nearEdge),
       confidence:
         sortedWords.reduce((sum, word) => sum + (Number(word.confidence) || 0), 0) /
@@ -6791,6 +7868,45 @@ function App() {
     )
   }
 
+  function isStrongDiagramLineContinuation(previousLine, nextLine, options = {}) {
+    const previousText = String(previousLine?.text || '').trim()
+    const nextText = String(nextLine?.text || '').trim()
+    if (!previousText || !nextText) return false
+    if (isNewListOrTableRow(nextLine)) return false
+    if (isLikelyFormulaOrTableLine(previousText) || isLikelyFormulaOrTableLine(nextText)) return false
+
+    const boundaryReview = options.boundaryReview === true
+    const lineHeight = Math.max(previousLine.height, nextLine.height, 1)
+    const verticalGap = nextLine.y - getBlockBottom(previousLine)
+    const horizontalOverlap = getHorizontalOverlapRatio(previousLine, nextLine)
+    const leftOffset = Math.abs(previousLine.x - nextLine.x)
+    const previousFontSize = Math.max(1, Number(previousLine.fontSize) || previousLine.height * 0.82)
+    const nextFontSize = Math.max(1, Number(nextLine.fontSize) || nextLine.height * 0.82)
+    const fontRatio = Math.min(previousFontSize, nextFontSize) / Math.max(previousFontSize, nextFontSize)
+    const previousWords = getWordCount(previousText)
+    const nextWords = getWordCount(nextText)
+    const previousEndsOpen =
+      /[-,(（/:：]$/.test(previousText) ||
+      /\b(of|by|for|with|from|to|in|on|at|and|or|the|a|an|into|under|over|between|within|using|via)$/i.test(previousText)
+    const nextContinues = /^[a-z(（]/.test(nextText) || isLikelyContinuationLine(nextText)
+    const bodyWrap = previousWords >= 6 && nextWords >= 3 && !hasSentenceEnding(previousText)
+    const bothShort = previousWords <= 4 && nextWords <= 4
+    const nextStartsLikeIndependentLabel = /^[A-Z0-9][A-Za-z0-9\s-]{1,}$/.test(nextText) && nextWords <= 6
+    const maximumGap = lineHeight * (boundaryReview ? 0.72 : 0.95)
+    const minimumOverlap = boundaryReview ? 0.68 : 0.56
+    const maximumLeftOffset = lineHeight * (boundaryReview ? 0.72 : 0.95)
+    const minimumFontRatio = boundaryReview ? 0.78 : 0.7
+
+    if (verticalGap < -lineHeight * 0.25 || verticalGap > maximumGap) return false
+    if (fontRatio < minimumFontRatio) return false
+    if (horizontalOverlap < minimumOverlap && leftOffset > maximumLeftOffset) return false
+    if (hasSentenceEnding(previousText) && !/[:：]$/.test(previousText)) return false
+    if (nextStartsLikeIndependentLabel && !previousEndsOpen) return false
+    if (bothShort && !previousEndsOpen && !nextContinues) return false
+
+    return previousEndsOpen || nextContinues || bodyWrap
+  }
+
   function shouldMergeWrappedLine(previousBlock, nextBlock, options = {}) {
     if (!previousBlock || !nextBlock) return false
     const previousLine = getLastSourceLine(previousBlock)
@@ -6801,6 +7917,7 @@ function App() {
     if (isNewListOrTableRow(nextLine) && !diagram) return false
     if (isLikelyFormulaOrTableLine(previousLine.text) || isLikelyFormulaOrTableLine(nextLine.text)) return false
     if (!isLikelySameTextRegion(previousLine, nextLine, options)) return false
+    if (diagram) return isStrongDiagramLineContinuation(previousLine, nextLine, options)
 
     const previousText = previousLine.text.trim()
     const nextText = nextLine.text.trim()
@@ -6813,21 +7930,6 @@ function App() {
       /[-,(]$/.test(previousText) ||
       /\b(of|by|for|with|from|to|in|on|at|and|or|the|a|an|into|under|over|between|within|using|via)$/i.test(previousText)
     const nextContinues = /^[a-z(]/.test(nextText) || isLikelyContinuationLine(nextText)
-    const previousEndsListIntro = /[:：]$/.test(previousText)
-    const nextLooksLikeListItem = isNewListOrTableRow(nextLine) || nextWords <= 4
-    const diagramShortStack =
-      diagram &&
-      previousWords <= 4 &&
-      nextWords <= 4 &&
-      verticalGap >= -lineHeight * 0.25 &&
-      verticalGap < lineHeight * 1.35 &&
-      Math.abs(previousLine.x - nextLine.x) < lineHeight * 1.8
-    const diagramListContinuation =
-      diagram &&
-      (previousEndsListIntro || previousWords <= 5 || nextLooksLikeListItem) &&
-      nextWords <= 7 &&
-      verticalGap >= -lineHeight * 0.25 &&
-      verticalGap < lineHeight * 1.55
     const previousLooksLikeHeading =
       previousWords <= 8 &&
       nextWords >= 6 &&
@@ -6837,21 +7939,12 @@ function App() {
     const titleWrap = previousWords >= 2 && nextWords >= 2 && (previousEndsOpen || nextContinues)
     const continuousBody = previousWords >= 5 && nextWords >= 3 && !previousLooksLikeHeading
 
-    if (hasSentenceEnding(previousText) && !diagramListContinuation) return false
+    if (hasSentenceEnding(previousText)) return false
     if (nextStartsLikeHeading && !previousEndsOpen) return false
     if (previousLooksLikeHeading && !previousEndsOpen) return false
-    if (
-      strict &&
-      !diagramShortStack &&
-      !diagramListContinuation &&
-      verticalGap > lineHeight * 0.72 &&
-      !previousEndsOpen &&
-      !nextContinues
-    ) {
+    if (strict && verticalGap > lineHeight * 0.72 && !previousEndsOpen && !nextContinues) {
       return false
     }
-
-    if (diagram && (diagramShortStack || diagramListContinuation)) return true
 
     if (strict) {
       return previousEndsOpen || nextContinues || bodyWrap || titleWrap || (continuousBody && previousWords >= 7)
@@ -6862,6 +7955,7 @@ function App() {
 
   function mergeOcrBlocks(blocks, index) {
     const sourceBlocks = blocks.flatMap((block) => block.sourceBlocks || [block])
+      .sort((firstBlock, secondBlock) => firstBlock.y - secondBlock.y || firstBlock.x - secondBlock.x)
     const x0 = Math.min(...sourceBlocks.map((block) => block.x))
     const y0 = Math.min(...sourceBlocks.map((block) => block.y))
     const x1 = Math.max(...sourceBlocks.map((block) => getBlockRight(block)))
@@ -6879,10 +7973,20 @@ function App() {
       y: y0,
       width: x1 - x0,
       height: y1 - y0,
+      fontSize: median(sourceBlocks.map((block) => Number(block.fontSize)).filter(Number.isFinite)) ||
+        Math.max(1, median(sourceBlocks.map((block) => block.height)) * 0.82),
       nearEdge: sourceBlocks.some((block) => block.nearEdge),
       confidence:
         sourceBlocks.reduce((sum, block) => sum + (Number(block.confidence) || 0), 0) /
         Math.max(sourceBlocks.length, 1),
+      inlineFormulas: sourceBlocks
+        .flatMap((block) => block.inlineFormulas || [])
+        .filter((formula, formulaIndex, formulas) =>
+          formulas.findIndex((candidate) =>
+            candidate.text === formula.text &&
+            candidate.source === formula.source) === formulaIndex),
+      skipTranslation: sourceBlocks.some((block) => block.skipTranslation),
+      pdfTextLayer: sourceBlocks.every((block) => block.pdfTextLayer),
       sourceBlocks,
     }
   }
@@ -7019,6 +8123,10 @@ function App() {
           y: y0,
           width: x1 - x0,
           height: y1 - y0,
+          fontSize: Math.max(
+            1,
+            Number(line.fontSize || line.font_size || line.font?.size) || (y1 - y0) * 0.82,
+          ),
           nearEdge: clippedBox.nearEdge,
           confidence: Number(line.confidence) || 0,
         }
@@ -7037,6 +8145,7 @@ function App() {
       imageSize,
       sample: nextBlocks.slice(0, 5).map((block) => ({
         text: block.text,
+        fontSize: block.fontSize,
         bbox: {
           x0: block.x,
           y0: block.y,
@@ -7046,7 +8155,7 @@ function App() {
       })),
     })
 
-    return nextBlocks.slice(0, 100)
+    return options.diagram ? nextBlocks : nextBlocks.slice(0, 100)
   }
 
   function loadImage(imageUrl) {
@@ -7088,92 +8197,441 @@ function App() {
         ...sourceBlock,
         width: Math.max(1, Number(sourceBlock.width) || 1),
         height: Math.max(1, Number(sourceBlock.height) || 1),
+        fontSize: Math.max(
+          1,
+          Number(sourceBlock.fontSize || sourceBlock.font_size || sourceBlock.font?.size) ||
+            Math.max(1, Number(sourceBlock.height) || 1) * 0.82,
+        ),
       }))
       .sort((firstBlock, secondBlock) => firstBlock.y - secondBlock.y || firstBlock.x - secondBlock.x)
   }
 
-  function getCompareModuleRect(segments, canvasWidth, canvasHeight, padding = 0) {
-    const x0 = Math.min(...segments.map((segment) => segment.x))
-    const y0 = Math.min(...segments.map((segment) => segment.y))
-    const x1 = Math.max(...segments.map((segment) => segment.x + segment.width))
-    const y1 = Math.max(...segments.map((segment) => segment.y + segment.height))
-    const x = clampNumber(x0 - padding, 0, canvasWidth - 1)
-    const y = clampNumber(y0 - padding, 0, canvasHeight - 1)
-
+  function getCompareLineWeight(line) {
+    const sourceText = String(line.text || line.sourceText || '').replace(/\s+/g, ' ').trim()
+    const textUnits = (sourceText.match(/[A-Za-z0-9\u3400-\u9fff]/g) || []).length
     return {
-      x,
-      y,
-      width: Math.max(12, Math.min(x1 - x0 + padding * 2, canvasWidth - x)),
-      height: Math.max(8, Math.min(y1 - y0 + padding * 2, canvasHeight - y)),
+      textUnits: Math.max(1, textUnits),
+      width: Math.max(1, Number(line.width) || 1),
     }
   }
 
-  function getCompareLineRects(segments, canvasWidth, canvasHeight, padding = 0) {
-    return segments.map((segment) => {
-      const x = clampNumber(segment.x - padding, 0, canvasWidth - 1)
-      const y = clampNumber(segment.y - padding, 0, canvasHeight - 1)
-      const width = Math.max(8, Math.min(segment.width + padding * 2, canvasWidth - x))
-      const height = Math.max(6, Math.min(segment.height + padding * 2, canvasHeight - y))
+  function findCompareTranslationCut(characters, idealCut, minimumCut, maximumCut) {
+    const lowerBound = Math.max(minimumCut, Math.floor(idealCut - Math.max(4, idealCut * 0.28)))
+    const upperBound = Math.min(maximumCut, Math.ceil(idealCut + Math.max(4, idealCut * 0.28)))
+    let bestCut = clampNumber(Math.round(idealCut), minimumCut, maximumCut)
+    let bestScore = Infinity
 
-      return { x, y, width, height }
+    for (let cut = lowerBound; cut <= upperBound; cut += 1) {
+      const previousCharacter = characters[cut - 1] || ''
+      const nextCharacter = characters[cut] || ''
+      const isStrongBoundary = /[。！？!?；;]/.test(previousCharacter)
+      const isSoftBoundary = /[，、,:：]/.test(previousCharacter)
+      const isSpaceBoundary = /\s/.test(previousCharacter) || /\s/.test(nextCharacter)
+      const boundaryBonus = isStrongBoundary ? 5 : isSoftBoundary ? 3 : isSpaceBoundary ? 1.5 : 0
+      const score = Math.abs(cut - idealCut) - boundaryBonus
+
+      if (score < bestScore) {
+        bestCut = cut
+        bestScore = score
+      }
+    }
+
+    return bestCut
+  }
+
+  function splitCompareTranslationAcrossLines(translation, sourceLines) {
+    const normalizedTranslation = String(translation || '').replace(/\s+/g, ' ').trim()
+    if (!sourceLines.length) return []
+    if (sourceLines.length === 1) return [normalizedTranslation]
+
+    const characters = Array.from(normalizedTranslation)
+    if (!characters.length) return sourceLines.map(() => '')
+
+    const lineMetrics = sourceLines.map(getCompareLineWeight)
+    const totalTextUnits = lineMetrics.reduce((sum, metrics) => sum + metrics.textUnits, 0)
+    const totalWidth = lineMetrics.reduce((sum, metrics) => sum + metrics.width, 0)
+    const weights = lineMetrics.map((metrics) =>
+      0.65 * (metrics.textUnits / Math.max(totalTextUnits, 1)) +
+      0.35 * (metrics.width / Math.max(totalWidth, 1)),
+    )
+    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0)
+    const parts = []
+    let cursor = 0
+    let consumedWeight = 0
+
+    for (let index = 0; index < sourceLines.length - 1; index += 1) {
+      consumedWeight += weights[index]
+      const remainingLines = sourceLines.length - index - 1
+      const idealCut = characters.length * (consumedWeight / Math.max(totalWeight, 1))
+      const minimumCut = Math.min(characters.length, cursor + (cursor < characters.length ? 1 : 0))
+      const maximumCut = Math.max(minimumCut, characters.length - remainingLines)
+      const cut = findCompareTranslationCut(characters, idealCut, minimumCut, maximumCut)
+
+      parts.push(characters.slice(cursor, cut).join('').trim())
+      cursor = cut
+    }
+
+    parts.push(characters.slice(cursor).join('').trim())
+    return sourceLines.map((_line, index) => parts[index] || '')
+  }
+
+  function getCompareLineAssignments(block) {
+    const sourceLines = getCompareSourceBlocks(block)
+      .filter((line) => isVisualTranslationLine(line))
+    const translations = splitCompareTranslationAcrossLines(block.translation, sourceLines)
+
+    return sourceLines.map((line, index) => ({
+      ...line,
+      translation: translations[index] || '',
+    }))
+  }
+
+  function isShortCompareModule(block) {
+    const sourceText = cleanOcrSourceForTranslation(block?.text || '')
+    const words = sourceText.match(/[A-Za-z][A-Za-z'-]*/g) || []
+
+    return words.length <= 8 || sourceText.length <= 48
+  }
+
+  function assessCompareTranslation(block) {
+    const sourceText = cleanOcrSourceForTranslation(block?.text || '')
+    const translation = cleanResultText(block?.translation || '')
+    if (block?.visualLayoutIssue) {
+      return { valid: false, reason: block.visualLayoutIssue }
+    }
+    if (!translation || isUselessTranslationResult(translation)) {
+      return { valid: false, reason: 'empty' }
+    }
+    if (translation.toLowerCase() === sourceText.toLowerCase()) {
+      return { valid: false, reason: 'untranslated' }
+    }
+    if (hasWeirdDiagramTranslationStack(translation, block)) {
+      return { valid: false, reason: 'stacked' }
+    }
+    if (isShortCompareModule(block)) return { valid: true, reason: '' }
+
+    const sourceWords = sourceText.match(/[A-Za-z][A-Za-z'-]*/g) || []
+    const targetCjkCharacters = translation.match(/[\u3400-\u9fff]/g) || []
+    const targetLatinTokens = translation.match(/[A-Za-z0-9]+/g) || []
+    const targetUnits = targetCjkCharacters.length + targetLatinTokens.length
+    const minimumTargetUnits = Math.max(8, Math.ceil(sourceWords.length * 0.58))
+    const sourceLooksOpen =
+      /^[a-z]/.test(sourceText) ||
+      /[-,;:(]$/.test(sourceText) ||
+      /\b(of|by|for|with|from|to|in|on|at|and|or|the|a|an|into|under|over|between|within|using|via)$/i.test(sourceText)
+    const translationLooksOpen =
+      /(?:的|和|与|或|及|以及|在|从|向|对|为|由|通过|由于|因为|如果|当|将|被|使|而|但|且|并|从而|以便)[，,;；:]?$/.test(
+        translation,
+      )
+    const sourceEndsSentence = /[.!?]["')\]]*$/.test(sourceText)
+    const translationEndsSentence = /[。！？!?]["')\]]*$/.test(translation)
+
+    if (targetUnits < minimumTargetUnits) return { valid: false, reason: 'missing-content' }
+    if (
+      targetLatinTokens.length >= Math.max(5, Math.ceil(sourceWords.length * 0.45)) &&
+      targetCjkCharacters.length < Math.max(4, sourceWords.length * 0.5)
+    ) {
+      return { valid: false, reason: 'untranslated-residue' }
+    }
+    if (translationLooksOpen) return { valid: false, reason: 'open-translation' }
+    if (sourceLooksOpen && sourceWords.length >= 10) {
+      return { valid: false, reason: 'open-source-boundary' }
+    }
+    if (sourceEndsSentence && !translationEndsSentence && targetUnits < sourceWords.length * 0.9) {
+      return { valid: false, reason: 'truncated-sentence' }
+    }
+
+    return { valid: true, reason: '' }
+  }
+
+  function getVerticalOverlapRatio(firstBlock, secondBlock) {
+    const overlap = Math.max(
+      0,
+      Math.min(getBlockBottom(firstBlock), getBlockBottom(secondBlock)) -
+        Math.max(firstBlock.y, secondBlock.y),
+    )
+    const referenceHeight = Math.max(1, Math.min(firstBlock.height, secondBlock.height))
+
+    return overlap / referenceHeight
+  }
+
+  function getCompareModuleMergeScore(firstBlock, secondBlock, attempt) {
+    const referenceHeight = Math.max(
+      median(getCompareSourceBlocks(firstBlock).map((line) => line.height)),
+      median(getCompareSourceBlocks(secondBlock).map((line) => line.height)),
+      1,
+    )
+    const verticalGap = Math.max(
+      0,
+      Math.max(firstBlock.y, secondBlock.y) -
+        Math.min(getBlockBottom(firstBlock), getBlockBottom(secondBlock)),
+    )
+    const horizontalGap = Math.max(
+      0,
+      Math.max(firstBlock.x, secondBlock.x) -
+        Math.min(getBlockRight(firstBlock), getBlockRight(secondBlock)),
+    )
+    const horizontalOverlap = getHorizontalOverlapRatio(firstBlock, secondBlock)
+    const verticalOverlap = getVerticalOverlapRatio(firstBlock, secondBlock)
+    const verticalNeighbor =
+      verticalGap <= referenceHeight * (attempt === 1 ? 1.8 : 3.4) &&
+      horizontalOverlap >= (attempt === 1 ? 0.42 : 0.24)
+    const horizontalNeighbor =
+      horizontalGap <= referenceHeight * (attempt === 1 ? 4.2 : 7.5) &&
+      verticalOverlap >= (attempt === 1 ? 0.5 : 0.3)
+
+    if (!verticalNeighbor && !horizontalNeighbor) return null
+
+    const verticalScore = verticalGap / referenceHeight + (1 - horizontalOverlap) * 1.15
+    const horizontalScore = horizontalGap / referenceHeight + (1 - verticalOverlap) * 1.35 + 0.25
+
+    return Math.min(
+      verticalNeighbor ? verticalScore : Infinity,
+      horizontalNeighbor ? horizontalScore : Infinity,
+    )
+  }
+
+  function findCompareBoundaryCandidateIndex(blocks, blockIndex, attempt, consumedIndexes) {
+    let bestIndex = -1
+    let bestScore = Infinity
+
+    blocks.forEach((candidate, candidateIndex) => {
+      if (candidateIndex === blockIndex || consumedIndexes.has(candidateIndex)) return
+      const score = getCompareModuleMergeScore(blocks[blockIndex], candidate, attempt)
+      if (score === null || score >= bestScore) return
+
+      bestIndex = candidateIndex
+      bestScore = score
+    })
+
+    return bestIndex
+  }
+
+  function splitCompareBlockByStrictBoundaries(block, boundaryReview = false) {
+    const sourceLines = getCompareSourceBlocks(block)
+    if (sourceLines.length <= 1) {
+      return [{ ...block, sourceBlocks: sourceLines }]
+    }
+
+    const lineGroups = []
+    sourceLines.forEach((line) => {
+      const currentGroup = lineGroups[lineGroups.length - 1]
+      if (!currentGroup?.length) {
+        lineGroups.push([line])
+        return
+      }
+
+      const currentBlock = mergeOcrBlocks(currentGroup, Number(block.index) || 0)
+      if (
+        shouldMergeWrappedLine(currentBlock, line, {
+          strict: true,
+          boundaryReview,
+        })
+      ) {
+        currentGroup.push(line)
+      } else {
+        lineGroups.push([line])
+      }
+    })
+
+    if (lineGroups.length === 1) {
+      return [{ ...block, sourceBlocks: sourceLines }]
+    }
+
+    return lineGroups.map((lines, groupIndex) => {
+      const splitBlock = mergeOcrBlocks(lines, (Number(block.index) || 0) + groupIndex / 1000)
+      return {
+        ...splitBlock,
+        moduleId: `${block.moduleId || `m${Number(block.index) + 1 || 1}`}-c${groupIndex + 1}`,
+        sourceText: splitBlock.text,
+        translation: '',
+        formulaRegions: (block.formulaRegions || []).filter((region) =>
+          getRectOverlapArea(region, splitBlock) > 0,
+        ),
+        multimodal: Boolean(block.multimodal),
+        compareBoundaryRetries: block.compareBoundaryRetries || 0,
+      }
+    })
+  }
+
+  function mergeCompareModuleBlocks(firstBlock, secondBlock, attempt) {
+    const uniqueLines = []
+    const lineKeys = new Set()
+
+    ;[...getCompareSourceBlocks(firstBlock), ...getCompareSourceBlocks(secondBlock)]
+      .sort((firstLine, secondLine) => firstLine.y - secondLine.y || firstLine.x - secondLine.x)
+      .forEach((line) => {
+        const lineKey = [
+          Math.round(line.x),
+          Math.round(line.y),
+          Math.round(line.width),
+          Math.round(line.height),
+          line.text,
+        ].join('|')
+        if (lineKeys.has(lineKey)) return
+        lineKeys.add(lineKey)
+        uniqueLines.push(line)
+      })
+
+    const merged = mergeOcrBlocks(uniqueLines, Math.min(firstBlock.index, secondBlock.index))
+
+    return {
+      ...merged,
+      sourceText: merged.text,
+      translation: '',
+      formulaRegions: [
+        ...(firstBlock.formulaRegions || []),
+        ...(secondBlock.formulaRegions || []),
+      ],
+      multimodal: Boolean(firstBlock.multimodal || secondBlock.multimodal),
+      compareBoundaryRetries: attempt,
+    }
+  }
+
+  async function translateCompareModule(block, force = false) {
+    const sourceText = cleanOcrSourceForTranslation(block.text)
+    const existingTranslation = cleanResultText(block.translation || '')
+
+    if (!force && existingTranslation && !isUselessTranslationResult(existingTranslation)) {
+      return {
+        ...block,
+        sourceText,
+        translation: existingTranslation,
+      }
+    }
+
+    try {
+      const translation = cleanResultText(
+        await translateOcrBlockText(sourceText, getBlockInlineFormulas(block)),
+      )
+      if (isUselessTranslationResult(translation)) {
+        return getOcrTranslationFallback(block, sourceText, 'empty-translation')
+      }
+
+      return {
+        ...block,
+        sourceText,
+        translation,
+      }
+    } catch (error) {
+      return getOcrTranslationFallback(block, sourceText, error.message)
+    }
+  }
+
+  async function translateCompareBlocks(blocks, reviewOptions = {}) {
+    const strictBlocks = blocks
+      .filter((item) => isVisualTranslationBlock(item))
+      .slice(0, 120)
+      .flatMap((block) => splitCompareBlockByStrictBoundaries(block))
+    let workingBlocks = await mapWithConcurrency(
+      strictBlocks,
+      3,
+      (block) => translateCompareModule(block),
+    )
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const assessments = workingBlocks.map(assessCompareTranslation)
+      const incompleteIndexes = assessments
+        .map((assessment, index) => (!assessment.valid ? index : -1))
+        .filter((index) => index >= 0)
+      if (!incompleteIndexes.length) break
+
+      const consumedIndexes = new Set()
+      const revisedBlocks = []
+
+      for (const blockIndex of incompleteIndexes) {
+        if (consumedIndexes.has(blockIndex)) continue
+
+        const block = workingBlocks[blockIndex]
+        const assessment = assessments[blockIndex]
+        consumedIndexes.add(blockIndex)
+        if (reviewOptions.multimodal) {
+          const reviewedBlocks = await reviewVisualModuleBoundary({
+            mode: 'compare',
+            image: reviewOptions.image,
+            imageSize: reviewOptions.imageSize,
+            block,
+            blocks: workingBlocks,
+            attempt,
+            reason: assessment.reason,
+          })
+          const reviewedTextBlocks = reviewedBlocks.filter(isVisualTranslationBlock)
+          if (reviewedTextBlocks.length) {
+            const translatedReviewedBlocks = await mapWithConcurrency(
+              reviewedTextBlocks,
+              3,
+              (reviewedBlock) => translateCompareModule({
+                ...reviewedBlock,
+                compareBoundaryRetries: attempt,
+              }, true),
+            )
+            revisedBlocks.push(...translatedReviewedBlocks)
+            continue
+          }
+        }
+
+        const splitBlocks = splitCompareBlockByStrictBoundaries(block, true)
+        if (splitBlocks.length > 1) {
+          const translatedSplitBlocks = await mapWithConcurrency(
+            splitBlocks,
+            3,
+            (splitBlock) => translateCompareModule({
+              ...splitBlock,
+              compareBoundaryRetries: attempt,
+            }, true),
+          )
+          revisedBlocks.push(...translatedSplitBlocks)
+          continue
+        }
+
+        const candidateIndex = findCompareBoundaryCandidateIndex(
+          workingBlocks,
+          blockIndex,
+          attempt,
+          consumedIndexes,
+        )
+
+        if (candidateIndex >= 0) {
+          consumedIndexes.add(candidateIndex)
+          const mergedBlock = mergeCompareModuleBlocks(
+            workingBlocks[blockIndex],
+            workingBlocks[candidateIndex],
+            attempt,
+          )
+          revisedBlocks.push(await translateCompareModule(mergedBlock, true))
+        } else {
+          revisedBlocks.push(await translateCompareModule({
+            ...workingBlocks[blockIndex],
+            compareBoundaryRetries: attempt,
+          }, true))
+        }
+      }
+
+      workingBlocks = workingBlocks
+        .filter((_block, index) => !consumedIndexes.has(index))
+        .concat(revisedBlocks)
+        .sort((firstBlock, secondBlock) => firstBlock.y - secondBlock.y || firstBlock.x - secondBlock.x)
+    }
+
+    return workingBlocks.map((block) => {
+      const assessment = assessCompareTranslation(block)
+      if (assessment.valid) {
+        return {
+          ...block,
+          translationFallback: false,
+          translationError: '',
+        }
+      }
+      return getOcrTranslationFallback(
+        block,
+        cleanOcrSourceForTranslation(block.text),
+        block.translationError || assessment.reason,
+      )
     })
   }
 
   function getCompareCanvasFont(fontSize) {
     return `${fontSize}px "Microsoft YaHei", Arial, sans-serif`
-  }
-
-  function getCompareTextSlots(segments, fontSize, canvasWidth, canvasHeight) {
-    const lineRects = getCompareLineRects(segments, canvasWidth, canvasHeight)
-    const horizontalPadding = clampNumber(fontSize * 0.22, 3, 7)
-    const verticalPadding = clampNumber(fontSize * 0.08, 1, 3)
-
-    return lineRects.map((rect) => {
-      const lineFontSize = clampNumber(Math.floor(Math.min(fontSize, rect.height * 0.92)), 10, fontSize)
-      const minBackgroundHeight = lineFontSize * 1.18
-      const backgroundX = clampNumber(rect.x - horizontalPadding, 0, canvasWidth - 1)
-      const backgroundY = clampNumber(
-        rect.y - verticalPadding,
-        0,
-        Math.max(0, canvasHeight - minBackgroundHeight),
-      )
-      const backgroundWidth = Math.max(
-        10,
-        Math.min(rect.width + horizontalPadding * 2, canvasWidth - backgroundX),
-      )
-      const backgroundHeight = Math.max(
-        minBackgroundHeight,
-        Math.min(rect.height + verticalPadding * 2, canvasHeight - backgroundY),
-      )
-      const textAreaWidth = Math.max(8, backgroundWidth - horizontalPadding * 2)
-
-      return {
-        x: backgroundX + horizontalPadding,
-        slotX: backgroundX + horizontalPadding,
-        y: backgroundY + Math.max(0, (backgroundHeight - lineFontSize) / 2),
-        maxWidth: textAreaWidth,
-        lineHeight: backgroundHeight,
-        fontSize: lineFontSize,
-        backgroundRect: {
-          x: backgroundX,
-          y: backgroundY,
-          width: backgroundWidth,
-          height: backgroundHeight,
-        },
-      }
-    })
-  }
-
-  function trimCanvasTextToWidth(context, text, maxWidth) {
-    const characters = Array.from(text)
-    let nextText = characters.join('')
-
-    while (nextText && context.measureText(`${nextText}…`).width > maxWidth) {
-      characters.pop()
-      nextText = characters.join('')
-    }
-
-    return nextText ? `${nextText}…` : '…'
   }
 
   function getPaddedLineBox(segment, canvasWidth, canvasHeight) {
@@ -7192,64 +8650,6 @@ function App() {
     }
   }
 
-  function drawTextInBox(context, text, box, options = {}) {
-    const color = options.color || '#111827'
-    const minFontSize = Number(options.minFontSize) || 10
-    const maxFontSize = Number(options.maxFontSize) || 18
-    const initialFontSize = clampNumber(
-      Number(options.fontSize) || Math.floor(box.height * 0.75),
-      minFontSize,
-      maxFontSize,
-    )
-    let fallback = null
-
-    for (let fontSize = initialFontSize; fontSize >= minFontSize; fontSize -= 1) {
-      context.font = getCompareCanvasFont(fontSize)
-      const lineHeight = fontSize * 1.16
-      const maxLines = Math.max(1, Math.floor(box.height / lineHeight))
-      const wrappedLines = wrapCanvasText(context, text, box.width)
-      const visibleLines = wrappedLines.slice(0, maxLines)
-      const truncated = wrappedLines.length > maxLines
-
-      fallback = { fontSize, lineHeight, lines: visibleLines, wrappedLines, maxLines, truncated }
-
-      if (!truncated) break
-    }
-
-    if (!fallback?.lines?.length) return { lines: [], truncated: true }
-
-    const lines = fallback.lines.slice()
-    if (fallback.truncated && lines.length) {
-      const lastLine = lines[lines.length - 1]
-      context.font = getCompareCanvasFont(fallback.fontSize)
-      lines[lines.length - 1] = trimCanvasTextToWidth(context, `${lastLine}${fallback.wrappedLines.slice(fallback.maxLines).join('')}`, box.width)
-    }
-
-    context.save()
-    context.fillStyle = color
-    context.textBaseline = 'top'
-    context.font = getCompareCanvasFont(fallback.fontSize)
-    lines.forEach((line, index) => {
-      context.fillText(line, box.x, box.y + index * fallback.lineHeight)
-    })
-    context.restore()
-
-    return {
-      lines,
-      fontSize: fallback.fontSize,
-      lineHeight: fallback.lineHeight,
-      truncated: fallback.truncated,
-    }
-  }
-
-  function hasLineLevelMultimodalTranslations(block) {
-    return Boolean(
-      block?.multimodal &&
-      Array.isArray(block.sourceBlocks) &&
-      block.sourceBlocks.some((line) => line.translation && !isUselessTranslationResult(line.translation)),
-    )
-  }
-
   function drawDebugLayoutBoxes(context, blocks, canvasWidth, canvasHeight) {
     if (!MULTIMODAL_OCR_DEBUG) return
 
@@ -7264,202 +8664,6 @@ function App() {
       })
     })
     context.restore()
-  }
-
-  function wrapCanvasTextAcrossSlots(context, text, slots) {
-    const normalizedText = text.replace(/\s+/g, ' ').trim()
-    const characters = Array.from(normalizedText)
-    const lines = []
-    let cursor = 0
-
-    slots.forEach((slot, slotIndex) => {
-      if (cursor >= characters.length) return
-
-      const remainingSlots = slots.slice(slotIndex)
-      const remainingWidth = remainingSlots.reduce((sum, item) => sum + item.maxWidth, 0)
-      const remainingCharacters = characters.length - cursor
-      const targetCount =
-        slotIndex === slots.length - 1
-          ? remainingCharacters
-          : Math.max(1, Math.round(remainingCharacters * (slot.maxWidth / Math.max(remainingWidth, 1))))
-      let lineText = ''
-      let lineCharacters = 0
-
-      context.font = getCompareCanvasFont(slot.fontSize || 12)
-      while (cursor < characters.length) {
-        const remainingSlotsAfterCurrent = slots.length - slotIndex - 1
-        const remainingAfterTakingNextCharacter = characters.length - cursor - 1
-
-        if (
-          lineText &&
-          remainingSlotsAfterCurrent > 0 &&
-          remainingAfterTakingNextCharacter < remainingSlotsAfterCurrent
-        ) {
-          break
-        }
-
-        const nextLine = `${lineText}${characters[cursor]}`
-        if (lineText && context.measureText(nextLine).width > slot.maxWidth) break
-
-        lineText = nextLine
-        cursor += 1
-        lineCharacters += 1
-
-        if (
-          slotIndex < slots.length - 1 &&
-          lineCharacters >= targetCount &&
-          characters.length - cursor >= remainingSlotsAfterCurrent
-        ) {
-          break
-        }
-      }
-
-      if (lineText) {
-        const text = lineText.trim() || lineText
-
-        lines.push({
-          ...slot,
-          x: slot.x,
-          slotX: slot.x,
-          text,
-        })
-      }
-    })
-
-    const truncated = cursor < characters.length
-
-    if (truncated && lines.length) {
-      const lastLine = lines[lines.length - 1]
-      context.font = getCompareCanvasFont(lastLine.fontSize || 12)
-      lastLine.text = trimCanvasTextToWidth(context, `${lastLine.text}${characters.slice(cursor).join('')}`, lastLine.maxWidth)
-      lastLine.x = lastLine.slotX ?? lastLine.x
-    }
-
-    return { lines, truncated }
-  }
-
-  function hasOverlappingCompareLineBackgrounds(slots) {
-    for (let index = 1; index < slots.length; index += 1) {
-      const previousRect = slots[index - 1].backgroundRect
-      const currentRect = slots[index].backgroundRect
-
-      if (!previousRect || !currentRect) continue
-      if (currentRect.y < previousRect.y + previousRect.height - 1) return true
-    }
-
-    return false
-  }
-
-  function shouldUseCompareModuleFallback(segments, slots) {
-    if (segments.length < 2) return false
-
-    const sortedSegments = segments.slice().sort((firstSegment, secondSegment) => firstSegment.y - secondSegment.y)
-    const segmentHeights = sortedSegments.map((segment) => segment.height).filter((height) => height > 0)
-    const averageHeight =
-      segmentHeights.reduce((sum, height) => sum + height, 0) / Math.max(segmentHeights.length, 1)
-    const gaps = sortedSegments.slice(1).map((segment, index) => segment.y - getBlockBottom(sortedSegments[index]))
-    const averageGap = gaps.reduce((sum, gap) => sum + gap, 0) / Math.max(gaps.length, 1)
-    const moduleHeight = Math.max(...sortedSegments.map((segment) => getBlockBottom(segment))) - Math.min(...sortedSegments.map((segment) => segment.y))
-    const tightLineBoxes = averageHeight < 11 || averageGap < Math.max(1, averageHeight * 0.12)
-    const denseModule =
-      sortedSegments.length >= 5 &&
-      averageGap < averageHeight * 0.28 &&
-      averageHeight * sortedSegments.length > moduleHeight * 0.72
-
-    return tightLineBoxes || denseModule || hasOverlappingCompareLineBackgrounds(slots)
-  }
-
-  function getCompareModuleFallbackPlan(context, block, segments, canvasWidth, canvasHeight, maxFontSize, minFontSize) {
-    const modulePadding = clampNumber(maxFontSize * 0.34, 4, 8)
-    const moduleRect = getCompareModuleRect(segments, canvasWidth, canvasHeight, modulePadding)
-    const horizontalPadding = clampNumber(maxFontSize * 0.28, 4, 8)
-    const verticalPadding = clampNumber(maxFontSize * 0.22, 3, 6)
-    let fallback = {
-      lines: [],
-      fontSize: minFontSize,
-      segments,
-      moduleRect,
-      backgroundRects: [moduleRect],
-      mode: 'module-fallback',
-      truncated: true,
-    }
-
-    for (let fontSize = clampNumber(maxFontSize, 11, 20); fontSize >= Math.max(10, minFontSize); fontSize -= 1) {
-      context.font = getCompareCanvasFont(fontSize)
-      const lineHeight = fontSize * 1.22
-      const maxWidth = Math.max(8, moduleRect.width - horizontalPadding * 2)
-      const maxLines = Math.max(1, Math.floor((moduleRect.height - verticalPadding * 2) / lineHeight))
-      const wrappedLines = wrapCanvasText(context, block.translation, maxWidth)
-      const lines = wrappedLines.slice(0, maxLines).map((line, index) => ({
-        text: line,
-        x: moduleRect.x + horizontalPadding,
-        y: moduleRect.y + verticalPadding + index * lineHeight,
-        maxWidth,
-        lineHeight,
-        fontSize,
-      }))
-      const truncated = wrappedLines.length > maxLines
-
-      if (truncated && lines.length) {
-        const lastLine = lines[lines.length - 1]
-        lastLine.text = trimCanvasTextToWidth(context, `${lastLine.text}${wrappedLines.slice(maxLines).join('')}`, maxWidth)
-      }
-
-      fallback = {
-        lines,
-        fontSize,
-        segments,
-        moduleRect,
-        backgroundRects: [moduleRect],
-        mode: 'module-fallback',
-        truncated,
-      }
-
-      if (lines.length && !truncated) return fallback
-    }
-
-    return fallback
-  }
-
-  function getCompareReplacementPlan(context, block, canvasWidth, canvasHeight) {
-    const segments = getCompareSourceBlocks(block)
-    const segmentHeights = segments.map((segment) => segment.height).filter((height) => height > 0)
-    const baseHeight = median(segmentHeights) || block.height || 14
-    const maxFontSize = clampNumber(Math.floor(baseHeight * 0.98), 12, 24)
-    const minFontSize = Math.min(10, maxFontSize)
-    const initialSlots = getCompareTextSlots(segments, maxFontSize, canvasWidth, canvasHeight)
-    let fallback = null
-
-    if (shouldUseCompareModuleFallback(segments, initialSlots)) {
-      return getCompareModuleFallbackPlan(context, block, segments, canvasWidth, canvasHeight, maxFontSize, minFontSize)
-    }
-
-    for (let fontSize = maxFontSize; fontSize >= minFontSize; fontSize -= 1) {
-      const slots = getCompareTextSlots(segments, fontSize, canvasWidth, canvasHeight)
-      const plan = wrapCanvasTextAcrossSlots(context, block.translation, slots)
-      const moduleRect = getCompareModuleRect(segments, canvasWidth, canvasHeight, 0)
-      fallback = {
-        ...plan,
-        fontSize,
-        segments,
-        moduleRect,
-        backgroundRects: slots.map((slot) => slot.backgroundRect),
-      }
-
-      if (plan.lines.length && !plan.truncated) {
-        return fallback
-      }
-    }
-
-    return fallback?.lines?.length
-      ? getCompareModuleFallbackPlan(context, block, segments, canvasWidth, canvasHeight, maxFontSize, minFontSize)
-      : {
-          lines: [],
-          fontSize: minFontSize,
-          segments,
-          moduleRect: getCompareModuleRect(segments, canvasWidth, canvasHeight, 4),
-          backgroundRects: getCompareTextSlots(segments, minFontSize, canvasWidth, canvasHeight).map((slot) => slot.backgroundRect),
-        }
   }
 
   function getRectOverlapArea(firstRect, secondRect) {
@@ -7533,34 +8737,345 @@ function App() {
     return String(text || '').replace(/@@\s*OCRF\s*(\d+)\s*@@/gi, (_match, index) => tokens[Number(index)] || _match)
   }
 
-  async function translateOcrBlockText(text) {
-    const protectedResult = protectOcrFormulaTokens(text)
+  function protectInlineFormulaTokens(text, formulas = []) {
+    const tokens = []
+    let protectedText = String(text || '')
+
+    formulas
+      .map((formula) => String(formula?.text || '').trim())
+      .filter(Boolean)
+      .sort((firstFormula, secondFormula) => secondFormula.length - firstFormula.length)
+      .forEach((formula) => {
+        if (!protectedText.includes(formula)) return
+        const tokenIndex = tokens.length
+        tokens.push(formula)
+        protectedText = protectedText.replaceAll(formula, `@@OCRX${tokenIndex}@@`)
+      })
+
+    return { protectedText, tokens }
+  }
+
+  function restoreInlineFormulaTokens(text, tokens) {
+    return String(text || '').replace(/@@\s*OCRX\s*(\d+)\s*@@/gi, (_match, index) => tokens[Number(index)] || _match)
+  }
+
+  async function translateOcrBlockText(text, inlineFormulas = []) {
+    const inlineProtectedResult = protectInlineFormulaTokens(text, inlineFormulas)
+    const protectedResult = protectOcrFormulaTokens(inlineProtectedResult.protectedText)
     const chunks = splitOcrTextForTranslation(protectedResult.protectedText)
     const translations = []
 
     for (const chunk of chunks) {
       try {
         const translation = cleanResultText(await requestTranslation(chunk))
-        translations.push(isUselessTranslationResult(translation) ? chunk : translation)
+        if (isUselessTranslationResult(translation)) {
+          throw new Error('模型未返回有效译文')
+        }
+        translations.push(translation)
       } catch (error) {
-        console.warn('OCR 模块分段翻译失败，使用原文兜底', {
+        console.warn('OCR 模块分段翻译失败', {
           textLength: chunk.length,
           error: error.message,
         })
-        translations.push(chunk)
+        throw new Error(error.message || '翻译失败', { cause: error })
       }
     }
 
-    return restoreOcrFormulaTokens(translations.join('\n').trim(), protectedResult.tokens)
+    const formulaRestoredText = restoreOcrFormulaTokens(
+      translations.join('\n').trim(),
+      protectedResult.tokens,
+    )
+
+    return restoreInlineFormulaTokens(formulaRestoredText, inlineProtectedResult.tokens)
   }
+
+  function getSelectionWordSimilarity(firstText, secondText) {
+    const firstWords = (String(firstText || '').toLowerCase().match(/[a-z]{2,}/g) || [])
+    const secondWords = new Set(String(secondText || '').toLowerCase().match(/[a-z]{2,}/g) || [])
+    if (!firstWords.length) return secondWords.size ? 0 : 1
+
+    const matchedWords = firstWords.filter((word) => secondWords.has(word))
+    return matchedWords.length / firstWords.length
+  }
+
+  function applyFormulaCorrectionsToText(text, corrections = []) {
+    let correctedText = String(text || '')
+
+    corrections.forEach((correction) => {
+      const sourceText = String(correction?.text || '').trim()
+      const replacement = String(correction?.replacement || '').trim()
+      if (!sourceText || !replacement) return
+
+      const escapedText = sourceText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      correctedText = correctedText.replace(new RegExp(escapedText, 'i'), replacement)
+    })
+
+    return cleanOcrSourceForTranslation(correctedText)
+  }
+
+  async function recognizeSelectionWithLocalFormulaOcr(text, capture) {
+    const originalText = cleanOcrSourceForTranslation(text)
+    const detectedFormulas = getInlineFormulaMetadataFromText(originalText, 'selection-text')
+    if (!capture?.image || !selectionTextNeedsVisualRepair(originalText)) {
+      return {
+        text: originalText,
+        inlineFormulas: detectedFormulas,
+        unresolved: false,
+      }
+    }
+
+    if (isDenseFormulaOrSymbolText(originalText) || isScientificExpressionOnly(originalText)) {
+      try {
+        const formulaPipeline = await getInlineFormulaOcrPipeline()
+        const output = await formulaPipeline(capture.image, {
+          max_new_tokens: 128,
+          num_beams: 2,
+        })
+        const generatedText = Array.isArray(output)
+          ? output[0]?.generated_text || output[0]?.text
+          : output?.generated_text || output?.text
+        const normalizedFormula = normalizeSimpleInlineLatex(generatedText)
+
+        if (normalizedFormula?.text) {
+          return {
+            text: normalizedFormula.text,
+            inlineFormulas: [{
+              text: normalizedFormula.text,
+              latex: normalizedFormula.latex,
+              source: 'local-formula-ocr',
+            }],
+            unresolved: false,
+          }
+        }
+      } catch (error) {
+        console.warn('划词公式 OCR 失败，保留原公式', {
+          error: error.message,
+        })
+      }
+
+      return {
+        text: originalText,
+        inlineFormulas: detectedFormulas,
+        unresolved: selectionTextNeedsVisualRepair(originalText),
+      }
+    }
+
+    let worker = null
+
+    try {
+      worker = await createWorker('eng', 1, {
+        workerPath: `${TESSERACT_ASSET_BASE}/worker.min.js`,
+        corePath: `${TESSERACT_ASSET_BASE}/core/tesseract-core-simd-lstm.wasm.js`,
+        langPath: `${TESSERACT_ASSET_BASE}/lang`,
+        cacheMethod: 'none',
+      })
+      const { data } = await worker.recognize(capture.image, {}, { text: true, blocks: true })
+      const recognizedText = cleanOcrText(data.text || '')
+      const formulaResult = await recognizeInlineFormulaCandidates(
+        data,
+        capture.image,
+        capture,
+        [],
+      )
+      const correctedText = applyFormulaCorrectionsToText(recognizedText, formulaResult.corrections)
+      const canUseRecognizedText =
+        correctedText &&
+        formulaResult.corrections.length > 0 &&
+        getSelectionWordSimilarity(originalText, correctedText) >= 0.55
+      const inlineFormulas = formulaResult.corrections.map((correction) => ({
+        text: correction.replacement,
+        latex: correction.latex,
+        source: correction.source,
+      }))
+
+      return {
+        text: canUseRecognizedText ? correctedText : originalText,
+        inlineFormulas: inlineFormulas.length ? inlineFormulas : detectedFormulas,
+        unresolved:
+          formulaResult.unresolvedRects.length > 0 ||
+          (selectionTextNeedsVisualRepair(originalText) && formulaResult.corrections.length === 0) ||
+          (/�/.test(originalText) && !canUseRecognizedText),
+      }
+    } catch (error) {
+      console.warn('划词局部 OCR 失败，保留 PDF 文本层结果', {
+        error: error.message,
+      })
+      return {
+        text: originalText,
+        inlineFormulas: detectedFormulas,
+        unresolved: selectionTextNeedsVisualRepair(originalText),
+      }
+    } finally {
+      if (worker) await worker.terminate()
+    }
+  }
+
+  function getMultimodalRecognitionText(blocks = []) {
+    return cleanOcrText(
+      blocks
+        .slice()
+        .sort((firstBlock, secondBlock) =>
+          (Number(firstBlock.y) || 0) - (Number(secondBlock.y) || 0) ||
+          (Number(firstBlock.x) || 0) - (Number(secondBlock.x) || 0),
+        )
+        .map((block) => block.text)
+        .filter(Boolean)
+        .join('\n'),
+    )
+  }
+
+  function getMultimodalRecognitionFormulas(blocks = []) {
+    return blocks.flatMap((block) => {
+      const blockType = String(block.type || '').toLowerCase()
+      const formulas = []
+
+      if (blockType.includes('formula') && block.text) {
+        formulas.push({
+          text: block.text,
+          latex: block.latex,
+          source: 'multimodal',
+        })
+      }
+      ;(block.formulaRegions || []).forEach((region) => {
+        if (!region.text) return
+        formulas.push({
+          text: region.text,
+          latex: region.latex,
+          source: region.source || 'multimodal',
+        })
+      })
+      ;(block.sourceBlocks || []).forEach((line) => {
+        const lineType = String(line.type || '').toLowerCase()
+        ;(line.formulaRegions || []).forEach((region) => {
+          if (!region.text) return
+          formulas.push({
+            text: region.text,
+            latex: region.latex,
+            source: region.source || 'multimodal',
+          })
+        })
+        if (!lineType.includes('formula') || !line.text) return
+        formulas.push({
+          text: line.text,
+          latex: line.latex,
+          source: 'multimodal',
+        })
+      })
+
+      return formulas
+    })
+  }
+
+  function getRecognitionInvalidCharacterCount(text) {
+    return Array.from(String(text || '')).filter((character) => {
+      const code = character.charCodeAt(0)
+      return character === '�' || (code <= 31 && ![9, 10, 13].includes(code))
+    }).length
+  }
+
+  function shouldPreferMultimodalRecognition(localBlocks = [], multimodalBlocks = []) {
+    const localText = cleanOcrText(localBlocks.map((block) => block.text).filter(Boolean).join('\n'))
+    const multimodalText = getMultimodalRecognitionText(multimodalBlocks)
+    if (!multimodalText) return false
+    if (!localText) return true
+
+    const localInvalidCount = getRecognitionInvalidCharacterCount(localText)
+    const multimodalInvalidCount = getRecognitionInvalidCharacterCount(multimodalText)
+    if (multimodalInvalidCount > localInvalidCount) return false
+    if (localInvalidCount > multimodalInvalidCount) return true
+
+    const localUsefulCount = getUsefulOcrCharacterCount(localText)
+    const multimodalUsefulCount = getUsefulOcrCharacterCount(multimodalText)
+    const wordSimilarity = getSelectionWordSimilarity(localText, multimodalText)
+    const multimodalHasFormulaMetadata = multimodalBlocks.some((block) =>
+      getOcrBlockContentType(block) === 'formula' ||
+      getBlockInlineFormulas(block).length > 0,
+    )
+    const localHasFormulaMetadata = localBlocks.some((block) =>
+      getOcrBlockContentType(block) === 'formula' ||
+      getBlockInlineFormulas(block).length > 0,
+    )
+
+    if (multimodalHasFormulaMetadata && !localHasFormulaMetadata) {
+      return multimodalUsefulCount >= Math.max(1, localUsefulCount * 0.55)
+    }
+
+    return (
+      multimodalUsefulCount >= Math.max(1, localUsefulCount * 0.75) &&
+      wordSimilarity >= 0.5
+    )
+  }
+
+  async function prepareSelectionTranslation(text, capture) {
+    const originalText = cleanOcrSourceForTranslation(text)
+    let result = await recognizeSelectionWithLocalFormulaOcr(originalText, capture)
+
+    if (
+      capture?.image &&
+      settingsSupportMultimodal(settingsFormRef.current) &&
+      (result.unresolved || /�/.test(originalText))
+    ) {
+      try {
+        const blocks = await requestMultimodalTextRecognition(
+          capture.image,
+          capture,
+          'selection',
+        )
+        const multimodalText = getMultimodalRecognitionText(blocks)
+        const canUseMultimodalText =
+          multimodalText &&
+          (
+            /�/.test(result.text) ||
+            getSelectionWordSimilarity(originalText, multimodalText) >= 0.55
+          )
+
+        if (canUseMultimodalText) {
+          result = {
+            text: multimodalText,
+            inlineFormulas: [
+              ...getMultimodalRecognitionFormulas(blocks),
+              ...getInlineFormulaMetadataFromText(multimodalText, 'multimodal-selection'),
+            ],
+            unresolved: false,
+          }
+        }
+      } catch (error) {
+        console.warn('划词多模态纠错失败，使用本地识别结果', {
+          error: error.message,
+        })
+      }
+    }
+
+    const sourceText = cleanOcrSourceForTranslation(result.text || originalText)
+    const formulaOnly =
+      isScientificExpressionOnly(sourceText) ||
+      isDenseFormulaOrSymbolText(sourceText)
+    if (formulaOnly) {
+      return {
+        sourceText,
+        translation: sourceText,
+        inlineFormulas: result.inlineFormulas,
+        preserveOriginal: true,
+      }
+    }
+
+    return {
+      sourceText,
+      translation: await translateOcrBlockText(sourceText, result.inlineFormulas),
+      inlineFormulas: result.inlineFormulas,
+      preserveOriginal: false,
+    }
+  }
+
+  prepareSelectionTranslationRef.current = prepareSelectionTranslation
 
   function getOcrTranslationFallback(block, sourceText, reason) {
     return {
       ...block,
       sourceText,
-      translation: sourceText || block.text,
+      translation: '',
       translationFallback: true,
-      translationError: reason,
+      translationError: reason || '翻译失败',
     }
   }
 
@@ -7670,7 +9185,125 @@ function App() {
     }
   }
 
-  function scorePlacementCandidate(rect, block, placedRects, sourceRects, context, imageWidth, imageHeight) {
+  function getPathSegments(points = []) {
+    return points.slice(1).map((point, index) => ({
+      start: points[index],
+      end: point,
+    }))
+  }
+
+  function getPointOrientation(firstPoint, secondPoint, thirdPoint) {
+    return (
+      (secondPoint.y - firstPoint.y) * (thirdPoint.x - secondPoint.x) -
+      (secondPoint.x - firstPoint.x) * (thirdPoint.y - secondPoint.y)
+    )
+  }
+
+  function doLineSegmentsIntersect(firstSegment, secondSegment) {
+    const firstOrientation = getPointOrientation(
+      firstSegment.start,
+      firstSegment.end,
+      secondSegment.start,
+    )
+    const secondOrientation = getPointOrientation(
+      firstSegment.start,
+      firstSegment.end,
+      secondSegment.end,
+    )
+    const thirdOrientation = getPointOrientation(
+      secondSegment.start,
+      secondSegment.end,
+      firstSegment.start,
+    )
+    const fourthOrientation = getPointOrientation(
+      secondSegment.start,
+      secondSegment.end,
+      firstSegment.end,
+    )
+
+    return (
+      ((firstOrientation > 0 && secondOrientation < 0) ||
+        (firstOrientation < 0 && secondOrientation > 0)) &&
+      ((thirdOrientation > 0 && fourthOrientation < 0) ||
+        (thirdOrientation < 0 && fourthOrientation > 0))
+    )
+  }
+
+  function doesLineSegmentCrossRect(segment, rect) {
+    const edges = [
+      [{ x: rect.x, y: rect.y }, { x: rect.x + rect.width, y: rect.y }],
+      [{ x: rect.x + rect.width, y: rect.y }, { x: rect.x + rect.width, y: rect.y + rect.height }],
+      [{ x: rect.x + rect.width, y: rect.y + rect.height }, { x: rect.x, y: rect.y + rect.height }],
+      [{ x: rect.x, y: rect.y + rect.height }, { x: rect.x, y: rect.y }],
+    ]
+
+    return edges.some(([start, end]) =>
+      doLineSegmentsIntersect(segment, { start, end }),
+    )
+  }
+
+  function scoreConnectorPath(points, obstacleRects, existingPaths) {
+    const segments = getPathSegments(points)
+    const obstacleCount = obstacleRects.reduce(
+      (count, rect) =>
+        count + (segments.some((segment) => doesLineSegmentCrossRect(segment, rect)) ? 1 : 0),
+      0,
+    )
+    const crossingCount = existingPaths.reduce(
+      (count, path) =>
+        count + getPathSegments(path).filter((existingSegment) =>
+          segments.some((segment) => doLineSegmentsIntersect(segment, existingSegment)),
+        ).length,
+      0,
+    )
+    const length = segments.reduce(
+      (sum, segment) =>
+        sum + Math.hypot(
+          segment.end.x - segment.start.x,
+          segment.end.y - segment.start.y,
+        ),
+      0,
+    )
+
+    return obstacleCount * 8 + crossingCount * 3 + length * 0.002
+  }
+
+  function getDiagramConnectorPath(sourceRect, translationRect, obstacleRects, existingPaths) {
+    const connector = getDiagramConnectorPoints(sourceRect, translationRect)
+    const directPath = [connector.start, connector.end]
+    if (scoreConnectorPath(directPath, obstacleRects, existingPaths) < 1) {
+      return directPath
+    }
+
+    const horizontalFirst = [
+      connector.start,
+      { x: connector.end.x, y: connector.start.y },
+      connector.end,
+    ]
+    const verticalFirst = [
+      connector.start,
+      { x: connector.start.x, y: connector.end.y },
+      connector.end,
+    ]
+
+    return [directPath, horizontalFirst, verticalFirst]
+      .map((points) => ({
+        points,
+        score: scoreConnectorPath(points, obstacleRects, existingPaths),
+      }))
+      .sort((firstPath, secondPath) => firstPath.score - secondPath.score)[0].points
+  }
+
+  function scorePlacementCandidate(
+    rect,
+    block,
+    placedRects,
+    sourceRects,
+    placedConnectorPaths,
+    context,
+    imageWidth,
+    imageHeight,
+  ) {
     const rectArea = rect.width * rect.height
     const sourceOverlap = sourceRects.reduce((sum, sourceRect) => sum + getRectOverlapArea(rect, sourceRect), 0)
     const placedOverlap = placedRects.reduce((sum, placedRect) => sum + getRectOverlapArea(rect, placedRect), 0)
@@ -7687,6 +9320,17 @@ function App() {
     const leftSpace = block.x > rect.width * 1.05 && Math.abs(getRectCenter(rect).y - getRectCenter(block).y) < block.height * 3
     const sideBonus = isRightSide && rightSpace ? 0.24 : isLeftSide && leftSpace ? 0.16 : 0
     const candidatePriorityPenalty = rect.priority * 0.035
+    const connector = getDiagramConnectorPoints(block, rect)
+    const connectorCrossings = placedConnectorPaths.reduce(
+      (count, path) =>
+        count + getPathSegments(path).filter((segment) =>
+          doLineSegmentsIntersect(
+            { start: connector.start, end: connector.end },
+            segment,
+          ),
+        ).length,
+      0,
+    )
 
     return (
       blankScore * 0.42 +
@@ -7694,6 +9338,7 @@ function App() {
       sideBonus -
       sourceOverlapRatio * 4.8 -
       placedOverlapRatio * 7.2 -
+      connectorCrossings * 0.85 -
       candidatePriorityPenalty
     )
   }
@@ -7744,6 +9389,7 @@ function App() {
     imageHeight,
     placedRects,
     sourceRects,
+    placedConnectorPaths,
     context,
   ) {
     const padding = 8
@@ -7755,7 +9401,16 @@ function App() {
       )
       .map((rect) => ({
         rect,
-        score: scorePlacementCandidate(rect, block, placedRects, sourceRects, context, imageWidth, imageHeight),
+        score: scorePlacementCandidate(
+          rect,
+          block,
+          placedRects,
+          sourceRects,
+          placedConnectorPaths,
+          context,
+          imageWidth,
+          imageHeight,
+        ),
       }))
 
     scoredCandidates.sort((firstCandidate, secondCandidate) => secondCandidate.score - firstCandidate.score)
@@ -7811,44 +9466,412 @@ function App() {
     return fallback
   }
 
-  async function translateDiagramBlocks(blocks) {
-    const translatedBlocks = []
-    const translatableBlocks = blocks.filter((item) => shouldTranslateOcrBlock(item)).slice(0, 120)
+  function splitDiagramBlockByStrictBoundaries(block, boundaryReview = false) {
+    const sourceLines = getCompareSourceBlocks(block)
+    if (sourceLines.length <= 1) {
+      return [{
+        ...block,
+        sourceBlocks: sourceLines,
+      }]
+    }
 
-    console.log('OCR 模块翻译统计', {
-      inputCount: blocks.length,
-      translatableCount: translatableBlocks.length,
-      skippedCount: Math.max(0, blocks.length - translatableBlocks.length),
-      moduleTextLengths: translatableBlocks.slice(0, 20).map((block) => block.text.length),
+    const lineGroups = []
+
+    sourceLines.forEach((line) => {
+      const currentGroup = lineGroups[lineGroups.length - 1]
+      if (!currentGroup?.length) {
+        lineGroups.push([line])
+        return
+      }
+
+      const currentBlock = mergeOcrBlocks(currentGroup, Number(block.index) || 0)
+      if (
+        shouldMergeWrappedLine(currentBlock, line, {
+          strict: true,
+          diagram: true,
+          boundaryReview,
+        })
+      ) {
+        currentGroup.push(line)
+        return
+      }
+
+      lineGroups.push([line])
     })
 
-    for (const block of translatableBlocks) {
-      const sourceText = cleanOcrSourceForTranslation(block.text)
+    if (lineGroups.length === 1) {
+      return [{
+        ...block,
+        sourceBlocks: sourceLines,
+      }]
+    }
 
-      try {
-        const translation = cleanResultText(await translateOcrBlockText(sourceText))
+    return lineGroups.map((lines, groupIndex) => {
+      const splitBlock = mergeOcrBlocks(lines, (Number(block.index) || 0) + groupIndex / 1000)
 
-        if (isUselessTranslationResult(translation)) {
-          console.warn('OCR 图解/对照模式使用原文兜底', { text: block.text, translation })
-          translatedBlocks.push(getOcrTranslationFallback(block, sourceText, 'empty-translation'))
-          continue
-        }
+      return {
+        ...splitBlock,
+        moduleId: `${block.moduleId || `m${Number(block.index) + 1 || 1}`}-s${groupIndex + 1}`,
+        sourceText: splitBlock.text,
+        translation: '',
+        formulaRegions: (block.formulaRegions || []).filter((region) =>
+          getRectOverlapArea(region, splitBlock) > 0,
+        ),
+        multimodal: Boolean(block.multimodal),
+        diagramBoundarySplit: true,
+      }
+    })
+  }
 
-        translatedBlocks.push({
-          ...block,
-          sourceText,
-          translation,
-        })
-      } catch (error) {
-        console.warn('OCR 图解/对照模式单块翻译失败，使用原文兜底', {
-          text: block.text,
-          error: error.message,
-        })
-        translatedBlocks.push(getOcrTranslationFallback(block, sourceText, error.message))
+  function getDiagramTranslationUnits(text) {
+    const cjkCharacters = String(text || '').match(/[\u3400-\u9fff]/g) || []
+    const latinTokens = String(text || '').match(/[A-Za-z0-9]+/g) || []
+
+    return cjkCharacters.length + latinTokens.length
+  }
+
+  function hasWeirdDiagramTranslationStack(translation, block) {
+    const normalizedTranslation = cleanResultText(translation || '').trim()
+    if (!normalizedTranslation) return true
+
+    const compactTranslation = normalizedTranslation.replace(/\s+/g, '')
+    const sourceLines = getCompareSourceBlocks(block)
+    const sentenceParts = normalizedTranslation
+      .split(/[\n。！？!?；;]+/)
+      .map((part) => part.replace(/[\s，、,:：]/g, '').trim())
+      .filter((part) => part.length >= 2)
+    const seenParts = new Set()
+    const hasRepeatedPart = sentenceParts.some((part) => {
+      const key = part.toLowerCase()
+      if (seenParts.has(key)) return true
+      seenParts.add(key)
+      return false
+    })
+    const lineCount = normalizedTranslation.split(/\n+/).filter((line) => line.trim()).length
+    const sourceText = cleanOcrSourceForTranslation(block?.text || '')
+    const sourceWords = sourceText.match(/[A-Za-z][A-Za-z'-]*/g) || []
+    const targetUnits = getDiagramTranslationUnits(normalizedTranslation)
+
+    if (getRecognitionInvalidCharacterCount(normalizedTranslation) > 0) return true
+    if (/(.)\1{4,}/u.test(compactTranslation)) return true
+    if (/(.{2,12})(?:\1){2,}/u.test(compactTranslation)) return true
+    if (hasRepeatedPart) return true
+    if (lineCount > Math.max(3, sourceLines.length * 2 + 1)) return true
+    if (targetUnits > Math.max(70, sourceWords.length * 5.5)) return true
+
+    return false
+  }
+
+  function assessDiagramTranslation(block) {
+    const sourceText = cleanOcrSourceForTranslation(block?.text || '')
+    const translation = cleanResultText(block?.translation || '')
+    const sourceWords = sourceText.match(/[A-Za-z][A-Za-z'-]*/g) || []
+    const isShort = sourceWords.length <= 8 || sourceText.length <= 48
+
+    if (block?.visualLayoutIssue) {
+      return {
+        valid: false,
+        isShort,
+        needsExpansion: false,
+        reason: block.visualLayoutIssue,
+      }
+    }
+    if (!translation || isUselessTranslationResult(translation)) {
+      return { valid: false, isShort, needsExpansion: !isShort, reason: 'empty' }
+    }
+    if (translation.toLowerCase() === sourceText.toLowerCase()) {
+      const canRemainUntranslated =
+        isLikelyFormulaOrTableLine(sourceText) ||
+        /^(?:[A-Z0-9]{1,12}|pH)$/.test(sourceText)
+      if (canRemainUntranslated) {
+        return { valid: true, isShort, needsExpansion: false, reason: '' }
+      }
+      return { valid: false, isShort, needsExpansion: !isShort, reason: 'untranslated' }
+    }
+    if (hasWeirdDiagramTranslationStack(translation, block)) {
+      return { valid: false, isShort, needsExpansion: false, reason: 'stacked' }
+    }
+
+    const targetUnits = getDiagramTranslationUnits(translation)
+    if (isShort) {
+      return { valid: true, isShort, needsExpansion: false, reason: '' }
+    }
+
+    const minimumTargetUnits = Math.max(8, Math.ceil(sourceWords.length * 0.58))
+    const targetCjkCharacters = translation.match(/[\u3400-\u9fff]/g) || []
+    const targetLatinTokens = translation.match(/[A-Za-z0-9]+/g) || []
+    const sourceLooksOpen =
+      /^[a-z]/.test(sourceText) ||
+      /[-,;:(（]$/.test(sourceText) ||
+      /\b(of|by|for|with|from|to|in|on|at|and|or|the|a|an|into|under|over|between|within|using|via)$/i.test(sourceText)
+    const translationLooksOpen =
+      /(?:的|和|与|或|及|以及|在|从|向|对|为|由|通过|由于|因为|如果|当|将|被|使|而|但|且|并|从而|以便)[，,;；:]?$/.test(
+        translation,
+      )
+    const sourceEndsSentence = /[.!?]["')\]]*$/.test(sourceText)
+    const translationEndsSentence = /[。！？!?]["')\]]*$/.test(translation)
+
+    if (targetUnits < minimumTargetUnits) {
+      return { valid: false, isShort, needsExpansion: true, reason: 'missing-content' }
+    }
+    if (
+      targetLatinTokens.length >= Math.max(5, Math.ceil(sourceWords.length * 0.45)) &&
+      targetCjkCharacters.length < Math.max(4, sourceWords.length * 0.5)
+    ) {
+      return { valid: false, isShort, needsExpansion: false, reason: 'untranslated-residue' }
+    }
+    if (sourceLooksOpen || translationLooksOpen) {
+      return { valid: false, isShort, needsExpansion: true, reason: 'open-boundary' }
+    }
+    if (sourceEndsSentence && !translationEndsSentence && targetUnits < sourceWords.length * 0.9) {
+      return { valid: false, isShort, needsExpansion: true, reason: 'truncated-sentence' }
+    }
+
+    return { valid: true, isShort, needsExpansion: false, reason: '' }
+  }
+
+  function getDiagramBoundaryMergeScore(firstBlock, secondBlock, attempt) {
+    const firstComesFirst =
+      firstBlock.y < secondBlock.y ||
+      (Math.abs(firstBlock.y - secondBlock.y) < Math.max(firstBlock.height, secondBlock.height) * 0.45 &&
+        firstBlock.x <= secondBlock.x)
+    const previousBlock = firstComesFirst ? firstBlock : secondBlock
+    const nextBlock = firstComesFirst ? secondBlock : firstBlock
+    const previousLine = getLastSourceLine(previousBlock)
+    const nextLine = getFirstSourceLine(nextBlock)
+    const previousText = String(previousLine.text || '').trim()
+    const nextText = String(nextLine.text || '').trim()
+    const previousWords = getWordCount(previousText)
+    const nextWords = getWordCount(nextText)
+    const previousEndsOpen =
+      /[-,(（/:：]$/.test(previousText) ||
+      /\b(of|by|for|with|from|to|in|on|at|and|or|the|a|an|into|under|over|between|within|using|via)$/i.test(previousText)
+    const nextContinues = /^[a-z(（]/.test(nextText) || isLikelyContinuationLine(nextText)
+    const longBodyContinuation =
+      previousWords >= (attempt === 1 ? 7 : 6) &&
+      nextWords >= 3 &&
+      !hasSentenceEnding(previousText)
+
+    if (hasSentenceEnding(previousText) && !/[:：]$/.test(previousText)) return null
+    if (previousWords <= 4 && nextWords <= 4 && /^[A-Z0-9]/.test(nextText) && !previousEndsOpen) return null
+    if (!previousEndsOpen && !nextContinues && !longBodyContinuation) return null
+
+    const geometricScore = getCompareModuleMergeScore(firstBlock, secondBlock, attempt)
+    if (geometricScore === null) return null
+
+    return geometricScore +
+      (previousEndsOpen ? 0 : 0.2) +
+      (nextContinues ? 0 : 0.2)
+  }
+
+  function findDiagramBoundaryCandidateIndex(blocks, blockIndex, attempt, consumedIndexes) {
+    let bestIndex = -1
+    let bestScore = Infinity
+
+    blocks.forEach((candidate, candidateIndex) => {
+      if (candidateIndex === blockIndex || consumedIndexes.has(candidateIndex)) return
+      const score = getDiagramBoundaryMergeScore(blocks[blockIndex], candidate, attempt)
+      if (score === null || score >= bestScore) return
+
+      bestIndex = candidateIndex
+      bestScore = score
+    })
+
+    return bestIndex
+  }
+
+  function mergeDiagramModuleBlocks(firstBlock, secondBlock, attempt) {
+    const uniqueLines = []
+    const lineKeys = new Set()
+
+    ;[...getCompareSourceBlocks(firstBlock), ...getCompareSourceBlocks(secondBlock)]
+      .sort((firstLine, secondLine) => firstLine.y - secondLine.y || firstLine.x - secondLine.x)
+      .forEach((line) => {
+        const lineKey = [
+          Math.round(line.x),
+          Math.round(line.y),
+          Math.round(line.width),
+          Math.round(line.height),
+          line.text,
+        ].join('|')
+        if (lineKeys.has(lineKey)) return
+        lineKeys.add(lineKey)
+        uniqueLines.push(line)
+      })
+
+    const merged = mergeOcrBlocks(uniqueLines, Math.min(firstBlock.index, secondBlock.index))
+
+    return {
+      ...merged,
+      sourceText: merged.text,
+      translation: '',
+      formulaRegions: [
+        ...(firstBlock.formulaRegions || []),
+        ...(secondBlock.formulaRegions || []),
+      ],
+      multimodal: Boolean(firstBlock.multimodal || secondBlock.multimodal),
+      diagramBoundaryRetries: attempt,
+    }
+  }
+
+  async function translateDiagramModule(block, force = false) {
+    const sourceText = cleanOcrSourceForTranslation(block.text)
+    const existingTranslation = cleanResultText(block.translation || '')
+
+    if (!force && existingTranslation && !isUselessTranslationResult(existingTranslation)) {
+      return {
+        ...block,
+        sourceText,
+        translation: existingTranslation,
       }
     }
 
-    return translatedBlocks
+    try {
+      const translation = cleanResultText(
+        await translateOcrBlockText(sourceText, getBlockInlineFormulas(block)),
+      )
+      if (isUselessTranslationResult(translation)) {
+        return getOcrTranslationFallback(block, sourceText, 'empty-translation')
+      }
+
+      return {
+        ...block,
+        sourceText,
+        translation,
+        translationFallback: false,
+        translationError: '',
+      }
+    } catch (error) {
+      console.warn('OCR 图解模式单模块翻译失败，保留原图区域', {
+        text: block.text,
+        error: error.message,
+      })
+      return getOcrTranslationFallback(block, sourceText, error.message)
+    }
+  }
+
+  async function translateDiagramBlocks(blocks, reviewOptions = {}) {
+    const strictBlocks = blocks
+      .filter((item) => isVisualTranslationBlock(item))
+      .flatMap((block) => splitDiagramBlockByStrictBoundaries(block))
+    let workingBlocks = await mapWithConcurrency(
+      strictBlocks,
+      3,
+      (block) => translateDiagramModule(block),
+    )
+
+    console.log('OCR 图解模块翻译统计', {
+      inputCount: blocks.length,
+      strictModuleCount: strictBlocks.length,
+      skippedCount: Math.max(0, blocks.length - strictBlocks.length),
+      moduleTextLengths: strictBlocks.slice(0, 20).map((block) => block.text.length),
+    })
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const assessments = workingBlocks.map(assessDiagramTranslation)
+      const invalidIndexes = assessments
+        .map((assessment, index) => (!assessment.valid ? index : -1))
+        .filter((index) => index >= 0)
+      if (!invalidIndexes.length) break
+
+      const consumedIndexes = new Set()
+      const revisedBlocks = []
+
+      for (const blockIndex of invalidIndexes) {
+        if (consumedIndexes.has(blockIndex)) continue
+
+        const block = workingBlocks[blockIndex]
+        const assessment = assessments[blockIndex]
+        const splitBlocks = splitDiagramBlockByStrictBoundaries(block, true)
+        consumedIndexes.add(blockIndex)
+
+        if (reviewOptions.multimodal) {
+          const reviewedBlocks = await reviewVisualModuleBoundary({
+            mode: 'diagram',
+            image: reviewOptions.image,
+            imageSize: reviewOptions.imageSize,
+            block,
+            blocks: workingBlocks,
+            attempt,
+            reason: assessment.reason,
+          })
+          const reviewedTextBlocks = reviewedBlocks.filter(isVisualTranslationBlock)
+          if (reviewedTextBlocks.length) {
+            const translatedReviewedBlocks = await mapWithConcurrency(
+              reviewedTextBlocks,
+              3,
+              (reviewedBlock) => translateDiagramModule({
+                ...reviewedBlock,
+                diagramBoundaryRetries: attempt,
+              }, true),
+            )
+            revisedBlocks.push(...translatedReviewedBlocks)
+            continue
+          }
+        }
+
+        if (splitBlocks.length > 1) {
+          for (const splitBlock of splitBlocks) {
+            revisedBlocks.push(await translateDiagramModule({
+              ...splitBlock,
+              diagramBoundaryRetries: attempt,
+            }, true))
+          }
+          continue
+        }
+
+        const candidateIndex = assessment.needsExpansion
+          ? findDiagramBoundaryCandidateIndex(workingBlocks, blockIndex, attempt, consumedIndexes)
+          : -1
+
+        if (candidateIndex >= 0) {
+          consumedIndexes.add(candidateIndex)
+          const mergedBlock = mergeDiagramModuleBlocks(block, workingBlocks[candidateIndex], attempt)
+          revisedBlocks.push(await translateDiagramModule(mergedBlock, true))
+        } else {
+          revisedBlocks.push(await translateDiagramModule({
+            ...block,
+            diagramBoundaryRetries: attempt,
+            diagramComplianceReason: assessment.reason,
+          }, true))
+        }
+      }
+
+      workingBlocks = workingBlocks
+        .filter((_block, index) => !consumedIndexes.has(index))
+        .concat(revisedBlocks)
+        .sort((firstBlock, secondBlock) => firstBlock.y - secondBlock.y || firstBlock.x - secondBlock.x)
+    }
+
+    console.log('OCR 图解模块合规复检', {
+      moduleCount: workingBlocks.length,
+      modules: workingBlocks.slice(0, 30).map((block) => ({
+        text: block.text,
+        assessment: assessDiagramTranslation(block),
+        boundaryRetries: block.diagramBoundaryRetries || 0,
+      })),
+    })
+
+    const completedBlocks = workingBlocks.map((block) => {
+      const assessment = assessDiagramTranslation(block)
+      if (assessment.valid) {
+        return {
+          ...block,
+          translationFallback: false,
+          translationError: '',
+        }
+      }
+      return getOcrTranslationFallback(
+        block,
+        cleanOcrSourceForTranslation(block.text),
+        block.translationError || assessment.reason,
+      )
+    })
+
+    return completedBlocks.map((block, index) => ({
+      ...block,
+      index,
+    }))
   }
 
   function normalizeMultimodalCoordinate(value, total) {
@@ -7896,6 +9919,42 @@ function App() {
     return ''
   }
 
+  function normalizeMultimodalConfidence(value, fallback = 100) {
+    const confidence = Number(value)
+    return Number.isFinite(confidence)
+      ? clampNumber(confidence, 0, 100)
+      : fallback
+  }
+
+  function normalizeMultimodalFormulaRegions(item = {}, imageSize = {}) {
+    const regions = Array.isArray(item.formulaRegions)
+      ? item.formulaRegions
+      : Array.isArray(item.formula_regions)
+        ? item.formula_regions
+        : Array.isArray(item.inlineFormulas)
+          ? item.inlineFormulas
+          : []
+
+    return regions
+      .map((region, index) => {
+        const rect = normalizeMultimodalRect(region, imageSize)
+        const text = cleanOcrSourceForTranslation(
+          getMultimodalTextValue(region, ['original', 'text', 'sourceText', 'formula']),
+        )
+        if (!rect || !text) return null
+
+        return {
+          id: region.id || region.formulaId || `formula-${index + 1}`,
+          type: String(region.type || 'inline_formula'),
+          text,
+          latex: String(region.latex || region.tex || '').trim(),
+          confidence: normalizeMultimodalConfidence(region.confidence),
+          ...rect,
+        }
+      })
+      .filter(Boolean)
+  }
+
   function getMultimodalUnionRect(rects) {
     if (!rects.length) return null
 
@@ -7907,7 +9966,7 @@ function App() {
     return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }
   }
 
-  function normalizeMultimodalTranslationBlocks(rawBlocks = [], imageSize = {}) {
+  function normalizeMultimodalTranslationBlocks(rawBlocks = [], imageSize = {}, options = {}) {
     return (Array.isArray(rawBlocks) ? rawBlocks : [])
       .map((block, index) => {
         const sourceBlocks = (Array.isArray(block?.sourceBlocks) && block.sourceBlocks.length
@@ -7925,14 +9984,32 @@ function App() {
             return {
               index: lineIndex,
               lineId: line.lineId || line.id || `${index}-${lineIndex}`,
+              type: String(line.type || line.contentType || 'text'),
               text,
               sourceText: text,
               translation: isUselessTranslationResult(translation) ? '' : translation,
+              latex: String(line.latex || line.tex || '').trim(),
+              symbolDensity: Math.max(0, Math.min(1, Number(line.symbolDensity || line.symbol_density) || 0)),
+              formulaRegions: normalizeMultimodalFormulaRegions(line, imageSize),
               ...rect,
-              confidence: Number(line.confidence) || 100,
+              fontSize: Math.max(
+                1,
+                Number(line.fontSize || line.font_size || line.font?.size) || rect.height * 0.82,
+              ),
+              confidence: normalizeMultimodalConfidence(line.confidence),
             }
           })
           .filter(Boolean)
+        const formulaRegions = [
+          ...normalizeMultimodalFormulaRegions(block, imageSize),
+          ...sourceBlocks.flatMap((line) => line.formulaRegions || []),
+        ].filter((region, regionIndex, regions) =>
+          regions.findIndex((candidate) =>
+            candidate.text === region.text &&
+            Math.abs(candidate.x - region.x) < 2 &&
+            Math.abs(candidate.y - region.y) < 2,
+          ) === regionIndex,
+        )
         const rect = normalizeMultimodalRect(block, imageSize) || getMultimodalUnionRect(sourceBlocks)
         const text = cleanOcrSourceForTranslation(
           getMultimodalTextValue(block, ['original', 'text', 'sourceText', 'originalText', 'moduleText']) ||
@@ -7943,32 +10020,256 @@ function App() {
           sourceBlocks.map((line) => line.translation).filter(Boolean).join('\n'),
         )
 
-        if (!rect || !text || !translation || isUselessTranslationResult(translation)) return null
+        const requireTranslation = options.requireTranslation !== false
+        if (
+          !rect ||
+          !text ||
+          (requireTranslation && (!translation || isUselessTranslationResult(translation)))
+        ) {
+          return null
+        }
 
         return {
           index,
           moduleId: block.moduleId || block.id || `m${index + 1}`,
+          type: String(block.type || block.contentType || 'text'),
           text,
           sourceText: text,
-          translation,
+          translation: isUselessTranslationResult(translation) ? '' : translation,
+          latex: String(block.latex || block.tex || '').trim(),
+          symbolDensity: Math.max(0, Math.min(1, Number(block.symbolDensity || block.symbol_density) || 0)),
+          formulaRegions,
           ...rect,
-          confidence: Number(block.confidence) || 100,
+          confidence: normalizeMultimodalConfidence(block.confidence),
           sourceBlocks: sourceBlocks.length
             ? sourceBlocks
-            : [{ index: 0, text, ...rect, confidence: Number(block.confidence) || 100 }],
+            : [{
+                index: 0,
+                text,
+                ...rect,
+                fontSize: Math.max(1, Number(block.fontSize || block.font_size) || rect.height * 0.82),
+                confidence: Number(block.confidence) || 100,
+              }],
           multimodal: true,
         }
       })
       .filter(Boolean)
-      .slice(0, 120)
+      .slice(0, options.mode === 'diagram' && Array.isArray(rawBlocks) ? rawBlocks.length : 120)
   }
 
-  async function requestMultimodalImageTranslation(image, imageSize, mode) {
+  function getVisualRectArea(rect) {
+    return Math.max(0, Number(rect?.width) || 0) * Math.max(0, Number(rect?.height) || 0)
+  }
+
+  function getVisualRectOverlapRatio(firstRect, secondRect) {
+    return getRectOverlapArea(firstRect, secondRect) /
+      Math.max(1, Math.min(getVisualRectArea(firstRect), getVisualRectArea(secondRect)))
+  }
+
+  function validateMultimodalVisualBlocks(blocks = [], imageSize = {}, mode = 'compare') {
+    const imageWidth = Number(imageSize.originalImageWidth || imageSize.width) || 0
+    const imageHeight = Number(imageSize.originalImageHeight || imageSize.height) || 0
+    const normalizedBlocks = []
+    const duplicateKeys = new Set()
+
+    blocks
+      .slice()
+      .sort((firstBlock, secondBlock) => firstBlock.y - secondBlock.y || firstBlock.x - secondBlock.x)
+      .forEach((block) => {
+        const text = cleanOcrSourceForTranslation(block.text)
+        const sourceBlocks = getCompareSourceBlocks(block)
+        const lineRect = getMultimodalUnionRect(sourceBlocks)
+        if (!text || !lineRect || !imageWidth || !imageHeight) return
+
+        const textKey = text.toLowerCase().replace(/\s+/g, ' ')
+        const duplicate = normalizedBlocks.some((candidate) =>
+          candidate.text.toLowerCase().replace(/\s+/g, ' ') === textKey &&
+          getVisualRectOverlapRatio(candidate, block) >= 0.72,
+        )
+        if (duplicate || duplicateKeys.has(`${textKey}|${Math.round(block.x)}|${Math.round(block.y)}`)) {
+          return
+        }
+        duplicateKeys.add(`${textKey}|${Math.round(block.x)}|${Math.round(block.y)}`)
+
+        const blockRight = block.x + block.width
+        const blockBottom = block.y + block.height
+        const lineRight = lineRect.x + lineRect.width
+        const lineBottom = lineRect.y + lineRect.height
+        const missesLineBounds =
+          lineRect.x < block.x - 2 ||
+          lineRect.y < block.y - 2 ||
+          lineRight > blockRight + 2 ||
+          lineBottom > blockBottom + 2
+        const x = clampNumber(Math.min(block.x, lineRect.x), 0, Math.max(imageWidth - 1, 0))
+        const y = clampNumber(Math.min(block.y, lineRect.y), 0, Math.max(imageHeight - 1, 0))
+        const right = clampNumber(Math.max(blockRight, lineRight), x + 1, imageWidth)
+        const bottom = clampNumber(Math.max(blockBottom, lineBottom), y + 1, imageHeight)
+
+        normalizedBlocks.push({
+          ...block,
+          text,
+          x,
+          y,
+          width: right - x,
+          height: bottom - y,
+          sourceBlocks,
+          visualLayoutIssue: missesLineBounds ? 'line-coverage' : '',
+        })
+      })
+
+    const consolidatedBlocks = []
+    normalizedBlocks.forEach((block) => {
+      const previousBlock = consolidatedBlocks[consolidatedBlocks.length - 1]
+      if (
+        previousBlock &&
+        isVisualTranslationBlock(previousBlock) &&
+        isVisualTranslationBlock(block) &&
+        shouldMergeWrappedLine(previousBlock, block, {
+          strict: true,
+          diagram: mode === 'diagram',
+        })
+      ) {
+        const mergedBlock = mergeOcrBlocks([previousBlock, block], previousBlock.index)
+        consolidatedBlocks[consolidatedBlocks.length - 1] = {
+          ...mergedBlock,
+          moduleId: previousBlock.moduleId,
+          type: previousBlock.type,
+          formulaRegions: [
+            ...(previousBlock.formulaRegions || []),
+            ...(block.formulaRegions || []),
+          ],
+          multimodal: true,
+          visualLayoutIssue:
+            previousBlock.visualLayoutIssue || block.visualLayoutIssue || '',
+        }
+        return
+      }
+      consolidatedBlocks.push(block)
+    })
+
+    consolidatedBlocks.forEach((block, blockIndex) => {
+      consolidatedBlocks.forEach((candidate, candidateIndex) => {
+        if (candidateIndex <= blockIndex) return
+        const overlapRatio = getVisualRectOverlapRatio(block, candidate)
+        if (overlapRatio < 0.58) return
+
+        block.visualLayoutIssue ||= 'module-overlap'
+        candidate.visualLayoutIssue ||= 'module-overlap'
+      })
+    })
+
+    debugMultimodalOcr('local layout validation', {
+      mode,
+      inputCount: blocks.length,
+      outputCount: consolidatedBlocks.length,
+      duplicateCount: Math.max(0, blocks.length - normalizedBlocks.length),
+      issueCount: consolidatedBlocks.filter((block) => block.visualLayoutIssue).length,
+      issues: consolidatedBlocks
+        .filter((block) => block.visualLayoutIssue)
+        .slice(0, 20)
+        .map((block) => ({
+          moduleId: block.moduleId,
+          issue: block.visualLayoutIssue,
+          bbox: {
+            x: block.x,
+            y: block.y,
+            width: block.width,
+            height: block.height,
+          },
+        })),
+    })
+
+    return consolidatedBlocks
+  }
+
+  async function mapWithConcurrency(items, concurrency, mapper) {
+    const results = new Array(items.length)
+    let nextIndex = 0
+
+    async function runWorker() {
+      while (nextIndex < items.length) {
+        const index = nextIndex
+        nextIndex += 1
+        results[index] = await mapper(items[index], index)
+      }
+    }
+
+    await Promise.all(
+      Array.from(
+        { length: Math.min(Math.max(1, concurrency), Math.max(1, items.length)) },
+        () => runWorker(),
+      ),
+    )
+    return results
+  }
+
+  async function enrichVisualInlineFormulas(blocks = [], imageUrl) {
+    const formulaTargets = blocks.flatMap((block, blockIndex) =>
+      (isVisualTranslationBlock(block) && Array.isArray(block.formulaRegions)
+        ? block.formulaRegions
+        : [])
+        .filter((region) => String(region.type || '').toLowerCase().includes('inline'))
+        .map((region, regionIndex) => ({ blockIndex, regionIndex, region })),
+    ).slice(0, 12)
+    if (!formulaTargets.length || !imageUrl) return blocks
+
+    let formulaPipeline
+    try {
+      formulaPipeline = await getInlineFormulaOcrPipeline()
+    } catch (error) {
+      console.warn('多模态行内公式的本地公式 OCR 加载失败，保留视觉识别结果', {
+        error: error.message,
+      })
+      return blocks
+    }
+
+    const nextBlocks = blocks.map((block) => ({
+      ...block,
+      formulaRegions: (block.formulaRegions || []).map((region) => ({ ...region })),
+    }))
+
+    for (const target of formulaTargets) {
+      try {
+        const formulaImage = await cropInlineFormulaImage(imageUrl, target.region)
+        const output = await formulaPipeline(formulaImage, {
+          max_new_tokens: 128,
+          num_beams: 2,
+        })
+        const generatedText = Array.isArray(output)
+          ? output[0]?.generated_text || output[0]?.text
+          : output?.generated_text || output?.text
+        const normalizedFormula = normalizeSimpleInlineLatex(generatedText)
+        if (!normalizedFormula?.text) continue
+
+        const block = nextBlocks[target.blockIndex]
+        const region = block.formulaRegions[target.regionIndex]
+        block.text = applyFormulaCorrectionsToText(block.text, [{
+          text: region.text,
+          replacement: normalizedFormula.text,
+        }])
+        block.formulaRegions[target.regionIndex] = {
+          ...region,
+          text: normalizedFormula.text,
+          latex: normalizedFormula.latex,
+          source: 'local-formula-ocr',
+        }
+      } catch (error) {
+        console.warn('多模态行内公式的本地公式 OCR 失败，保留原符号', {
+          error: error.message,
+        })
+      }
+    }
+
+    return nextBlocks
+  }
+
+  async function requestMultimodalVisualLayout(image, imageSize, mode, reviewContext = null) {
     const payload = {
       image,
       mode,
       imageWidth: imageSize.originalImageWidth || imageSize.width,
       imageHeight: imageSize.originalImageHeight || imageSize.height,
+      reviewContext,
     }
     const isDiagramMode = mode === 'diagram'
     debugMultimodalOcr('request image', {
@@ -7983,8 +10284,14 @@ function App() {
           : window.electronAPI.translateImageOCR(payload))
       : await requestBackendJson(isDiagramMode ? '/ai/translate-image-diagram' : '/ai/translate-image-ocr', payload)
 
-    const blocks = normalizeMultimodalTranslationBlocks(data.blocks || [], imageSize)
-    if (!blocks.length) throw new Error('多模态翻译未返回可用文字模块')
+    if (data.layout?.validation?.sizeMismatch) {
+      throw new Error('多模态模型返回的图片尺寸与原图不一致')
+    }
+    const blocks = normalizeMultimodalTranslationBlocks(data.blocks || [], imageSize, {
+      mode,
+      requireTranslation: false,
+    })
+    if (!blocks.length) throw new Error('多模态识别未返回可用文字模块')
 
     debugMultimodalOcr('provider layout', {
       raw: data.raw,
@@ -7997,9 +10304,197 @@ function App() {
         y: line.y,
         width: line.width,
         height: line.height,
+        fontSize: line.fontSize,
       })),
     })
 
+    return {
+      blocks,
+      layout: data.layout || null,
+    }
+  }
+
+  async function cropVisualBoundaryReviewImage(imageUrl, block, attempt) {
+    const sourceImage = await loadImage(imageUrl)
+    const paddingRatio = attempt === 1 ? 0.15 : 0.32
+    const paddingX = Math.max(12, block.width * paddingRatio)
+    const paddingY = Math.max(12, block.height * paddingRatio)
+    const sourceX = clampNumber(Math.floor(block.x - paddingX), 0, sourceImage.naturalWidth - 1)
+    const sourceY = clampNumber(Math.floor(block.y - paddingY), 0, sourceImage.naturalHeight - 1)
+    const sourceRight = clampNumber(
+      Math.ceil(block.x + block.width + paddingX),
+      sourceX + 1,
+      sourceImage.naturalWidth,
+    )
+    const sourceBottom = clampNumber(
+      Math.ceil(block.y + block.height + paddingY),
+      sourceY + 1,
+      sourceImage.naturalHeight,
+    )
+    const canvas = document.createElement('canvas')
+    canvas.width = sourceRight - sourceX
+    canvas.height = sourceBottom - sourceY
+    canvas.getContext('2d').drawImage(
+      sourceImage,
+      sourceX,
+      sourceY,
+      canvas.width,
+      canvas.height,
+      0,
+      0,
+      canvas.width,
+      canvas.height,
+    )
+
+    return {
+      image: canvas.toDataURL('image/png'),
+      width: canvas.width,
+      height: canvas.height,
+      originalImageWidth: canvas.width,
+      originalImageHeight: canvas.height,
+      offsetX: sourceX,
+      offsetY: sourceY,
+    }
+  }
+
+  function getReviewRelativeModule(block, crop) {
+    const x = clampNumber(block.x - crop.offsetX, 0, Math.max(crop.width - 1, 0))
+    const y = clampNumber(block.y - crop.offsetY, 0, Math.max(crop.height - 1, 0))
+    const right = clampNumber(
+      block.x + block.width - crop.offsetX,
+      x + 1,
+      crop.width,
+    )
+    const bottom = clampNumber(
+      block.y + block.height - crop.offsetY,
+      y + 1,
+      crop.height,
+    )
+
+    return {
+      moduleId: block.moduleId,
+      type: block.type,
+      bbox: {
+        x,
+        y,
+        width: right - x,
+        height: bottom - y,
+      },
+    }
+  }
+
+  function offsetReviewedVisualBlock(block, crop) {
+    const offsetRect = (rect) => ({
+      ...rect,
+      x: rect.x + crop.offsetX,
+      y: rect.y + crop.offsetY,
+    })
+
+    return {
+      ...offsetRect(block),
+      sourceBlocks: getCompareSourceBlocks(block).map(offsetRect),
+      formulaRegions: (block.formulaRegions || []).map(offsetRect),
+      visualLayoutIssue: block.visualLayoutIssue || '',
+      multimodalBoundaryReview: true,
+    }
+  }
+
+  async function reviewVisualModuleBoundary({
+    mode,
+    image,
+    imageSize,
+    block,
+    blocks,
+    attempt,
+    reason,
+  }) {
+    if (!image || !imageSize || !block) return []
+
+    try {
+      const crop = await cropVisualBoundaryReviewImage(image, block, attempt)
+      const cropRect = {
+        x: crop.offsetX,
+        y: crop.offsetY,
+        width: crop.width,
+        height: crop.height,
+      }
+      const neighborModules = blocks
+        .filter((candidate) =>
+          candidate !== block &&
+          getRectOverlapArea(candidate, cropRect) > 0,
+        )
+        .sort((firstBlock, secondBlock) =>
+          getRectDistance(firstBlock, block) - getRectDistance(secondBlock, block),
+        )
+        .slice(0, 8)
+        .map((candidate) => getReviewRelativeModule(candidate, crop))
+      const reviewContext = {
+        attempt,
+        reason,
+        targetModule: getReviewRelativeModule(block, crop),
+        neighborModules,
+      }
+      const result = await requestMultimodalVisualLayout(
+        crop.image,
+        crop,
+        mode,
+        reviewContext,
+      )
+      const reviewedCropBlocks = validateMultimodalVisualBlocks(result.blocks, crop, mode)
+      const enrichedCropBlocks = await enrichVisualInlineFormulas(reviewedCropBlocks, crop.image)
+      const reviewedBlocks = enrichedCropBlocks
+        .map((candidate) => offsetReviewedVisualBlock(candidate, crop))
+        .filter((candidate) => {
+          const expandedTarget = {
+            x: block.x - block.width * 0.4,
+            y: block.y - block.height * 0.4,
+            width: block.width * 1.8,
+            height: block.height * 1.8,
+          }
+          return getRectOverlapArea(candidate, expandedTarget) > 0
+        })
+
+      debugMultimodalOcr('boundary review result', {
+        mode,
+        attempt,
+        reason,
+        sourceModuleId: block.moduleId,
+        reviewedCount: reviewedBlocks.length,
+        crop: {
+          x: crop.offsetX,
+          y: crop.offsetY,
+          width: crop.width,
+          height: crop.height,
+        },
+      })
+      return reviewedBlocks
+    } catch (error) {
+      console.warn('多模态模块边界复核失败，保留本地回退流程', {
+        mode,
+        attempt,
+        reason,
+        error: error.message,
+      })
+      return []
+    }
+  }
+
+  async function requestMultimodalTextRecognition(image, imageSize, mode) {
+    const payload = {
+      image,
+      mode,
+      imageWidth: imageSize.originalImageWidth || imageSize.width,
+      imageHeight: imageSize.originalImageHeight || imageSize.height,
+    }
+    const data = window.electronAPI?.translateImageOCR
+      ? await window.electronAPI.translateImageOCR(payload)
+      : await requestBackendJson('/ai/translate-image-ocr', payload)
+    const blocks = normalizeMultimodalTranslationBlocks(data.blocks || [], imageSize, {
+      mode,
+      requireTranslation: false,
+    })
+
+    if (!blocks.length) throw new Error('多模态模型未返回可用文字')
     return blocks
   }
 
@@ -8013,8 +10508,23 @@ function App() {
     ocrSelectionRect,
     fallbackNotice = '',
   }) {
+    const successfulBlocks = translatedBlocks.filter((block) => {
+      const translation = cleanResultText(block.translation || '')
+      return !block.translationFallback &&
+        translation &&
+        !isUselessTranslationResult(translation)
+    })
+    const failedBlocks = translatedBlocks.filter((block) => block.translationFallback)
+    if (!successfulBlocks.length && failedBlocks.length) {
+      throw new Error(failedBlocks[0].translationError || '翻译失败')
+    }
+    const resultNotice = [
+      fallbackNotice,
+      failedBlocks.length ? `${failedBlocks.length} 个模块翻译失败` : '',
+    ].filter(Boolean).join('；')
+
     if (mode === 'compare') {
-      const translatedImage = await createCompareResultImage(recognitionImage, croppedImage, translatedBlocks)
+      const translatedImage = await createCompareResultImage(recognitionImage, croppedImage, successfulBlocks)
       const layout = getCompareLayoutByAspectRatio(croppedImage.width, croppedImage.height)
       const nextCompareResult = {
         originalImage: image,
@@ -8024,7 +10534,7 @@ function App() {
 
       setSuccessfulRightPanelResult({
         type: 'ocr-compare',
-        title: fallbackNotice ? `对照模式结果（${fallbackNotice}）` : '对照模式结果',
+        title: resultNotice ? `对照模式结果（${resultNotice}）` : '对照模式结果',
         compareOriginalImage: image,
         compareTranslatedImage: translatedImage,
         compareLayout: layout,
@@ -8042,13 +10552,13 @@ function App() {
     const resultImage = await createDiagramResultImage(
       recognitionImage,
       croppedImage,
-      translatedBlocks,
+      successfulBlocks,
       sourceBlocks || translatedBlocks,
     )
 
     setSuccessfulRightPanelResult({
       type: 'ocr-diagram',
-      title: fallbackNotice ? `图解模式结果（${fallbackNotice}）` : '图解模式结果',
+      title: resultNotice ? `图解模式结果（${resultNotice}）` : '图解模式结果',
       screenshotDataUrl: recognitionImage,
       diagramResultImage: resultImage,
       ocrSelectionRect,
@@ -8060,11 +10570,56 @@ function App() {
     setOcrResult(null)
   }
 
+  function getRectBoundaryPoint(rect, targetPoint) {
+    const center = {
+      x: rect.x + rect.width / 2,
+      y: rect.y + rect.height / 2,
+    }
+    const deltaX = targetPoint.x - center.x
+    const deltaY = targetPoint.y - center.y
+    const halfWidth = Math.max(rect.width / 2, 0.5)
+    const halfHeight = Math.max(rect.height / 2, 0.5)
+
+    if (Math.abs(deltaX) < 0.001 && Math.abs(deltaY) < 0.001) {
+      return {
+        x: center.x + halfWidth,
+        y: center.y,
+      }
+    }
+
+    const scale = 1 / Math.max(
+      Math.abs(deltaX) / halfWidth,
+      Math.abs(deltaY) / halfHeight,
+    )
+
+    return {
+      x: center.x + deltaX * scale,
+      y: center.y + deltaY * scale,
+    }
+  }
+
+  function getDiagramConnectorPoints(sourceRect, translationRect) {
+    const sourceCenter = {
+      x: sourceRect.x + sourceRect.width / 2,
+      y: sourceRect.y + sourceRect.height / 2,
+    }
+    const translationCenter = {
+      x: translationRect.x + translationRect.width / 2,
+      y: translationRect.y + translationRect.height / 2,
+    }
+
+    return {
+      start: getRectBoundaryPoint(sourceRect, translationCenter),
+      end: getRectBoundaryPoint(translationRect, sourceCenter),
+    }
+  }
+
   async function createDiagramResultImage(imageUrl, imageSize, translatedBlocks, sourceBlocks = translatedBlocks) {
     const sourceImage = await loadImage(imageUrl)
     const canvas = document.createElement('canvas')
     const context = canvas.getContext('2d')
     const placedRects = []
+    const placedConnectorPaths = []
 
     canvas.width = imageSize.originalImageWidth || imageSize.width || sourceImage.naturalWidth
     canvas.height = imageSize.originalImageHeight || imageSize.height || sourceImage.naturalHeight
@@ -8092,6 +10647,7 @@ function App() {
         canvas.height,
         placedRects,
         sourceRects,
+        placedConnectorPaths,
         context,
       )
 
@@ -8110,13 +10666,28 @@ function App() {
       })
 
       const overlayStyle = getOverlayStyleForMode('diagram')
+      const connectorObstacles = [
+        ...sourceRects.filter((sourceRect) =>
+          getVisualRectOverlapRatio(sourceRect, block) < 0.72,
+        ),
+        ...placedRects,
+      ]
+      const connectorPath = getDiagramConnectorPath(
+        block,
+        rect,
+        connectorObstacles,
+        placedConnectorPaths,
+      )
       placedRects.push(rect)
+      placedConnectorPaths.push(connectorPath)
       context.save()
       context.strokeStyle = 'rgba(37, 99, 235, 0.5)'
       context.lineWidth = 1
       context.beginPath()
-      context.moveTo(block.x + block.width / 2, block.y + block.height / 2)
-      context.lineTo(rect.x + rect.width / 2, rect.y + rect.height / 2)
+      context.moveTo(connectorPath[0].x, connectorPath[0].y)
+      connectorPath.slice(1).forEach((point) => {
+        context.lineTo(point.x, point.y)
+      })
       context.stroke()
       context.shadowColor = overlayStyle.shadow
       context.shadowBlur = overlayStyle.shadowBlur
@@ -8139,11 +10710,73 @@ function App() {
         )
       })
       context.restore()
+
+      debugMultimodalOcr('diagram connector draw', {
+        text: block.text,
+        start: connectorPath[0],
+        end: connectorPath[connectorPath.length - 1],
+        bends: connectorPath.slice(1, -1),
+        sourceRect: {
+          x: block.x,
+          y: block.y,
+          width: block.width,
+          height: block.height,
+        },
+        translationRect: rect,
+      })
     })
 
     drawDebugLayoutBoxes(context, translatedBlocks, canvas.width, canvas.height)
 
     return canvas.toDataURL('image/png')
+  }
+
+  function drawCompareTranslationLine(context, line, canvasWidth, canvasHeight) {
+    const backgroundBox = getPaddedLineBox(line, canvasWidth, canvasHeight)
+    const textBox = {
+      x: backgroundBox.x + backgroundBox.paddingX,
+      y: backgroundBox.y + backgroundBox.paddingY,
+      width: Math.max(6, backgroundBox.width - backgroundBox.paddingX * 2),
+      height: Math.max(6, backgroundBox.height - backgroundBox.paddingY * 2),
+    }
+    const originalFontSize = Math.max(1, Number(line.fontSize) || line.height * 0.82)
+    const initialTranslationFontSize = clampNumber(
+      Math.min(originalFontSize * 0.88, textBox.height * 0.82),
+      1,
+      24,
+    )
+    const minimumTranslationFontSize = Math.max(1, originalFontSize * 0.65)
+    const translation = cleanResultText(line.translation || '').replace(/\s*\n+\s*/g, ' ')
+    let translationFontSize = initialTranslationFontSize
+
+    context.save()
+    context.fillStyle = '#ffffff'
+    context.fillRect(backgroundBox.x, backgroundBox.y, backgroundBox.width, backgroundBox.height)
+    if (translation) {
+      context.font = getCompareCanvasFont(translationFontSize)
+      while (
+        translationFontSize > minimumTranslationFontSize &&
+        context.measureText(translation).width > textBox.width
+      ) {
+        translationFontSize = Math.max(
+          minimumTranslationFontSize,
+          translationFontSize - 0.5,
+        )
+        context.font = getCompareCanvasFont(translationFontSize)
+      }
+      context.font = getCompareCanvasFont(translationFontSize)
+      context.textBaseline = 'top'
+      context.fillStyle = '#111827'
+      const textY = textBox.y + Math.max(0, (textBox.height - translationFontSize * 1.12) / 2)
+      context.fillText(translation, textBox.x, textY, textBox.width)
+    }
+    context.restore()
+
+    return {
+      backgroundBox,
+      originalFontSize,
+      translationFontSize,
+    }
   }
 
   async function createCompareResultImage(imageUrl, imageSize, translatedBlocks) {
@@ -8165,56 +10798,20 @@ function App() {
     })
 
     translatedBlocks.forEach((block) => {
-      if (hasLineLevelMultimodalTranslations(block)) {
-        getCompareSourceBlocks(block).forEach((line) => {
-          const translation = cleanResultText(line.translation || '')
-          if (!translation || isUselessTranslationResult(translation)) return
+      if (block.translationFallback || !cleanResultText(block.translation || '')) return
+      getCompareLineAssignments(block).forEach((line) => {
+        const drawResult = drawCompareTranslationLine(context, line, canvas.width, canvas.height)
 
-          const backgroundBox = getPaddedLineBox(line, canvas.width, canvas.height)
-          const textBox = {
-            x: backgroundBox.x + backgroundBox.paddingX,
-            y: backgroundBox.y + backgroundBox.paddingY,
-            width: Math.max(6, backgroundBox.width - backgroundBox.paddingX * 2),
-            height: Math.max(6, backgroundBox.height - backgroundBox.paddingY * 2),
-          }
-
-          context.save()
-          context.fillStyle = 'rgba(255, 255, 255, 0.88)'
-          context.fillRect(backgroundBox.x, backgroundBox.y, backgroundBox.width, backgroundBox.height)
-          context.restore()
-          drawTextInBox(context, translation, textBox, {
-            fontSize: clampNumber(line.height * 0.75, 10, 18),
-            minFontSize: 10,
-            maxFontSize: 18,
-          })
-
-          debugMultimodalOcr('compare line draw', {
-            text: line.text,
-            translation,
-            bbox: { x: line.x, y: line.y, width: line.width, height: line.height },
-            backgroundBox,
-          })
+        debugMultimodalOcr('compare line draw', {
+          text: line.text,
+          translation: line.translation,
+          bbox: { x: line.x, y: line.y, width: line.width, height: line.height },
+          backgroundBox: drawResult.backgroundBox,
+          originalFontSize: drawResult.originalFontSize,
+          translationFontSize: drawResult.translationFontSize,
+          boundaryRetries: block.compareBoundaryRetries || 0,
         })
-        return
-      }
-
-      const plan = getCompareReplacementPlan(context, block, canvas.width, canvas.height)
-      if (!plan.lines.length) return
-
-      context.save()
-      // 对照模式：每行单独白底，保留轻微透明感（仅影响对照模式，不影响图解模式）。
-      context.fillStyle = 'rgba(255, 255, 255, 0.9)'
-      plan.backgroundRects.forEach((rect) => {
-        context.fillRect(rect.x, rect.y, rect.width, rect.height)
       })
-
-      context.textBaseline = 'top'
-      context.fillStyle = '#111827'
-      plan.lines.forEach((line) => {
-        context.font = getCompareCanvasFont(line.fontSize || plan.fontSize)
-        context.fillText(line.text, line.x, line.y)
-      })
-      context.restore()
     })
 
     drawDebugLayoutBoxes(context, translatedBlocks, canvas.width, canvas.height)
@@ -8268,7 +10865,11 @@ function App() {
         error: '',
       })
 
-      if ((mode === 'diagram' || mode === 'compare') && settingsSupportMultimodal(settingsFormRef.current)) {
+      if (
+        MULTIMODAL_VISUAL_OCR_ENABLED &&
+        (mode === 'diagram' || mode === 'compare') &&
+        settingsSupportMultimodal(settingsFormRef.current)
+      ) {
         try {
           setOcrResult({
             status: mode === 'diagram' ? 'diagram-translating' : 'compare-translating',
@@ -8278,7 +10879,24 @@ function App() {
             translation: '',
             error: '',
           })
-          const translatedBlocks = await requestMultimodalImageTranslation(image, croppedImage, mode)
+          const multimodalLayout = await requestMultimodalVisualLayout(image, croppedImage, mode)
+          const validatedBlocks = validateMultimodalVisualBlocks(
+            multimodalLayout.blocks,
+            croppedImage,
+            mode,
+          )
+          const multimodalBlocks = await enrichVisualInlineFormulas(validatedBlocks, image)
+          const translatedBlocks = mode === 'compare'
+            ? await translateCompareBlocks(multimodalBlocks, {
+                multimodal: true,
+                image,
+                imageSize: croppedImage,
+              })
+            : await translateDiagramBlocks(multimodalBlocks, {
+                multimodal: true,
+                image,
+                imageSize: croppedImage,
+              })
 
           debugMultimodalOcr('multimodal result', {
             mode,
@@ -8299,7 +10917,7 @@ function App() {
             recognitionImage: image,
             croppedImage,
             translatedBlocks,
-            sourceBlocks: translatedBlocks,
+            sourceBlocks: multimodalBlocks,
             ocrSelectionRect,
           })
           return
@@ -8320,6 +10938,18 @@ function App() {
         }
       }
 
+      const multimodalTextRecognitionPromise =
+        mode === 'sidebar' &&
+        settingsSupportMultimodal(settingsFormRef.current)
+          ? requestMultimodalTextRecognition(image, croppedImage, 'text')
+              .catch((error) => {
+                console.warn('OCR 文本多模态纠错失败，继续使用本地识别结果', {
+                  error: error.message,
+                })
+                return []
+              })
+          : Promise.resolve([])
+
       worker = await createWorker('eng', 1, {
         workerPath: `${TESSERACT_ASSET_BASE}/worker.min.js`,
         corePath: `${TESSERACT_ASSET_BASE}/core/tesseract-core-simd-lstm.wasm.js`,
@@ -8327,7 +10957,36 @@ function App() {
         cacheMethod: 'none',
       })
       const { data } = await worker.recognize(recognitionImage, {}, { text: true, blocks: true })
-      const recognizedText = cleanOcrText(data.text || '')
+      const tesseractText = cleanOcrText(data.text || '')
+      const pdfTextBlocks = getPdfTextLayerOcrBlocks(croppedImage)
+      const usePdfTextLayer = shouldPreferPdfTextLayer(pdfTextBlocks, tesseractText)
+      const blockOptions = {
+        strict: mode === 'compare' || mode === 'diagram',
+        diagram: mode === 'diagram',
+      }
+      let textBlocks = usePdfTextLayer
+        ? mergeWrappedLinesIntoBlocks(pdfTextBlocks, blockOptions)
+        : getOcrTextBlocks(data, croppedImage, blockOptions)
+      let formulaResult = { corrections: [], unresolvedRects: [] }
+
+      if (!usePdfTextLayer && textBlocks.length) {
+        formulaResult = await recognizeInlineFormulaCandidates(
+          data,
+          recognitionImage,
+          croppedImage,
+          pdfTextBlocks,
+        )
+        textBlocks = applyInlineFormulaCorrections(textBlocks, formulaResult)
+      }
+
+      const multimodalTextBlocks = await multimodalTextRecognitionPromise
+      if (shouldPreferMultimodalRecognition(textBlocks, multimodalTextBlocks)) {
+        textBlocks = multimodalTextBlocks
+      }
+
+      const recognizedText = textBlocks.length
+        ? textBlocks.map((block) => block.text).join('\n')
+        : tesseractText
 
       if (!recognizedText) {
         setOcrResult({
@@ -8351,17 +11010,17 @@ function App() {
       })
 
       if (mode === 'diagram' || mode === 'compare') {
-        const textBlocks = getOcrTextBlocks(data, croppedImage, {
-          strict: mode === 'compare' || mode === 'diagram',
-          diagram: mode === 'diagram',
-        })
-        const validTextBlocks = textBlocks.filter((block) => shouldTranslateOcrBlock(block))
+        const validTextBlocks = textBlocks.filter((block) => isVisualTranslationBlock(block))
 
         console.log('OCR 模块流程统计', {
           mode,
+          source: usePdfTextLayer ? 'pdf-text-layer' : 'tesseract',
           rawLineCount: collectOcrLines(data).length,
           mergedModuleCount: textBlocks.length,
           validModuleCount: validTextBlocks.length,
+          formulaCorrectionCount: formulaResult.corrections.length,
+          unresolvedFormulaCount: formulaResult.unresolvedRects.length,
+          skippedDenseFormulaCount: textBlocks.filter((block) => isDenseFormulaOrSymbolText(block.text)).length,
           moduleTextLengths: validTextBlocks.slice(0, 20).map((block) => block.text.length),
         })
 
@@ -8369,7 +11028,9 @@ function App() {
           throw new Error('未识别到可翻译的英文文本')
         }
 
-        const translatedBlocks = await translateDiagramBlocks(validTextBlocks)
+        const translatedBlocks = mode === 'compare'
+          ? await translateCompareBlocks(validTextBlocks)
+          : await translateDiagramBlocks(validTextBlocks)
 
         if (!translatedBlocks.length) {
           throw new Error('未识别到可翻译的英文文本')
@@ -8402,34 +11063,18 @@ function App() {
         return
       }
 
-      const sidebarTextBlocks = getOcrTextBlocks(data, croppedImage)
-      const logicalOcrText = sidebarTextBlocks.length
-        ? sidebarTextBlocks.map((block) => block.text).join('\n')
-        : recognizedText
-      const translatableText = getTranslatableOcrText(logicalOcrText)
-
-      if (!translatableText) {
+      const {
+        segments: translatedSegments,
+        translation: nextTranslation,
+      } = await translateOcrBlocksPreservingFormulas(textBlocks)
+      if (!translatedSegments.length || isUselessTranslationResult(nextTranslation)) {
         setOcrResult({
           status: 'error',
           mode,
           image: recognitionImage,
           text: recognizedText,
           translation: '',
-          error: '未识别到可翻译的英文文本',
-        })
-        return
-      }
-
-      const nextTranslation = cleanResultText(await requestTranslation(translatableText))
-
-      if (isUselessTranslationResult(nextTranslation)) {
-        setOcrResult({
-          status: 'error',
-          mode,
-          image: recognitionImage,
-          text: recognizedText,
-          translation: '',
-          error: '未识别到可翻译的英文文本',
+          error: '未识别到可展示的英文文本或公式',
         })
         return
       }
@@ -8440,6 +11085,7 @@ function App() {
         screenshotDataUrl: recognitionImage,
         ocrText: recognizedText,
         translation: nextTranslation,
+        translationSegments: translatedSegments,
         ocrSelectionRect,
         timestamp: Date.now(),
       })
@@ -8610,6 +11256,7 @@ function App() {
     }
 
     setHighlightRects(nextHighlightRects)
+    const nextSelectionCapture = cropSelectionRectsImage(nextHighlightRects)
 
     if (text) {
       setRightPanelResult(null)
@@ -8623,6 +11270,7 @@ function App() {
       setImagePreviewZoom(1)
       setIsImagePreviewFullscreen(false)
       lastTranslatedTextRef.current = ''
+      setSelectionCapture(nextSelectionCapture)
       setSelectedText(text)
     }
   }
@@ -11791,36 +14439,59 @@ function App() {
                     <section className="settings-glossary">
                       <div className="settings-section-header">
                         <h3>模型参数</h3>
+                        <span>
+                          {modelListStatus === 'loading'
+                            ? '正在获取模型'
+                            : modelListStatus === 'success'
+                              ? `已获取 ${availableModels.length} 个模型`
+                              : modelListStatus === 'error'
+                                ? '模型列表获取失败'
+                                : ''}
+                        </span>
                       </div>
-                      <label className="settings-field">
-                        <span>模型名</span>
-                        <div className="settings-model-row">
-                          <input
-                            type="text"
-                            value={settingsForm.model}
-                            onChange={(event) => updateSettingsField('model', event.target.value)}
-                            placeholder={PROVIDERS[settingsForm.provider].model || 'model-id'}
-                          />
-                          {PROVIDERS[settingsForm.provider].presets.length ? (
+                      <div className="settings-field">
+                        <label htmlFor="settings-model-input">模型名</label>
+                        <SettingsModelCombobox
+                          value={settingsForm.model}
+                          models={availableModels}
+                          status={modelListStatus}
+                          error={modelListError}
+                          placeholder={
+                            modelListStatus === 'loading'
+                              ? '正在获取可用模型…'
+                              : '选择或输入模型名称'
+                          }
+                          onChange={updateSettingsModel}
+                        />
+                      </div>
+                      <details className="settings-advanced-parameters">
+                        <summary>高级参数</summary>
+                        <div className="settings-advanced-parameters-body">
+                          <label className="settings-field">
+                            <span>Temperature</span>
                             <select
-                              value=""
-                              aria-label="常用模型预设"
-                              onChange={(event) => {
-                                if (event.target.value) {
-                                  updateSettingsField('model', event.target.value)
-                                }
-                              }}
+                              value={settingsForm.temperatureMode}
+                              onChange={(event) => updateSettingsField('temperatureMode', event.target.value)}
                             >
-                              <option value="">常用模型预设</option>
-                              {PROVIDERS[settingsForm.provider].presets.map((model) => (
-                                <option key={model} value={model}>
-                                  {model}
-                                </option>
-                              ))}
+                              <option value="auto">自动</option>
+                              <option value="custom">自定义</option>
                             </select>
+                          </label>
+                          {settingsForm.temperatureMode === 'custom' ? (
+                            <label className="settings-field">
+                              <span>Temperature 数值</span>
+                              <input
+                                type="number"
+                                min="0"
+                                max="2"
+                                step="0.1"
+                                value={settingsForm.temperature}
+                                onChange={(event) => updateSettingsField('temperature', event.target.value)}
+                              />
+                            </label>
                           ) : null}
                         </div>
-                      </label>
+                      </details>
                       <label className="settings-switch-row">
                         <span>
                           <strong>启用多模态翻译</strong>
@@ -11829,6 +14500,11 @@ function App() {
                           type="checkbox"
                           checked={settingsSupportMultimodal(settingsForm)}
                           disabled={!settingsCanEnableMultimodal(settingsForm)}
+                          title={
+                            settingsForm.modelSupportsMultimodal === false
+                              ? '模型列表未声明图片输入能力，仍可手动启用并由接口实际验证'
+                              : '启用多模态图片识别'
+                          }
                           onChange={(event) => updateSettingsField('enableMultimodalTranslation', event.target.checked)}
                         />
                       </label>
@@ -11957,7 +14633,7 @@ function App() {
 
             <div className="note-dialog-source">
               <strong>是否将后续高亮写入 PDF 文件本体？</strong>
-              <p>写入后用其他 PDF 软件打开也能看到，并会自动创建 .paper-reader-backup.pdf 备份。</p>
+              <p>写入后用其他 PDF 软件打开也能看到。</p>
             </div>
 
             <div className="settings-actions">
