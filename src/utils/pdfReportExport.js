@@ -36,16 +36,20 @@ function getReportStats(sections) {
   }, {
     total: 0,
     'translation-history': 0,
+    highlights: 0,
     annotations: 0,
     notes: 0,
+    bookmarks: 0,
   })
 }
 
 function getSummaryItems(stats, sections) {
   const summaryLabels = {
     'translation-history': '翻译历史',
+    highlights: '高亮',
     annotations: '批注',
     notes: '笔记',
+    bookmarks: '书签',
   }
 
   return sections.map((section) => ({
@@ -55,14 +59,14 @@ function getSummaryItems(stats, sections) {
   }))
 }
 
-function renderRecord(section, record, index) {
+function renderRecord(section, record, index, options = {}) {
   return `
     <article class="record-card">
       <div class="record-head">
         <h3>第 ${index + 1} 条</h3>
-        <span>页数：${escapeHtml(record.page || '未知')}</span>
+        ${options.showPageNumbers === false ? '' : `<span>页数：${escapeHtml(record.page || '未知')}</span>`}
       </div>
-      ${section.hideOriginal ? '' : `<div class="record-block">
+      ${section.hideOriginal || record.hideOriginal || options.includeOriginal === false ? '' : `<div class="record-block">
         <h4>原句</h4>
         ${renderTextBlock(record.original)}
       </div>`}
@@ -74,7 +78,7 @@ function renderRecord(section, record, index) {
   `
 }
 
-function renderSection(section) {
+function renderSection(section, options) {
   return `
     <section class="report-section">
       <div class="section-title">
@@ -82,7 +86,7 @@ function renderSection(section) {
         <span>${section.records.length} 条</span>
       </div>
       ${section.records.length
-        ? section.records.map((record, index) => renderRecord(section, record, index)).join('')
+        ? section.records.map((record, index) => renderRecord(section, record, index, options)).join('')
         : '<p class="empty-section">无</p>'}
     </section>
   `
@@ -91,7 +95,19 @@ function renderSection(section) {
 function renderDocumentReport(item, index, total, options = {}) {
   const pdf = item?.pdf || {}
   const fileName = getPdfDisplayName(pdf)
-  const sections = getPdfExportSections(item, options)
+  const selectedSections = getPdfExportSections(item, options)
+  const sections = options.groupByType === false && selectedSections.length
+    ? [{
+        key: 'records',
+        title: '记录',
+        bodyLabel: '内容',
+        records: selectedSections.flatMap((section) => section.records.map((record) => ({
+          ...record,
+          body: `[${section.title}] ${record.body || ''}`.trim(),
+          hideOriginal: section.hideOriginal,
+        }))).sort((a, b) => (Number(a.page) || Number.MAX_SAFE_INTEGER) - (Number(b.page) || Number.MAX_SAFE_INTEGER)),
+      }]
+    : selectedSections
   const stats = getReportStats(sections)
   const summaryItems = getSummaryItems(stats, sections)
 
@@ -115,7 +131,7 @@ function renderDocumentReport(item, index, total, options = {}) {
           </div>
         </div>
       </header>
-      ${sections.map(renderSection).join('')}
+      ${sections.map((section) => renderSection(section, options)).join('')}
     </article>
   `
 }
@@ -126,6 +142,9 @@ function buildHtmlDocument(items, options = {}) {
     .map((item, index, allItems) => renderDocumentReport(item, index, allItems.length, options))
     .join('')
 
+  const pageSize = ['A4', 'Letter'].includes(options.pageSize) ? options.pageSize : 'A4'
+  const pageMargin = options.pageMargin === 'compact' ? '10mm' : options.pageMargin === 'wide' ? '22mm' : '15mm 14mm 16mm'
+
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -133,8 +152,8 @@ function buildHtmlDocument(items, options = {}) {
   <title>Paper Reader 整理报告</title>
   <style>
     @page {
-      size: A4;
-      margin: 15mm 14mm 16mm;
+      size: ${pageSize};
+      margin: ${pageMargin};
     }
 
     * {

@@ -1,10 +1,39 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Document, Page, pdfjs } from 'react-pdf'
 import { createWorker } from 'tesseract.js'
+import {
+  Archive,
+  BookOpen,
+  CircleOff,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  FilePlus2,
+  FolderPlus,
+  Highlighter,
+  History,
+  LibraryBig,
+  ListTree,
+  Maximize2,
+  Minimize2,
+  Minus,
+  NotebookPen,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Plus,
+  RotateCcw,
+  ScanLine,
+  Search,
+  Settings,
+  Trash2,
+  X,
+} from 'lucide-react'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
 import './App.css'
 import appIconUrl from '../build/icon.png'
+import IconButton from './components/ui/IconButton'
 import {
   HISTORY_LIMIT,
   HISTORY_TYPE_LABELS,
@@ -33,6 +62,44 @@ import {
   normalizeTocItems,
   parseAiTocResponse,
 } from './utils/toc'
+
+function TreeChevron({ expanded, onToggle }) {
+  return (
+    <IconButton
+      className="tree-chevron"
+      label={expanded ? '折叠文件夹' : '展开文件夹'}
+      onClick={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        onToggle()
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault()
+        event.stopPropagation()
+      }}
+      onDragStart={(event) => event.preventDefault()}
+    >
+      {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+    </IconButton>
+  )
+}
+
+const TEXT_ENTRY_SELECTOR = [
+  'textarea',
+  '[contenteditable="true"]',
+  'input:not([type="button"]):not([type="checkbox"]):not([type="color"]):not([type="file"]):not([type="hidden"]):not([type="image"]):not([type="radio"]):not([type="range"]):not([type="reset"]):not([type="submit"])',
+].join(', ')
+
+function getTextEntryElement(target) {
+  if (!target || typeof target.closest !== 'function') return null
+
+  const element = target.closest(TEXT_ENTRY_SELECTOR)
+  if (!element || element.disabled || element.readOnly || element.getAttribute('aria-disabled') === 'true') {
+    return null
+  }
+
+  return element
+}
 
 const UI = {
   choosePdf: '\u9009\u62e9 PDF',
@@ -65,17 +132,55 @@ const UI = {
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001'
 const TESSERACT_ASSET_BASE = `${import.meta.env.BASE_URL || '/'}tesseract`
 const MULTIMODAL_OCR_DEBUG = import.meta.env.VITE_MULTIMODAL_OCR_DEBUG === 'true'
+const MULTIMODAL_VISUAL_OCR_ENABLED = import.meta.env.VITE_ENABLE_MULTIMODAL_VISUAL_OCR === 'true'
+const INLINE_FORMULA_OCR_MODEL = 'onnx-community/TexTeller-ONNX'
+let inlineFormulaOcrPipelinePromise = null
 const DEFAULT_TRANSLATION_PROMPT =
   '你是通用学术翻译助手。请把用户提供的英文学术文本翻译成准确、自然、符合中文学术表达习惯的中文。保留必要的专业术语、英文缩写、公式、指数、上下标、单位、变量名和专有名词。遇到 10^16、10^{-6}、H_2O、CO_2 等表达时，不要改写成普通数字。不要扩写，不要总结，不要添加解释，只输出译文。'
+
+async function getInlineFormulaOcrPipeline() {
+  if (!inlineFormulaOcrPipelinePromise) {
+    inlineFormulaOcrPipelinePromise = import('@huggingface/transformers')
+      .then(({ env, pipeline }) => {
+        env.allowLocalModels = true
+        env.allowRemoteModels = true
+        env.useBrowserCache = true
+
+        return pipeline('image-to-text', INLINE_FORMULA_OCR_MODEL, {
+          device: 'wasm',
+          dtype: 'q8',
+          progress_callback: (progress) => {
+            if (progress?.status === 'progress') {
+              console.debug('行内公式 OCR 模型加载', {
+                file: progress.file,
+                progress: progress.progress,
+              })
+            }
+          },
+        })
+      })
+      .catch((error) => {
+        inlineFormulaOcrPipelinePromise = null
+        throw error
+      })
+  }
+
+  return inlineFormulaOcrPipelinePromise
+}
+
 const DEFAULT_CONTENT_EXPORT_OPTIONS = {
   exportHistories: true,
-  exportAnnotations: true,
   exportNotes: true,
+  exportHighlights: false,
+  exportAnnotations: false,
+  exportBookmarks: false,
 }
 const CONTENT_EXPORT_OPTION_ITEMS = [
-  { key: 'exportHistories', label: '翻译历史' },
-  { key: 'exportAnnotations', label: '批注' },
   { key: 'exportNotes', label: '笔记' },
+  { key: 'exportHistories', label: '翻译历史' },
+  { key: 'exportHighlights', label: '高亮' },
+  { key: 'exportAnnotations', label: '批注' },
+  { key: 'exportBookmarks', label: '书签' },
 ]
 const SEARCH_SCOPE_OPTIONS = [
   { value: 'all', label: '全部' },
@@ -126,13 +231,6 @@ const EXPORT_DETAIL_TEXT_FIELDS = [
 ]
 const EXPORT_DETAIL_NOTE_FIELDS = ['noteText', 'note', 'content', 'comment', 'memo', 'remark']
 const EXPORT_DETAIL_TRANSLATION_FIELDS = ['translation', 'translatedText', 'targetText', 'result', 'translated', 'target']
-const DATA_EXPORT_TYPE_OPTIONS = [
-  { value: 'full', label: '完整备份' },
-  { value: 'translation-history', label: '翻译历史' },
-  { value: 'notes', label: '笔记' },
-  { value: 'annotations', label: '批注' },
-  { value: 'bookmarks', label: '书签' },
-]
 const MIN_ZOOM = 50
 const MAX_ZOOM = 300
 const ZOOM_STEP = 10
@@ -143,59 +241,72 @@ const PROVIDERS = {
     label: 'DeepSeek',
     baseUrl: 'https://api.deepseek.com',
     model: 'deepseek-v4-flash',
-    presets: ['deepseek-v4-flash', 'deepseek-v4-pro'],
     supportsMultimodal: true,
   },
   'openai-compatible': {
-    label: 'OpenAI-compatible',
+    label: 'OpenAI / GPT',
     baseUrl: 'https://api.openai.com/v1',
     model: 'gpt-4o-mini',
-    presets: [
-      'gpt-4o-mini',
-      'gpt-4.1-mini',
-      'gpt-5-mini',
-      'openrouter/auto',
-      'openai/gpt-5.2',
-      'google/gemini-2.5-pro',
-      'google/gemini-2.5-flash',
-      'anthropic/claude-sonnet-4.5',
-      'qwen/qwen3',
-      'deepseek/deepseek-v4-flash',
-    ],
     supportsMultimodal: true,
   },
   'anthropic-compatible': {
-    label: 'Anthropic-compatible',
+    label: 'Anthropic / Claude',
     baseUrl: 'https://api.anthropic.com',
     model: 'claude-3-5-sonnet-latest',
-    presets: [
-      'claude-3-5-sonnet-latest',
-      'claude-3-5-haiku-latest',
-      'claude-sonnet-4-5',
-      'anthropic/claude-sonnet-4.5',
-    ],
+    supportsMultimodal: true,
+  },
+  glm: {
+    label: '智谱 AI / GLM',
+    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    model: '',
+    supportsMultimodal: true,
+  },
+  gemini: {
+    label: 'Google / Gemini',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    model: '',
+    supportsMultimodal: true,
+  },
+  qwen: {
+    label: '阿里云百炼 / Qwen',
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    model: '',
+    supportsMultimodal: true,
+  },
+  kimi: {
+    label: '月之暗面 / Kimi',
+    baseUrl: 'https://api.moonshot.cn/v1',
+    model: '',
+    supportsMultimodal: true,
+  },
+  openrouter: {
+    label: 'OpenRouter',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    model: '',
+    supportsMultimodal: true,
+  },
+  siliconflow: {
+    label: '硅基流动 / SiliconFlow',
+    baseUrl: 'https://api.siliconflow.cn/v1',
+    model: '',
     supportsMultimodal: true,
   },
   custom: {
     label: '自定义',
     baseUrl: '',
     model: '',
-    presets: [],
     supportsMultimodal: true,
-  },
-}
-const LEGACY_PROVIDER_DEFAULTS = {
-  openrouter: {
-    provider: 'openai-compatible',
-    baseUrl: 'https://openrouter.ai/api/v1',
-    model: 'openrouter/auto',
   },
 }
 const DEFAULT_SETTINGS = {
   provider: 'deepseek',
   apiKey: '',
+  providerApiKeys: {},
   baseUrl: PROVIDERS.deepseek.baseUrl,
   model: PROVIDERS.deepseek.model,
+  modelSupportsMultimodal: null,
+  temperatureMode: 'auto',
+  temperature: 0.2,
   prompt: DEFAULT_TRANSLATION_PROMPT,
   enableMultimodalTranslation: false,
   rightPanelWidth: 420,
@@ -203,40 +314,35 @@ const DEFAULT_SETTINGS = {
 }
 
 function normalizeProviderKey(provider) {
-  if (provider === 'openrouter') return 'openai-compatible'
   return Object.hasOwn(PROVIDERS, provider) ? provider : 'deepseek'
 }
 
-function modelNameLooksMultimodal(model) {
-  const normalizedModel = String(model || '').toLowerCase()
-  if (!normalizedModel) return false
+function normalizeProviderApiKeys(config = {}, activeProvider = 'deepseek') {
+  const storedApiKeys =
+    config.providerApiKeys && typeof config.providerApiKeys === 'object' && !Array.isArray(config.providerApiKeys)
+      ? config.providerApiKeys
+      : {}
+  const providerApiKeys = Object.fromEntries(
+    Object.keys(PROVIDERS)
+      .map((provider) => [provider, String(storedApiKeys[provider] || '').trim()])
+      .filter(([, apiKey]) => apiKey),
+  )
+  const activeApiKey = String(config.apiKey || '').trim()
+  const legacyDeepseekApiKey = String(config.deepseekApiKey || '').trim()
 
-  return [
-    '4o',
-    '4.1',
-    'gpt-5',
-    'o3',
-    'o4',
-    'vision',
-    'vl',
-    'gemini',
-    'claude-3',
-    'claude-sonnet',
-    'claude-opus',
-    'claude-haiku',
-    'llama-4',
-    'qwen-vl',
-    'kimi-vl',
-    'openrouter/auto',
-  ].some((token) => normalizedModel.includes(token))
+  if (legacyDeepseekApiKey && !providerApiKeys.deepseek) {
+    providerApiKeys.deepseek = legacyDeepseekApiKey
+  }
+  if (activeApiKey && !providerApiKeys[activeProvider]) {
+    providerApiKeys[activeProvider] = activeApiKey
+  }
+
+  return providerApiKeys
 }
 
 function settingsCanEnableMultimodal(settings) {
   const provider = normalizeProviderKey(settings?.provider)
-  if (!PROVIDERS[provider].supportsMultimodal) return false
-  if (provider === 'deepseek' || provider === 'custom') return true
-
-  return modelNameLooksMultimodal(settings?.model) || !settings?.model
+  return PROVIDERS[provider].supportsMultimodal
 }
 
 function settingsSupportMultimodal(settings) {
@@ -685,59 +791,26 @@ function logTocDebug(stage, payload) {
 }
 
 const APP_ICON_SRC = appIconUrl
-const navIconProps = {
-  viewBox: '0 0 24 24',
-  width: 20,
-  height: 20,
-  fill: 'none',
-  stroke: 'currentColor',
-  strokeWidth: 1.7,
-  strokeLinecap: 'round',
-  strokeLinejoin: 'round',
-}
 const MODULE_NAV_ITEMS = [
   {
     id: 'reader',
     label: '阅读',
-    icon: (
-      <svg {...navIconProps}>
-        <path d="M12 6.4C10.4 5 7.6 4.5 4.6 5v12.6c3-.5 5.8 0 7.4 1.4 1.6-1.4 4.4-1.9 7.4-1.4V5c-3-.5-5.8 0-7.4 1.4Z" />
-        <path d="M12 6.4v12.6" />
-      </svg>
-    ),
+    icon: BookOpen,
   },
   {
     id: 'library',
     label: '文献库',
-    icon: (
-      <svg {...navIconProps}>
-        <rect x="5" y="4.5" width="4" height="14.5" rx="1.1" />
-        <rect x="10" y="4.5" width="4" height="14.5" rx="1.1" />
-        <rect x="15" y="4.5" width="4" height="14.5" rx="1.1" />
-        <path d="M4.5 19.5h15" />
-        <path d="M6.5 8h1M11.5 12h1M16.5 9.5h1" />
-      </svg>
-    ),
+    icon: LibraryBig,
   },
   {
     id: 'importExport',
     label: '历史笔记管理',
-    icon: (
-      <svg {...navIconProps}>
-        <path d="M7 8.5h11l-3-3M17 15.5H6l3 3" />
-      </svg>
-    ),
+    icon: Archive,
   },
   {
     id: 'settings',
     label: '设置',
-    icon: (
-      <svg {...navIconProps}>
-        <circle cx="12" cy="12" r="3.2" />
-        <path d="M12 3.4v2.2M12 18.4v2.2M5.9 5.9l1.6 1.6M16.5 16.5l1.6 1.6M3.4 12h2.2M18.4 12h2.2M5.9 18.1l1.6-1.6M16.5 7.5l1.6-1.6" />
-        <path d="M8.7 4.7 8 6.8M16 17.2l-.7 2.1M4.7 15.3l2.1.7M17.2 8l2.1.7" />
-      </svg>
-    ),
+    icon: Settings,
   },
 ]
 const NOTE_TYPE_LABELS = {
@@ -768,6 +841,111 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url,
 ).toString()
 
+function SettingsModelCombobox({
+  value,
+  models,
+  status,
+  error,
+  placeholder,
+  onChange,
+}) {
+  const rootRef = useRef(null)
+  const [isOpen, setIsOpen] = useState(false)
+  const listboxId = 'settings-model-listbox'
+
+  useEffect(() => {
+    if (!isOpen) return undefined
+
+    function handlePointerDown(event) {
+      if (!rootRef.current?.contains(event.target)) {
+        setIsOpen(false)
+      }
+    }
+
+    function handleKeyDown(event) {
+      if (event.key === 'Escape') {
+        setIsOpen(false)
+      }
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [isOpen])
+
+  const emptyMessage = status === 'loading'
+    ? '正在获取模型…'
+    : status === 'error'
+      ? error || '获取模型列表失败，可手动输入'
+      : status === 'success'
+        ? '未获取到可用模型，可手动输入'
+        : '填写 API Key 后获取模型'
+
+  return (
+    <div className="settings-model-combobox" ref={rootRef}>
+      <input
+        id="settings-model-input"
+        type="text"
+        value={value}
+        role="combobox"
+        aria-label="模型名称"
+        aria-autocomplete="list"
+        aria-controls={listboxId}
+        aria-expanded={isOpen}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowDown') {
+            event.preventDefault()
+            setIsOpen(true)
+          }
+        }}
+        placeholder={placeholder}
+      />
+      <button
+        type="button"
+        className="settings-model-toggle"
+        aria-label={isOpen ? '收起模型列表' : '展开模型列表'}
+        aria-controls={listboxId}
+        aria-expanded={isOpen}
+        onClick={() => setIsOpen((currentValue) => !currentValue)}
+      >
+        <ChevronDown size={16} aria-hidden="true" />
+      </button>
+      {isOpen ? (
+        <div className="settings-model-options" id={listboxId} role="listbox">
+          {models.length ? (
+            models.map((model) => (
+              <button
+                type="button"
+                className={model.id === value ? 'settings-model-option selected' : 'settings-model-option'}
+                key={model.id}
+                role="option"
+                aria-selected={model.id === value}
+                title={model.name && model.name !== model.id ? `${model.name} · ${model.id}` : model.id}
+                onClick={() => {
+                  onChange(model.id)
+                  setIsOpen(false)
+                }}
+              >
+                <span>{model.id}</span>
+                {model.name && model.name !== model.id ? <small>{model.name}</small> : null}
+              </button>
+            ))
+          ) : (
+            <p className={status === 'error' ? 'settings-model-empty error' : 'settings-model-empty'}>
+              {emptyMessage}
+            </p>
+          )}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function App() {
   const appRef = useRef(null)
   const readerLayoutRef = useRef(null)
@@ -778,9 +956,13 @@ function App() {
   const requestIdRef = useRef(0)
   const isSelectingRef = useRef(false)
   const selectionFrameRef = useRef(null)
+  const selectionInteractionVersionRef = useRef(0)
+  // Text entry pauses PDF selection without clearing the user's annotation color.
+  const annotationInteractionSuspendedRef = useRef(false)
   const ocrStartPointRef = useRef(null)
   const panelResizeStartRef = useRef(null)
   const settingsFormRef = useRef(DEFAULT_SETTINGS)
+  const modelListRequestIdRef = useRef(0)
   const rightPanelWidthRef = useRef(DEFAULT_SETTINGS.rightPanelWidth)
   const readingRecordSaveTimerRef = useRef(null)
   const pendingReadingRestoreRef = useRef(null)
@@ -804,16 +986,19 @@ function App() {
   const noteDialogRef = useRef(null)
   const noteTitleInputRef = useRef(null)
   const noteTextareaRef = useRef(null)
+  const pdfHighlightWritePromptRef = useRef(null)
   const bookmarkTitleInputRef = useRef(null)
   const libraryFolderNameInputRef = useRef(null)
   const retainedRightPanelActionsRef = useRef(null)
   const searchDialogInputRef = useRef(null)
+  const batchExportNameRef = useRef('')
   const pdfTextSearchCacheRef = useRef({ key: '', pages: [] })
   const librarySearchCacheRef = useRef({ key: '', data: null })
   const libraryDocumentTextCacheRef = useRef(new Map())
   const tocGenerationKeyRef = useRef('')
   const tocGenerationRequestRef = useRef(0)
   const generateTableOfContentsRef = useRef(null)
+  const prepareSelectionTranslationRef = useRef(null)
 
   const [pdfUrl, setPdfUrl] = useState('')
   const [currentDocument, setCurrentDocument] = useState(null)
@@ -828,6 +1013,8 @@ function App() {
   const [recentStatus, setRecentStatus] = useState('')
   const [libraryFolders, setLibraryFolders] = useState([])
   const [libraryDocuments, setLibraryDocuments] = useState([])
+  const [libraryLiteratures, setLibraryLiteratures] = useState([])
+  const [recycledLibraryDocuments, setRecycledLibraryDocuments] = useState([])
   const [selectedLibraryFolderId, setSelectedLibraryFolderId] = useState('all')
   const [librarySearch, setLibrarySearch] = useState('')
   const [librarySearchMode, setLibrarySearchMode] = useState('filename')
@@ -835,13 +1022,29 @@ function App() {
   const [selectedLibraryDocumentIds, setSelectedLibraryDocumentIds] = useState([])
   const [libraryStatus, setLibraryStatus] = useState('')
   const [libraryContextMenu, setLibraryContextMenu] = useState(null)
+  const [libraryFolderContextMenu, setLibraryFolderContextMenu] = useState(null)
   const [libraryMoveDialog, setLibraryMoveDialog] = useState(null)
+  const [libraryMoveRootExpanded, setLibraryMoveRootExpanded] = useState(true)
+  const [libraryMoveExpandedIds, setLibraryMoveExpandedIds] = useState(() => new Set())
+  const [libraryFolderMoveDialog, setLibraryFolderMoveDialog] = useState(null)
+  const [libraryFolderMoveRootExpanded, setLibraryFolderMoveRootExpanded] = useState(true)
+  const [libraryFolderMoveExpandedIds, setLibraryFolderMoveExpandedIds] = useState(() => new Set())
+  const [draggedLibraryFolderId, setDraggedLibraryFolderId] = useState('')
+  const [libraryFolderDropTarget, setLibraryFolderDropTarget] = useState(null)
   const [libraryFolderDialogOpen, setLibraryFolderDialogOpen] = useState(false)
+  const [libraryFolderParentId, setLibraryFolderParentId] = useState(null)
+  const [libraryFolderEditingId, setLibraryFolderEditingId] = useState('')
   const [libraryFolderNameDraft, setLibraryFolderNameDraft] = useState('')
   const [libraryFolderNameError, setLibraryFolderNameError] = useState('')
+  const [libraryDeleteDialog, setLibraryDeleteDialog] = useState(null)
+  const [permanentDeleteDialogIds, setPermanentDeleteDialogIds] = useState([])
+  const [historyLibraryNodeId, setHistoryLibraryNodeId] = useState('all')
+  const [historyIncludeDescendants, setHistoryIncludeDescendants] = useState(true)
+  const [historySelectedRecycleIds, setHistorySelectedRecycleIds] = useState([])
   const [pageNumber, setPageNumber] = useState(1)
   const [numPages, setNumPages] = useState(null)
   const [selectedText, setSelectedText] = useState('')
+  const [selectionCapture, setSelectionCapture] = useState(null)
   const [highlightRects, setHighlightRects] = useState([])
   const [translation, setTranslation] = useState('')
   const [translationStatus, setTranslationStatus] = useState('idle')
@@ -881,6 +1084,7 @@ function App() {
   const [bookmarksStatus, setBookmarksStatus] = useState('')
   const [historyStatus, setHistoryStatus] = useState('')
   const [exportStatus, setExportStatus] = useState('')
+  const [exportFailures, setExportFailures] = useState([])
   const [, setIsHistoryImportExportBusy] = useState(false)
   const [, setIsNotesImportExportBusy] = useState(false)
   const [exportableDocuments, setExportableDocuments] = useState([])
@@ -888,19 +1092,24 @@ function App() {
   const [selectedExportDetailDocumentId, setSelectedExportDetailDocumentId] = useState('')
   const [exportDocumentDetail, setExportDocumentDetail] = useState(null)
   const [exportDocumentDetailStatus, setExportDocumentDetailStatus] = useState('')
-  const [selectedMarkdownDocumentIds, setSelectedMarkdownDocumentIds] = useState([])
-  const [isMarkdownExporting, setIsMarkdownExporting] = useState(false)
-  const [markdownExportOptions, setMarkdownExportOptions] = useState(DEFAULT_CONTENT_EXPORT_OPTIONS)
-  const [selectedPdfReportDocumentIds, setSelectedPdfReportDocumentIds] = useState([])
-  const [isPdfReportExporting, setIsPdfReportExporting] = useState(false)
-  const [pdfReportExportOptions, setPdfReportExportOptions] = useState(DEFAULT_CONTENT_EXPORT_OPTIONS)
-  const [batchDataExportType, setBatchDataExportType] = useState('full')
-  const [batchExportMode, setBatchExportMode] = useState('merged')
-  const [batchExportName, setBatchExportName] = useState('')
+  const [selectedFileExportDocumentIds, setSelectedFileExportDocumentIds] = useState([])
+  const [fileExportScope, setFileExportScope] = useState('selected')
+  const [fileExportFolderId, setFileExportFolderId] = useState('unfiled')
+  const [exportFolderTreeRootExpanded, setExportFolderTreeRootExpanded] = useState(true)
+  const [exportFolderTreeUnfiledExpanded, setExportFolderTreeUnfiledExpanded] = useState(true)
+  const [exportFolderTreeRecycleExpanded, setExportFolderTreeRecycleExpanded] = useState(true)
+  const [exportFolderTreeExpandedIds, setExportFolderTreeExpandedIds] = useState(() => new Set())
+  const [fileExportFormat, setFileExportFormat] = useState('markdown')
+  const [fileExportMethod, setFileExportMethod] = useState('merged')
+  const [fileExportContents, setFileExportContents] = useState(DEFAULT_CONTENT_EXPORT_OPTIONS)
+  const [markdownFormatOptions, setMarkdownFormatOptions] = useState({ includeOriginal: true, generateToc: false, groupByType: true })
+  const [pdfFormatOptions, setPdfFormatOptions] = useState({ pageSize: 'A4', pageMargin: 'normal', showPageNumbers: true, includeOriginal: true, groupByType: true })
+  const [isFileExporting, setIsFileExporting] = useState(false)
   const [exportDefaultDir, setExportDefaultDir] = useState('')
   const [isAnnotationToolbarOpen, setIsAnnotationToolbarOpen] = useState(false)
   const [annotationColor, setAnnotationColor] = useState(null)
   const [pdfHighlightWriteMode, setPdfHighlightWriteMode] = useState('ask')
+  const [pdfHighlightWritePromptOpen, setPdfHighlightWritePromptOpen] = useState(false)
   const [documentAnnotations, setDocumentAnnotations] = useState([])
   const [previewHighlight, setPreviewHighlight] = useState(null)
   const [activeAnnotationId, setActiveAnnotationId] = useState('')
@@ -934,11 +1143,14 @@ function App() {
   const [settingsForm, setSettingsForm] = useState(DEFAULT_SETTINGS)
   const [settingsStatus, setSettingsStatus] = useState('')
   const [isSavingSettings, setIsSavingSettings] = useState(false)
+  const [availableModels, setAvailableModels] = useState([])
+  const [modelListStatus, setModelListStatus] = useState('idle')
+  const [modelListError, setModelListError] = useState('')
   const [glossary, setGlossary] = useState([])
   const [glossaryStatus, setGlossaryStatus] = useState('未导入术语库')
   const [isGlossaryVisible, setIsGlossaryVisible] = useState(false)
   const [settingsTab, setSettingsTab] = useState('model')
-  const [importExportTab, setImportExportTab] = useState('importExport')
+  const [importExportTab, setImportExportTab] = useState('libraryRecords')
   const [activeModule, setActiveModule] = useState('reader')
   const [toolbarCollapsed, setToolbarCollapsed] = useState(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -949,6 +1161,7 @@ function App() {
   function clearTranslation() {
     requestIdRef.current += 1
     setSelectedText('')
+    setSelectionCapture(null)
     setHighlightRects([])
     setTranslation('')
     setTranslationStatus('idle')
@@ -976,20 +1189,55 @@ function App() {
     setIsImagePreviewFullscreen(false)
   }, [clearOcrSelection])
 
-  function clearNoteDialogBlockers() {
+  const releasePdfTextSelection = useCallback(() => {
     if (selectionFrameRef.current) {
       cancelAnimationFrame(selectionFrameRef.current)
       selectionFrameRef.current = null
     }
 
-    requestIdRef.current += 1
     window.getSelection()?.removeAllRanges()
     isSelectingRef.current = false
+    setHighlightRects([])
+    setPreviewHighlight(null)
+  }, [])
+
+  const suspendPdfTextSelection = useCallback(() => {
+    annotationInteractionSuspendedRef.current = true
+    selectionInteractionVersionRef.current += 1
+
+    if (selectionFrameRef.current) {
+      cancelAnimationFrame(selectionFrameRef.current)
+      selectionFrameRef.current = null
+    }
+
+    // Do not clear the native selection while a text field is processing its
+    // pointer sequence. On Windows, doing so during pointerdown/mouseup can
+    // leave Chromium's caret visible without activating the IME text session.
+    isSelectingRef.current = false
+  }, [])
+
+  const cancelTransientPointerInteractions = useCallback(() => {
+    releasePdfTextSelection()
     ocrStartPointRef.current = null
     panelResizeStartRef.current = null
     document.body.classList.remove('resizing-panel')
 
+    setIsOcrDragging(false)
+    setOcrRect(null)
+    setIsResizingPanel(false)
+    setDraggingTabId('')
+    setDragOverTabId('')
+    setDraggedLibraryFolderId('')
+    setLibraryFolderDropTarget(null)
+  }, [releasePdfTextSelection])
+
+  function clearNoteDialogBlockers() {
+    selectionInteractionVersionRef.current += 1
+    cancelTransientPointerInteractions()
+    requestIdRef.current += 1
+
     setSelectedText('')
+    setSelectionCapture(null)
     setHighlightRects([])
     setPreviewHighlight(null)
     setActiveAnnotationId('')
@@ -998,14 +1246,9 @@ function App() {
     setAnnotationStatus('')
     setIsOcrMode(false)
     setIsOcrMenuOpen(false)
-    setIsOcrDragging(false)
-    setOcrRect(null)
     setLibraryContextMenu(null)
     setLibraryMoveDialog(null)
     setIsRecentOpen(false)
-    setIsResizingPanel(false)
-    setDraggingTabId('')
-    setDragOverTabId('')
     setImagePreview(null)
     setImagePreviewZoom(1)
     setIsImagePreviewFullscreen(false)
@@ -1027,6 +1270,7 @@ function App() {
     window.getSelection()?.removeAllRanges()
     isSelectingRef.current = false
     setSelectedText('')
+    setSelectionCapture(null)
     setHighlightRects([])
     setPreviewHighlight(null)
     setHighlightContextMenu(null)
@@ -1284,6 +1528,7 @@ function App() {
     window.getSelection()?.removeAllRanges()
     ocrStartPointRef.current = null
     setSelectedText('')
+    setSelectionCapture(null)
     setHighlightRects([])
     setTranslation('')
     setTranslationStatus('idle')
@@ -1484,7 +1729,7 @@ function App() {
                     closePdfTab(tab.id)
                   }}
                 >
-                  ×
+                  <X size={13} strokeWidth={2} aria-hidden="true" />
                 </button>
               </div>
             ))}
@@ -2150,11 +2395,13 @@ function App() {
   }
 
   function closeNoteDialog() {
+    annotationInteractionSuspendedRef.current = false
     setNoteDialog(null)
     setNoteDraft({ title: '', noteText: '' })
   }
 
   function openNoteDialog(mode, note) {
+    annotationInteractionSuspendedRef.current = true
     clearNoteDialogBlockers()
 
     const draft = {
@@ -2394,16 +2641,37 @@ function App() {
     }
   }
 
+  function requestPdfHighlightWriteMode() {
+    if (pdfHighlightWritePromptRef.current?.promise) {
+      return pdfHighlightWritePromptRef.current.promise
+    }
+
+    let resolvePrompt
+    const promise = new Promise((resolve) => {
+      resolvePrompt = resolve
+    })
+
+    pdfHighlightWritePromptRef.current = { promise, resolve: resolvePrompt }
+    setPdfHighlightWritePromptOpen(true)
+    return promise
+  }
+
+  function resolvePdfHighlightWritePrompt(mode) {
+    const pendingPrompt = pdfHighlightWritePromptRef.current
+    if (!pendingPrompt) return
+
+    pdfHighlightWritePromptRef.current = null
+    setPdfHighlightWritePromptOpen(false)
+    pendingPrompt.resolve(mode)
+  }
+
   async function maybeEmbedHighlightInPdf(annotation) {
     if (!annotation || annotation.type !== 'text-highlight' || !window.electronAPI?.embedPdfHighlightAnnotation) return annotation
     if (!currentDocument?.filePath || currentDocument.filePath === currentDocument.fileName) return annotation
 
     let nextWriteMode = pdfHighlightWriteMode
     if (nextWriteMode === 'ask') {
-      const shouldWrite = window.confirm(
-        '是否将后续高亮写入 PDF 文件本体？写入后用其他 PDF 软件打开也能看到。建议先备份原文件。\n\n确定：写入当前 PDF，并自动创建 .paper-reader-backup.pdf 备份。\n取消：仅在 Paper Reader 内显示高亮。',
-      )
-      nextWriteMode = shouldWrite ? 'write' : 'internal'
+      nextWriteMode = await requestPdfHighlightWriteMode()
       setPdfHighlightWriteMode(nextWriteMode)
     }
 
@@ -2491,12 +2759,11 @@ function App() {
     setPageJumpInput(String(nextPage))
   }
 
-  function getActiveHighlight() {
-    return documentAnnotations.find((item) => item.id === activeAnnotationId && item.type === 'text-highlight')
-  }
-
-  async function translateActiveHighlight() {
-    const highlight = getActiveHighlight()
+  async function translateHighlightFromContextMenu() {
+    const highlight = documentAnnotations.find(
+      (item) => item.id === highlightContextMenu?.highlightId && item.type === 'text-highlight',
+    )
+    setHighlightContextMenu(null)
 
     if (!highlight?.selectedText) {
       setAnnotationStatus('请先选择需要批注的文字')
@@ -2506,11 +2773,18 @@ function App() {
     setAnnotationStatus('翻译中...')
 
     try {
-      const nextTranslation = await requestTranslation(highlight.selectedText)
+      const sourceText = cleanOcrSourceForTranslation(highlight.selectedText)
+      const inlineFormulas = getInlineFormulaMetadataFromText(sourceText, 'highlight-text')
+      const preserveOriginal =
+        isScientificExpressionOnly(sourceText) ||
+        isDenseFormulaOrSymbolText(sourceText)
+      const nextTranslation = preserveOriginal
+        ? sourceText
+        : await translateOcrBlockText(sourceText, inlineFormulas)
       const nextResult = {
         type: 'text-selection',
         title: '批注翻译结果',
-        selectedText: highlight.selectedText,
+        selectedText: sourceText,
         translation: nextTranslation,
         pageNumber: highlight.pageNumber,
         timestamp: Date.now(),
@@ -2523,17 +2797,6 @@ function App() {
     } catch (error) {
       setAnnotationStatus(error.message || UI.translateError)
     }
-  }
-
-  function addNoteForActiveHighlight() {
-    const highlight = getActiveHighlight()
-
-    if (!highlight) {
-      setAnnotationStatus('请先选择需要批注的文字')
-      return
-    }
-
-    openAnnotationNoteDialog(highlight)
   }
 
   function openNoteById(noteId) {
@@ -2550,6 +2813,9 @@ function App() {
   }
 
   function handleAnnotationClick(annotation) {
+    selectionInteractionVersionRef.current += 1
+    releasePdfTextSelection()
+    setIsAnnotationToolbarOpen(false)
     setActiveAnnotationId(annotation.id)
 
     if (annotation.noteId && openNoteById(annotation.noteId)) return
@@ -2566,7 +2832,7 @@ function App() {
     if (annotation?.type !== 'text-highlight') return
 
     const menuWidth = 132
-    const menuHeight = 46
+    const menuHeight = 80
 
     setActiveAnnotationId(annotation.id)
     setHighlightContextMenu({
@@ -2630,7 +2896,10 @@ function App() {
 
   function formatImportExportSummary(summary) {
     if (!summary) return ''
-    return `导入 ${summary.documents || 0} 篇文献，翻译历史 ${summary.translationHistory || 0} 条，笔记 ${summary.notes || 0} 条，批注 ${summary.annotations || 0} 条，书签 ${summary.bookmarks || 0} 条，跳过重复 ${summary.skipped || 0} 条`
+    const recordCount = (summary.translationHistory || 0) + (summary.notes || 0) +
+      (summary.annotations || 0) + (summary.bookmarks || 0)
+    const folderLine = summary.restoredStates ? `\n恢复文件夹 ${summary.folders || 0}` : ''
+    return `导入完成\n新增文献 ${summary.addedLiteratures ?? summary.documents ?? 0}\n合并文献 ${summary.mergedLiteratures || 0}\n新增记录 ${recordCount}${folderLine}`
   }
 
   async function refreshCurrentDocumentData() {
@@ -2655,10 +2924,29 @@ function App() {
   }
 
   const updateLibraryState = useCallback((library) => {
-    setLibraryFolders(Array.isArray(library?.folders) ? library.folders : [])
-    setLibraryDocuments(Array.isArray(library?.documents) ? library.documents : [])
+    const nextFolders = Array.isArray(library?.folders) ? library.folders : []
+    const nextDocuments = Array.isArray(library?.documents) ? library.documents : []
+    const nextLiteratures = Array.isArray(library?.literatures) ? library.literatures : nextDocuments
+    const nextRecycledDocuments = Array.isArray(library?.recycledDocuments)
+      ? library.recycledDocuments
+      : nextLiteratures.filter((document) => document.status === 'recycled')
+
+    setLibraryFolders(nextFolders)
+    setLibraryDocuments(nextDocuments)
+    setLibraryLiteratures(nextLiteratures)
+    setRecycledLibraryDocuments(nextRecycledDocuments)
     setSelectedLibraryDocumentIds((currentIds) => (
-      currentIds.filter((id) => library?.documents?.some?.((document) => document.documentId === id))
+      currentIds.filter((id) => nextDocuments.some((document) => document.documentId === id))
+    ))
+    setSelectedLibraryFolderId((currentFolderId) => (
+      currentFolderId === 'all' ||
+      currentFolderId === 'unfiled' ||
+      nextFolders.some((folder) => folder.id === currentFolderId)
+        ? currentFolderId
+        : 'all'
+    ))
+    setHistorySelectedRecycleIds((currentIds) => (
+      currentIds.filter((id) => nextRecycledDocuments.some((document) => document.documentId === id))
     ))
   }, [])
 
@@ -2799,8 +3087,7 @@ function App() {
       setExportableDocuments(nextDocuments)
       setExportDefaultDir(defaultDir || '')
       setSelectedExportDocumentIds((currentIds) => currentIds.filter((id) => nextDocuments.some((document) => document.documentId === id)))
-      setSelectedMarkdownDocumentIds((currentIds) => currentIds.filter((id) => nextDocuments.some((document) => document.documentId === id)))
-      setSelectedPdfReportDocumentIds((currentIds) => currentIds.filter((id) => nextDocuments.some((document) => document.documentId === id)))
+      setSelectedFileExportDocumentIds((currentIds) => currentIds.filter((id) => nextDocuments.some((document) => document.documentId === id)))
       setSelectedExportDetailDocumentId((currentId) => (
         nextDocuments.some((document) => document.documentId === currentId)
           ? currentId
@@ -2837,10 +3124,11 @@ function App() {
 
   async function batchImportPaperReaderData() {
     setExportStatus('')
+    setExportFailures([])
     try {
       const result = await window.electronAPI.batchImportPaperReaderData()
       if (!result?.canceled) {
-        await Promise.all([loadExportSettingsData(), refreshCurrentDocumentData()])
+        await Promise.all([loadExportSettingsData(), refreshCurrentDocumentData(), refreshLibrary()])
         setExportStatus(formatImportExportSummary(result.summary))
       }
     } catch (error) {
@@ -2848,8 +3136,11 @@ function App() {
     }
   }
 
-  async function batchExportPaperReaderData() {
-    if (!selectedExportDocumentIds.length) {
+  async function backupPaperReaderData(scope = 'selected') {
+    const documentIds = scope === 'full'
+      ? exportableDocuments.map((document) => document.documentId)
+      : selectedExportDocumentIds
+    if (!documentIds.length) {
       setExportStatus('请先选择要导出的文献')
       return
     }
@@ -2857,21 +3148,22 @@ function App() {
     setExportStatus('')
     try {
       const result = await window.electronAPI.batchExportPaperReaderData({
-        documentIds: selectedExportDocumentIds,
-        exportType: batchDataExportType,
-        exportMode: batchExportMode,
-        userExportName: batchExportMode === 'merged' ? batchExportName : '',
+        documentIds,
+        exportType: 'full',
+        exportMode: 'merged',
+        userExportName: batchExportNameRef.current.trim() || (scope === 'full' ? 'Paper Reader 完整备份' : 'Paper Reader 文献备份'),
+        includeAppState: true,
       })
       if (!result?.canceled) {
-        setExportStatus(result.outputDir ? `已导出到：${result.outputDir}` : `已导出：${result.filePath}`)
+        setExportStatus(`备份完成\n文献 ${documentIds.length}\n${result.filePath}`)
       }
     } catch (error) {
-      setExportStatus(error.message || '批量导出失败')
+      setExportStatus(error.message || '备份失败')
     }
   }
 
   async function collectMarkdownExportItems(documentIds, featureName = 'Markdown 导出') {
-    if (!window.electronAPI?.getDocumentTranslationHistory || !window.electronAPI?.getDocumentAnnotations || !window.electronAPI?.getDocumentNotes) {
+    if (!window.electronAPI?.getDocumentTranslationHistory || !window.electronAPI?.getDocumentAnnotations || !window.electronAPI?.getDocumentNotes || !window.electronAPI?.getDocumentBookmarks) {
       throw new Error(`${featureName}仅在桌面版可用`)
     }
 
@@ -2880,250 +3172,40 @@ function App() {
 
     return Promise.all(uniqueDocumentIds.map(async (documentId) => {
       const pdf = documentsById.get(documentId) || (currentDocument?.documentId === documentId ? currentDocument : { documentId })
-      const [histories, annotations, notes] = await Promise.all([
+      const [histories, annotations, notes, bookmarks] = await Promise.all([
         window.electronAPI.getDocumentTranslationHistory(documentId),
         window.electronAPI.getDocumentAnnotations(documentId),
         window.electronAPI.getDocumentNotes(documentId),
+        window.electronAPI.getDocumentBookmarks(documentId),
       ])
 
       return {
-        pdf,
+        pdf: {
+          ...pdf,
+          folderPath: getFileExportRelativePath(pdf),
+        },
         histories: Array.isArray(histories) ? histories : [],
         annotations: Array.isArray(annotations) ? annotations : [],
         notes: Array.isArray(notes) ? notes : [],
+        bookmarks: Array.isArray(bookmarks) ? bookmarks : [],
       }
     }))
   }
 
   function hasSelectedContentExportOption(options) {
-    return Boolean(options?.exportHistories || options?.exportAnnotations || options?.exportNotes)
-  }
-
-  function assertContentExportSelection(options) {
-    if (!hasSelectedContentExportOption(options)) {
-      throw new Error('请至少选择一项导出内容')
-    }
-  }
-
-  function toggleContentExportOption(setter, key) {
-    setter((currentOptions) => ({
-      ...currentOptions,
-      [key]: !currentOptions[key],
-    }))
-  }
-
-  async function exportCurrentPdfMarkdown() {
-    if (!currentDocument?.documentId) {
-      setExportStatus('请先打开 PDF')
-      return
-    }
-    if (!window.electronAPI?.saveMarkdownFile) {
-      setExportStatus('Markdown 导出仅在桌面版可用')
-      return
-    }
-
-    setIsMarkdownExporting(true)
-    setExportStatus('')
-    try {
-      assertContentExportSelection(markdownExportOptions)
-      const [item] = await collectMarkdownExportItems([currentDocument.documentId])
-      const result = await window.electronAPI.saveMarkdownFile({
-        markdown: buildPdfMarkdown(item, markdownExportOptions),
-        defaultFileName: makeSafeMarkdownFileName(getPdfDisplayName(item.pdf)),
-      })
-      if (!result?.canceled) {
-        setExportStatus(`已导出 Markdown：${result.filePath}`)
-      }
-    } catch (error) {
-      setExportStatus(error.message || '导出 Markdown 失败')
-    } finally {
-      setIsMarkdownExporting(false)
-    }
-  }
-
-  async function exportMergedMarkdown() {
-    if (!selectedMarkdownDocumentIds.length) {
-      setExportStatus('请先选择要导出的文献')
-      return
-    }
-    if (!window.electronAPI?.saveMarkdownFile) {
-      setExportStatus('Markdown 导出仅在桌面版可用')
-      return
-    }
-
-    setIsMarkdownExporting(true)
-    setExportStatus('')
-    try {
-      assertContentExportSelection(markdownExportOptions)
-      const items = await collectMarkdownExportItems(selectedMarkdownDocumentIds)
-      const result = await window.electronAPI.saveMarkdownFile({
-        markdown: buildBatchPdfMarkdown(items, markdownExportOptions),
-        defaultFileName: makeSafeMarkdownFileName(`Markdown合集_${items.length}篇文献`),
-      })
-      if (!result?.canceled) {
-        setExportStatus(`已合并导出 Markdown：${result.filePath}`)
-      }
-    } catch (error) {
-      setExportStatus(error.message || '合并导出 Markdown 失败')
-    } finally {
-      setIsMarkdownExporting(false)
-    }
-  }
-
-  async function exportBatchMarkdownFiles() {
-    if (!selectedMarkdownDocumentIds.length) {
-      setExportStatus('请先选择要导出的文献')
-      return
-    }
-    if (!window.electronAPI?.saveMarkdownBatchFiles) {
-      setExportStatus('Markdown 导出仅在桌面版可用')
-      return
-    }
-
-    setIsMarkdownExporting(true)
-    setExportStatus('')
-    try {
-      assertContentExportSelection(markdownExportOptions)
-      const items = await collectMarkdownExportItems(selectedMarkdownDocumentIds)
-      const result = await window.electronAPI.saveMarkdownBatchFiles({
-        files: items.map((item) => ({
-          fileName: makeSafeMarkdownFileName(getPdfDisplayName(item.pdf)),
-          markdown: buildPdfMarkdown(item, markdownExportOptions),
-        })),
-      })
-      if (!result?.canceled) {
-        setExportStatus(`已批量导出 ${result.filePaths?.length || 0} 个 Markdown 文件到：${result.outputDir}`)
-      }
-    } catch (error) {
-      setExportStatus(error.message || '批量导出 Markdown 失败')
-    } finally {
-      setIsMarkdownExporting(false)
-    }
-  }
-
-  function formatPdfReportErrors(errors = []) {
-    return errors
-      .map((item) => `${item.fileName || '未命名文件'}：${item.error || '未知错误'}`)
-      .join('；')
-  }
-
-  function showPdfReportError(message) {
-    const text = message || '导出 PDF 报告失败'
-    setExportStatus(text)
-    if (typeof window !== 'undefined' && typeof window.alert === 'function') {
-      window.alert(`导出 PDF 失败：${text}`)
-    }
+    return Boolean(
+      options?.exportNotes ||
+      options?.exportHistories ||
+      options?.exportHighlights ||
+      options?.exportAnnotations ||
+      options?.exportBookmarks,
+    )
   }
 
   function assertPdfReportHtml(html) {
     const safeHtml = String(html || '').trim()
     if (!safeHtml) throw new Error('没有可导出的 PDF HTML 内容')
     return safeHtml
-  }
-
-  async function exportCurrentPdfReport() {
-    if (!currentDocument?.documentId) {
-      setExportStatus('请先打开 PDF')
-      return
-    }
-    if (!window.electronAPI?.savePdfReport) {
-      setExportStatus('PDF 报告导出仅在桌面版可用')
-      return
-    }
-
-    setIsPdfReportExporting(true)
-    setExportStatus('')
-    try {
-      assertContentExportSelection(pdfReportExportOptions)
-      const [item] = await collectMarkdownExportItems([currentDocument.documentId], 'PDF 报告导出')
-      const html = assertPdfReportHtml(buildPdfReportHtml(item, pdfReportExportOptions))
-      const result = await window.electronAPI.savePdfReport({
-        html,
-        defaultFileName: makeSafePdfReportFileName(getPdfDisplayName(item.pdf)),
-      })
-
-      if (result?.error) {
-        showPdfReportError(result.error)
-      } else if (!result?.canceled) {
-        setExportStatus(`已导出 PDF 报告：${result.filePath}`)
-      }
-    } catch (error) {
-      showPdfReportError(error.message || '导出 PDF 报告失败')
-    } finally {
-      setIsPdfReportExporting(false)
-    }
-  }
-
-  async function exportMergedPdfReport() {
-    if (!selectedPdfReportDocumentIds.length) {
-      setExportStatus('请先选择要导出的文献')
-      return
-    }
-    if (!window.electronAPI?.savePdfReport) {
-      setExportStatus('PDF 报告导出仅在桌面版可用')
-      return
-    }
-
-    setIsPdfReportExporting(true)
-    setExportStatus('')
-    try {
-      assertContentExportSelection(pdfReportExportOptions)
-      const items = await collectMarkdownExportItems(selectedPdfReportDocumentIds, 'PDF 报告导出')
-      const html = assertPdfReportHtml(buildBatchPdfReportHtml(items, pdfReportExportOptions))
-      const result = await window.electronAPI.savePdfReport({
-        html,
-        defaultFileName: makeSafePdfReportFileName(`PDF报告合集_${items.length}篇文献`),
-      })
-
-      if (result?.error) {
-        showPdfReportError(result.error)
-      } else if (!result?.canceled) {
-        setExportStatus(`已合并导出 PDF 报告：${result.filePath}`)
-      }
-    } catch (error) {
-      showPdfReportError(error.message || '合并导出 PDF 报告失败')
-    } finally {
-      setIsPdfReportExporting(false)
-    }
-  }
-
-  async function exportBatchPdfReports() {
-    if (!selectedPdfReportDocumentIds.length) {
-      setExportStatus('请先选择要导出的文献')
-      return
-    }
-    if (!window.electronAPI?.saveBatchPdfReports) {
-      setExportStatus('PDF 报告导出仅在桌面版可用')
-      return
-    }
-
-    setIsPdfReportExporting(true)
-    setExportStatus('')
-    try {
-      assertContentExportSelection(pdfReportExportOptions)
-      const items = await collectMarkdownExportItems(selectedPdfReportDocumentIds, 'PDF 报告导出')
-      const result = await window.electronAPI.saveBatchPdfReports({
-        files: items.map((item) => ({
-          fileName: makeSafePdfReportFileName(getPdfDisplayName(item.pdf)),
-          html: assertPdfReportHtml(buildPdfReportHtml(item, pdfReportExportOptions)),
-        })),
-      })
-
-      if (result?.error || result?.errors?.length) {
-        const detail = formatPdfReportErrors(result.errors || [])
-        const exportedCount = result.filePaths?.length || 0
-        const message = detail
-          ? `已导出 ${exportedCount} 个，失败 ${result.errors.length} 个：${detail}`
-          : result.error
-        showPdfReportError(message)
-      } else if (!result?.canceled) {
-        setExportStatus(`已批量导出 ${result.filePaths?.length || 0} 个 PDF 报告到：${result.outputDir}`)
-      }
-    } catch (error) {
-      showPdfReportError(error.message || '批量导出 PDF 报告失败')
-    } finally {
-      setIsPdfReportExporting(false)
-    }
   }
 
   function toggleExportDocument(documentId) {
@@ -3135,28 +3217,62 @@ function App() {
     )
   }
 
-  function toggleMarkdownDocument(documentId) {
-    setSelectedExportDetailDocumentId(documentId)
-    setSelectedMarkdownDocumentIds((currentIds) =>
-      currentIds.includes(documentId)
-        ? currentIds.filter((id) => id !== documentId)
-        : [...currentIds, documentId],
-    )
-  }
-
-  function togglePdfReportDocument(documentId) {
-    setSelectedExportDetailDocumentId(documentId)
-    setSelectedPdfReportDocumentIds((currentIds) =>
-      currentIds.includes(documentId)
-        ? currentIds.filter((id) => id !== documentId)
-        : [...currentIds, documentId],
-    )
-  }
-
   useEffect(() => {
     settingsFormRef.current = { ...settingsForm, rightPanelWidth }
     rightPanelWidthRef.current = rightPanelWidth
   }, [settingsForm, rightPanelWidth])
+
+  useEffect(() => {
+    let blurFrameId = null
+
+    function handleTextEntryPointerDown(event) {
+      const textEntry = getTextEntryElement(event.target)
+      if (!textEntry) return
+
+      // Keep the native pointer sequence intact so Chromium can focus the
+      // field normally. State updates here can re-render between pointerdown
+      // and mouseup and intermittently discard the user's click.
+      suspendPdfTextSelection()
+    }
+
+    function handleTextEntryFocusIn(event) {
+      if (!getTextEntryElement(event.target)) return
+
+      annotationInteractionSuspendedRef.current = true
+    }
+
+    function handleWindowBlur() {
+      if (blurFrameId) cancelAnimationFrame(blurFrameId)
+      blurFrameId = requestAnimationFrame(() => {
+        blurFrameId = null
+
+        // Chromium can briefly report BODY as the active element while a
+        // mouse click transfers focus into a text field. Cleaning React state
+        // during that gap breaks the native mousedown/mouseup focus sequence.
+        if (document.hasFocus() || getTextEntryElement(document.activeElement)) {
+          annotationInteractionSuspendedRef.current = Boolean(
+            getTextEntryElement(document.activeElement),
+          )
+          return
+        }
+
+        cancelTransientPointerInteractions()
+      })
+    }
+
+    document.addEventListener('pointerdown', handleTextEntryPointerDown, true)
+    document.addEventListener('focusin', handleTextEntryFocusIn, true)
+    document.addEventListener('pointercancel', cancelTransientPointerInteractions)
+    window.addEventListener('blur', handleWindowBlur)
+
+    return () => {
+      if (blurFrameId) cancelAnimationFrame(blurFrameId)
+      document.removeEventListener('pointerdown', handleTextEntryPointerDown, true)
+      document.removeEventListener('focusin', handleTextEntryFocusIn, true)
+      document.removeEventListener('pointercancel', cancelTransientPointerInteractions)
+      window.removeEventListener('blur', handleWindowBlur)
+    }
+  }, [cancelTransientPointerInteractions, suspendPdfTextSelection])
 
   useEffect(() => {
     if (settingsTab === 'importExport') {
@@ -3505,6 +3621,26 @@ function App() {
   }, [libraryContextMenu])
 
   useEffect(() => {
+    if (!libraryFolderContextMenu) return
+
+    function closeLibraryFolderContextMenu() {
+      setLibraryFolderContextMenu(null)
+    }
+
+    function handleLibraryFolderMenuKeyDown(event) {
+      if (event.key === 'Escape') closeLibraryFolderContextMenu()
+    }
+
+    document.addEventListener('pointerdown', closeLibraryFolderContextMenu)
+    document.addEventListener('keydown', handleLibraryFolderMenuKeyDown)
+
+    return () => {
+      document.removeEventListener('pointerdown', closeLibraryFolderContextMenu)
+      document.removeEventListener('keydown', handleLibraryFolderMenuKeyDown)
+    }
+  }, [libraryFolderContextMenu])
+
+  useEffect(() => {
     if (!libraryMoveDialog) return
 
     function closeMoveDialog() {
@@ -3517,6 +3653,26 @@ function App() {
       document.removeEventListener('pointerdown', closeMoveDialog)
     }
   }, [libraryMoveDialog])
+
+  useEffect(() => {
+    if (!libraryFolderMoveDialog) return
+
+    function closeFolderMoveDialog() {
+      setLibraryFolderMoveDialog(null)
+    }
+
+    function handleFolderMoveDialogKeyDown(event) {
+      if (event.key === 'Escape') closeFolderMoveDialog()
+    }
+
+    document.addEventListener('pointerdown', closeFolderMoveDialog)
+    document.addEventListener('keydown', handleFolderMoveDialogKeyDown)
+
+    return () => {
+      document.removeEventListener('pointerdown', closeFolderMoveDialog)
+      document.removeEventListener('keydown', handleFolderMoveDialogKeyDown)
+    }
+  }, [libraryFolderMoveDialog])
 
   useEffect(() => {
     if (!libraryFolderDialogOpen) return
@@ -3589,61 +3745,6 @@ function App() {
       setHighlightContextMenu(null)
     }
   }, [isAnnotationToolbarOpen])
-
-  useEffect(() => {
-    if (!noteDialog) return undefined
-
-    const focusTimer = window.setTimeout(() => {
-      const targetInput = noteTitleInputRef.current || noteTextareaRef.current
-
-      targetInput?.focus({ preventScroll: true })
-
-      if (import.meta.env.DEV) {
-        const inspectedFields = [noteTitleInputRef.current, noteTextareaRef.current].filter(Boolean)
-
-        for (const field of inspectedFields) {
-          const rect = field.getBoundingClientRect()
-          const centerX = rect.left + rect.width / 2
-          const centerY = rect.top + rect.height / 2
-          const topElement = document.elementFromPoint(centerX, centerY)
-
-          console.log('[PaperReader] note dialog focus debug', {
-            field: field.tagName,
-            fieldClassName: field.className,
-            activeElement: document.activeElement?.tagName,
-            topElement: topElement?.tagName,
-            topElementClassName: topElement?.className,
-            isFieldReachable: topElement === field || field.contains(topElement),
-            bodyClassName: document.body.className,
-            states: {
-              isFullscreen,
-              isOcrMode,
-              isOcrDragging,
-              isResizingPanel,
-              isAnnotationToolbarOpen,
-              hasHighlightContextMenu: Boolean(highlightContextMenu),
-              hasImagePreview: Boolean(imagePreview),
-              hasDiagramResult: Boolean(diagramResult),
-              hasCompareResult: Boolean(compareResult),
-            },
-          })
-        }
-      }
-    }, 50)
-
-    return () => window.clearTimeout(focusTimer)
-  }, [
-    compareResult,
-    diagramResult,
-    highlightContextMenu,
-    imagePreview,
-    isAnnotationToolbarOpen,
-    isFullscreen,
-    isOcrDragging,
-    isOcrMode,
-    isResizingPanel,
-    noteDialog,
-  ])
 
   useEffect(() => {
     if (!bookmarkDialogOpen) return undefined
@@ -4007,9 +4108,16 @@ function App() {
       return flooredWidth
     }
 
-    function updatePageWidth(containerWidth, containerHeight) {
-      const roundedContainerWidth = Math.floor(containerWidth)
-      const roundedContainerHeight = Math.floor(containerHeight)
+    function updatePageWidth() {
+      const viewer = pdfViewerRef.current
+      if (!viewer) return
+
+      // Use the border-box as the resize key. A page near the viewport edge can
+      // add or remove a scrollbar, which changes clientWidth without changing
+      // the reader's actual layout. Treating that as a resize creates a loop:
+      // page width -> scrollbar -> clientWidth -> page width.
+      const roundedContainerWidth = Math.floor(viewer.offsetWidth)
+      const roundedContainerHeight = Math.floor(viewer.offsetHeight)
       const lastViewerSize = lastViewerSizeRef.current
 
       if (
@@ -4025,8 +4133,8 @@ function App() {
       }
 
       const sideSpace = isFullscreen ? 24 : 28
-      const availableWidth = Math.max(160, roundedContainerWidth - sideSpace)
-      const availableHeight = Math.max(160, roundedContainerHeight - sideSpace)
+      const availableWidth = Math.max(160, Math.floor(viewer.clientWidth) - sideSpace)
+      const availableHeight = Math.max(160, Math.floor(viewer.clientHeight) - sideSpace)
       const widthByHeight = availableHeight * pageRatio
       const basePageWidth = isFullscreen
         ? Math.min(availableWidth, widthByHeight, 1200)
@@ -4046,19 +4154,10 @@ function App() {
     const pdfViewer = pdfViewerRef.current
 
     syncPageWidthRef.current = () => {
-      if (!pdfViewerRef.current) return
-
-      updatePageWidth(pdfViewerRef.current.clientWidth, pdfViewerRef.current.clientHeight)
+      updatePageWidth()
     }
 
-    const resizeObserver = new ResizeObserver((entries) => {
-      const entry = entries[0]
-
-      if (!entry) return
-
-      const nextWidth = Math.floor(entry.contentRect.width)
-      const nextHeight = Math.floor(entry.contentRect.height)
-
+    const resizeObserver = new ResizeObserver(() => {
       if (animationFrameId) {
         cancelAnimationFrame(animationFrameId)
       }
@@ -4068,13 +4167,13 @@ function App() {
           return
         }
 
-        updatePageWidth(nextWidth, nextHeight)
+        updatePageWidth()
       })
     })
 
     resizeObserver.observe(pdfViewer)
     animationFrameId = requestAnimationFrame(() => {
-      updatePageWidth(pdfViewer.clientWidth, pdfViewer.clientHeight)
+      updatePageWidth()
     })
 
     return () => {
@@ -4085,6 +4184,22 @@ function App() {
       resizeObserver.disconnect()
     }
   }, [isFullscreen, pageRatio, pdfUrl, zoomPercent])
+
+  useEffect(() => {
+    if (!pdfUrl) return undefined
+
+    let secondFrameId = null
+    const firstFrameId = requestAnimationFrame(() => {
+      secondFrameId = requestAnimationFrame(() => {
+        syncPageWidthRef.current?.()
+      })
+    })
+
+    return () => {
+      cancelAnimationFrame(firstFrameId)
+      if (secondFrameId) cancelAnimationFrame(secondFrameId)
+    }
+  }, [isFullscreen, pdfUrl, toolbarCollapsed])
 
   useEffect(() => {
     const pdfViewer = pdfViewerRef.current
@@ -4285,6 +4400,87 @@ function App() {
     return data
   }, [])
 
+  useEffect(() => {
+    const provider = normalizeProviderKey(settingsForm.provider)
+    const baseUrl = String(settingsForm.baseUrl || '').trim()
+    const apiKey = String(settingsForm.apiKey || '').trim()
+    const currentRequestId = modelListRequestIdRef.current + 1
+    modelListRequestIdRef.current = currentRequestId
+
+    setAvailableModels([])
+    setModelListError('')
+
+    if (!baseUrl || !apiKey) {
+      setModelListStatus('idle')
+      return undefined
+    }
+
+    setModelListStatus('loading')
+
+    const timeoutId = window.setTimeout(async () => {
+      try {
+        const payload = {
+          config: {
+            provider,
+            baseUrl,
+            apiKey,
+          },
+        }
+        const data = window.electronAPI?.listAiModels
+          ? await window.electronAPI.listAiModels(payload)
+          : await requestBackendJson('/ai/models', payload)
+
+        if (modelListRequestIdRef.current !== currentRequestId) return
+
+        const modelsById = new Map()
+        ;(Array.isArray(data.models) ? data.models : []).forEach((rawModel) => {
+          const model = typeof rawModel === 'string' ? { id: rawModel } : rawModel
+          const id = String(model?.id || '').trim()
+          if (!id || modelsById.has(id)) return
+          modelsById.set(id, {
+            id,
+            name: String(model?.name || '').trim(),
+            inputModalities: Array.isArray(model?.inputModalities)
+              ? model.inputModalities.map(String)
+              : [],
+            supportsMultimodal:
+              typeof model?.supportsMultimodal === 'boolean'
+                ? model.supportsMultimodal
+                : null,
+          })
+        })
+
+        const nextModels = Array.from(modelsById.values())
+        setAvailableModels(nextModels)
+        setSettingsForm((currentSettings) => {
+          const currentModel = nextModels.find((model) => model.id === currentSettings.model)
+          if (!currentModel || typeof currentModel.supportsMultimodal !== 'boolean') {
+            return currentSettings
+          }
+          return {
+            ...currentSettings,
+            modelSupportsMultimodal: currentModel.supportsMultimodal,
+          }
+        })
+        setModelListStatus('success')
+      } catch (error) {
+        if (modelListRequestIdRef.current !== currentRequestId) return
+        setAvailableModels([])
+        setModelListStatus('error')
+        setModelListError(error.message || '获取模型列表失败')
+      }
+    }, 700)
+
+    return () => {
+      window.clearTimeout(timeoutId)
+    }
+  }, [
+    requestBackendJson,
+    settingsForm.apiKey,
+    settingsForm.baseUrl,
+    settingsForm.provider,
+  ])
+
   const requestTranslation = useCallback(async (text) => {
     const payload = { text }
     const data = window.electronAPI?.translateText
@@ -4317,7 +4513,8 @@ function App() {
       setTranslationStatus('loading')
 
       try {
-        const nextTranslation = await requestTranslation(text)
+        const preparedResult = await prepareSelectionTranslationRef.current(text, selectionCapture)
+        const nextTranslation = cleanResultText(preparedResult.translation)
 
         if (currentRequestId !== requestIdRef.current) return
 
@@ -4327,8 +4524,10 @@ function App() {
         setSuccessfulRightPanelResult({
           type: 'text-selection',
           title: '翻译结果',
-          selectedText: text,
+          selectedText: preparedResult.sourceText,
           translation: nextTranslation,
+          inlineFormulas: preparedResult.inlineFormulas,
+          preserveOriginalFormula: preparedResult.preserveOriginal,
           timestamp: Date.now(),
         })
       } catch (error) {
@@ -4340,7 +4539,7 @@ function App() {
     }, 300)
 
     return () => clearTimeout(timerId)
-  }, [selectedText, setSuccessfulRightPanelResult, requestTranslation])
+  }, [selectedText, selectionCapture, setSuccessfulRightPanelResult])
 
   function applyOpenedPdf(pdfFile, restoreRecord = null) {
     if (!pdfFile?.dataUrl && !pdfFile?.url) return
@@ -4515,6 +4714,49 @@ function App() {
   function getLibraryFolderName(folderId) {
     if (!folderId) return '未分类'
     return libraryFolders.find((folder) => folder.id === folderId)?.name || '未分类'
+  }
+
+  function getLibraryFolderChildren(parentId = null) {
+    return libraryFolders
+      .filter((folder) => (folder.parentId || null) === (parentId || null))
+      .sort((first, second) => (first.order || 0) - (second.order || 0) || first.name.localeCompare(second.name))
+  }
+
+  function getLibraryDescendantFolderIds(folderId) {
+    const ids = new Set(folderId ? [folderId] : [])
+    let changed = true
+    while (changed) {
+      changed = false
+      libraryFolders.forEach((folder) => {
+        if (folder.parentId && ids.has(folder.parentId) && !ids.has(folder.id)) {
+          ids.add(folder.id)
+          changed = true
+        }
+      })
+    }
+    return ids
+  }
+
+  function getLibraryFolderDocumentCount(folderId, includeDescendants = true) {
+    const folderIds = includeDescendants ? getLibraryDescendantFolderIds(folderId) : new Set([folderId])
+    return libraryDocuments.filter((document) => folderIds.has(document.folderId)).length
+  }
+
+  function getLibraryFolderRecordCount(folderId, includeDescendants = true) {
+    const folderIds = includeDescendants ? getLibraryDescendantFolderIds(folderId) : new Set([folderId])
+    return libraryDocuments
+      .filter((document) => folderIds.has(document.folderId))
+      .reduce((total, document) => total + (document.recordCount || 0), 0)
+  }
+
+  function getHistoryLibraryDocuments() {
+    if (historyLibraryNodeId === 'recycle') return recycledLibraryDocuments
+    if (historyLibraryNodeId === 'all') return libraryDocuments
+    if (historyLibraryNodeId === 'unfiled') return libraryDocuments.filter((document) => !document.folderId)
+    const folderIds = historyIncludeDescendants
+      ? getLibraryDescendantFolderIds(historyLibraryNodeId)
+      : new Set([historyLibraryNodeId])
+    return libraryDocuments.filter((document) => folderIds.has(document.folderId))
   }
 
   function getLibraryProgress(document) {
@@ -5013,14 +5255,19 @@ function App() {
     }
   }
 
-  function openLibraryFolderDialog() {
-    setLibraryFolderNameDraft('')
+  function openLibraryFolderDialog(parentId = null, editingFolder = null) {
+    setLibraryStatus('')
+    setLibraryFolderParentId(editingFolder ? (editingFolder.parentId ?? null) : (parentId ?? null))
+    setLibraryFolderEditingId(editingFolder?.id || '')
+    setLibraryFolderNameDraft(editingFolder?.name || '')
     setLibraryFolderNameError('')
     setLibraryFolderDialogOpen(true)
   }
 
   function closeLibraryFolderDialog() {
     setLibraryFolderDialogOpen(false)
+    setLibraryFolderParentId(null)
+    setLibraryFolderEditingId('')
     setLibraryFolderNameDraft('')
     setLibraryFolderNameError('')
   }
@@ -5033,20 +5280,81 @@ function App() {
       return
     }
 
-    if (libraryFolders.some((folder) => folder.name.trim().toLowerCase() === name.toLowerCase())) {
+    if (libraryFolders.some((folder) => (
+      folder.id !== libraryFolderEditingId &&
+      (folder.parentId || null) === (libraryFolderParentId || null) &&
+      folder.name.trim().toLowerCase() === name.toLowerCase()
+    ))) {
       setLibraryFolderNameError('已存在同名文件夹')
       return
     }
 
     try {
-      const library = await window.electronAPI.createLibraryFolder(name)
+      const library = libraryFolderEditingId
+        ? await window.electronAPI.updateLibraryFolder(libraryFolderEditingId, { name })
+        : await window.electronAPI.createLibraryFolder({ name, parentId: libraryFolderParentId })
       updateLibraryState(library)
-      setSelectedLibraryFolderId(library.folders.at(-1)?.id || selectedLibraryFolderId)
       closeLibraryFolderDialog()
-      setLibraryStatus('文件夹已创建')
+      setLibraryStatus('')
     } catch (error) {
-      setLibraryFolderNameError(error.message || '创建文件夹失败')
+      setLibraryFolderNameError(error.message || (libraryFolderEditingId ? '重命名失败' : '创建失败'))
     }
+  }
+
+  function openLibraryFolderContextMenu(event, folder) {
+    event.preventDefault()
+    event.stopPropagation()
+    setLibraryContextMenu(null)
+    setLibraryMoveDialog(null)
+    setLibraryFolderMoveDialog(null)
+    setSelectedLibraryFolderId(folder.id)
+    setLibraryFolderContextMenu({
+      folderId: folder.id,
+      x: Math.max(8, Math.min(event.clientX + 2, window.innerWidth - 168)),
+      y: Math.max(8, Math.min(event.clientY + 2, window.innerHeight - 174)),
+    })
+  }
+
+  function createLibrarySubfolder(event, folder) {
+    event.preventDefault()
+    event.stopPropagation()
+    setLibraryFolderContextMenu(null)
+    openLibraryFolderDialog(folder.id)
+  }
+
+  function openLibraryFolderMoveDialog(folder, position) {
+    if (!folder?.id) return
+
+    setLibraryFolderContextMenu(null)
+    setLibraryFolderMoveRootExpanded(true)
+    setLibraryFolderMoveExpandedIds(new Set())
+    setLibraryFolderMoveDialog({
+      folderId: folder.id,
+      hasTarget: false,
+      targetParentId: null,
+      x: position?.x ?? Math.min(window.innerWidth - 280, Math.max(24, window.innerWidth / 2 - 132)),
+      y: position?.y ?? Math.min(window.innerHeight - 360, Math.max(72, window.innerHeight / 2 - 160)),
+    })
+  }
+
+  function toggleLibraryFolderMoveExpanded(folderId) {
+    setLibraryFolderMoveExpandedIds((currentIds) => {
+      const nextIds = new Set(currentIds)
+      if (nextIds.has(folderId)) nextIds.delete(folderId)
+      else nextIds.add(folderId)
+      return nextIds
+    })
+  }
+
+  function selectLibraryFolderMoveTarget(parentId) {
+    setLibraryFolderMoveDialog((dialog) => (
+      dialog ? { ...dialog, hasTarget: true, targetParentId: parentId } : dialog
+    ))
+  }
+
+  function confirmLibraryFolderMove() {
+    if (!libraryFolderMoveDialog?.hasTarget) return
+    void moveLibraryFolder(libraryFolderMoveDialog.folderId, libraryFolderMoveDialog.targetParentId)
   }
 
   function toggleLibraryDocumentSelection(documentId) {
@@ -5063,13 +5371,36 @@ function App() {
     if (!ids.length) return
 
     setLibraryContextMenu(null)
+    setLibraryMoveRootExpanded(true)
+    setLibraryMoveExpandedIds(new Set())
     setLibraryMoveDialog({
       documentIds: ids,
       currentFolderId,
-      targetFolderId: currentFolderId || '',
+      targetFolderId: '',
+      hasTarget: false,
       x: position?.x ?? Math.min(window.innerWidth - 260, Math.max(24, window.innerWidth / 2 - 120)),
       y: position?.y ?? Math.min(window.innerHeight - 260, Math.max(72, window.innerHeight / 2 - 120)),
     })
+  }
+
+  function toggleLibraryMoveExpanded(folderId) {
+    setLibraryMoveExpandedIds((currentIds) => {
+      const nextIds = new Set(currentIds)
+      if (nextIds.has(folderId)) nextIds.delete(folderId)
+      else nextIds.add(folderId)
+      return nextIds
+    })
+  }
+
+  function selectLibraryMoveTarget(folderId) {
+    setLibraryMoveDialog((dialog) => (
+      dialog ? { ...dialog, hasTarget: true, targetFolderId: folderId } : dialog
+    ))
+  }
+
+  function confirmLibraryDocumentMove() {
+    if (!libraryMoveDialog?.hasTarget) return
+    void moveLibraryDocuments(libraryMoveDialog.documentIds, libraryMoveDialog.targetFolderId)
   }
 
   async function moveLibraryDocuments(documentIds, folderId) {
@@ -5086,18 +5417,178 @@ function App() {
     }
   }
 
-  async function deleteLibraryDocuments(documentIds = selectedLibraryDocumentIds) {
-    if (!documentIds.length) return
-    if (!window.confirm('确定要从文献库删除选中的文献吗？不会删除 PDF 文件和已有笔记/批注。')) return
+  async function toggleLibraryFolderExpanded(folder) {
+    try {
+      const library = await window.electronAPI.updateLibraryFolder(folder.id, { expanded: folder.expanded === false })
+      updateLibraryState(library)
+      setLibraryStatus('')
+    } catch (error) {
+      setLibraryStatus(error.message || '更新文件夹失败')
+    }
+  }
+
+  async function reorderLibraryFolder(folderId, targetFolderId, placement) {
+    try {
+      const library = await window.electronAPI.reorderLibraryFolder(folderId, targetFolderId, placement)
+      updateLibraryState(library)
+      setLibraryStatus('')
+    } catch (error) {
+      setLibraryStatus(error.message || '调整文件夹顺序失败')
+    }
+  }
+
+  async function moveLibraryFolder(folderId, parentId) {
+    try {
+      const library = await window.electronAPI.moveLibraryFolder(folderId, parentId)
+      updateLibraryState(library)
+      setLibraryFolderMoveDialog(null)
+      setLibraryStatus('')
+    } catch (error) {
+      setLibraryStatus(error.message || '移动文件夹失败')
+    }
+  }
+
+  function beginLibraryFolderDrag(event, folder) {
+    if (event.target.closest('button')) {
+      event.preventDefault()
+      return
+    }
+
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', folder.id)
+    setDraggedLibraryFolderId(folder.id)
+    setLibraryFolderDropTarget(null)
+  }
+
+  function updateLibraryFolderDragTarget(event, folder) {
+    const draggedFolder = libraryFolders.find((item) => item.id === draggedLibraryFolderId)
+    if (!draggedFolder || draggedFolder.id === folder.id || draggedFolder.parentId !== folder.parentId) return
+
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
+    const bounds = event.currentTarget.getBoundingClientRect()
+    setLibraryFolderDropTarget({
+      folderId: folder.id,
+      placement: event.clientY >= bounds.top + bounds.height / 2 ? 'after' : 'before',
+    })
+  }
+
+  function endLibraryFolderDrag() {
+    setDraggedLibraryFolderId('')
+    setLibraryFolderDropTarget(null)
+  }
+
+  function dropLibraryFolder(event, folder) {
+    const target = libraryFolderDropTarget
+    const draggedFolder = libraryFolders.find((item) => item.id === draggedLibraryFolderId)
+    if (!target || target.folderId !== folder.id || !draggedFolder || draggedFolder.parentId !== folder.parentId) {
+      endLibraryFolderDrag()
+      return
+    }
+
+    event.preventDefault()
+    const { folderId, placement } = target
+    const draggedFolderId = draggedFolder.id
+    endLibraryFolderDrag()
+    void reorderLibraryFolder(draggedFolderId, folderId, placement)
+  }
+
+  async function deleteLibraryFolder(folder) {
+    if (!folder?.id) return
+
+    if (!window.electronAPI?.deleteLibraryFolder) {
+      setLibraryStatus('\u5220\u9664\u6587\u4ef6\u5939\u4ec5\u5728\u684c\u9762\u7248\u53ef\u7528')
+      return
+    }
+
+    const removedFolderIds = getLibraryDescendantFolderIds(folder.id)
+    const folderDocumentCount = getLibraryFolderDocumentCount(folder.id, true)
+    const childFolderCount = Math.max(0, removedFolderIds.size - 1)
+    const wasSelectedFolder = removedFolderIds.has(selectedLibraryFolderId)
+    const childFolderText = childFolderCount ? `及其 ${childFolderCount} 个子文件夹` : ''
+    const confirmMessage = folderDocumentCount
+      ? `确定删除项目文件夹 "${folder.name}"${childFolderText}吗？其中 ${folderDocumentCount} 篇文献会移到未分类，不会删除 PDF 文件和已有笔记/批注。`
+      : `确定删除项目文件夹 "${folder.name}"${childFolderText}吗？`
+
+    if (!window.confirm(confirmMessage)) return
 
     try {
-      const library = await window.electronAPI.deleteLibraryDocuments(documentIds)
+      const library = await window.electronAPI.deleteLibraryFolder(folder.id)
+      updateLibraryState(library)
+      if (wasSelectedFolder) setSelectedLibraryFolderId('unfiled')
+      setSelectedLibraryDocumentIds([])
+      setLibraryStatus('')
+    } catch (error) {
+      setLibraryStatus(error.message || '\u5220\u9664\u6587\u4ef6\u5939\u5931\u8d25')
+    }
+  }
+
+  function deleteLibraryDocuments(documentIds = selectedLibraryDocumentIds) {
+    if (!documentIds.length) return
+    setLibraryContextMenu(null)
+    setLibraryDeleteDialog({ documentIds: [...documentIds] })
+  }
+
+  async function renameLibraryDocument(document) {
+    const currentName = document?.displayName || document?.fileName || ''
+    const displayName = window.prompt('重命名文献', currentName)?.trim()
+    if (!displayName || displayName === currentName) return
+    try {
+      const library = await window.electronAPI.updateLibraryDocument(document.documentId, { displayName })
+      updateLibraryState(library)
+      setLibraryContextMenu(null)
+      setLibraryStatus('文献已重命名')
+      await loadExportSettingsData()
+    } catch (error) {
+      setLibraryStatus(error.message || '重命名文献失败')
+    }
+  }
+
+  async function confirmDeleteLibraryDocuments(mode) {
+    const documentIds = libraryDeleteDialog?.documentIds || []
+    if (!documentIds.length) return
+    try {
+      const library = await window.electronAPI.deleteLiterature(documentIds, mode)
       updateLibraryState(library)
       setSelectedLibraryDocumentIds([])
       setLibraryContextMenu(null)
-      setLibraryStatus('已从文献库删除')
+      setLibraryDeleteDialog(null)
+      setLibraryStatus(mode === 'permanent' ? '已删除文献及记录' : '已移入回收箱')
+      await loadExportSettingsData()
     } catch (error) {
       setLibraryStatus(error.message || '删除文献失败')
+    }
+  }
+
+  async function restoreRecycledDocuments(documentIds) {
+    try {
+      const library = await window.electronAPI.restoreLibraryDocuments(documentIds)
+      updateLibraryState(library)
+      setHistorySelectedRecycleIds([])
+      setExportStatus('已恢复')
+      await loadExportSettingsData()
+    } catch (error) {
+      setExportStatus(error.message || '恢复失败')
+    }
+  }
+
+  async function permanentlyDeleteRecycledDocuments(documentIds) {
+    if (!documentIds.length) return
+    setPermanentDeleteDialogIds([...documentIds])
+  }
+
+  async function confirmPermanentlyDeleteRecycledDocuments() {
+    const documentIds = permanentDeleteDialogIds
+    if (!documentIds.length) return
+    try {
+      const library = await window.electronAPI.permanentlyDeleteLibraryDocuments(documentIds)
+      updateLibraryState(library)
+      setHistorySelectedRecycleIds([])
+      setPermanentDeleteDialogIds([])
+      setExportStatus('已永久删除')
+      await loadExportSettingsData()
+    } catch (error) {
+      setExportStatus(error.message || '永久删除失败')
     }
   }
 
@@ -5150,15 +5641,24 @@ function App() {
 
   function normalizeSettings(config = {}) {
     const rawProvider = String(config.provider || '').trim()
-    const legacyDefaults = LEGACY_PROVIDER_DEFAULTS[rawProvider]
-    const provider = legacyDefaults?.provider || normalizeProviderKey(rawProvider)
-    const providerDefaults = legacyDefaults || PROVIDERS[provider]
+    const provider = normalizeProviderKey(rawProvider)
+    const providerDefaults = PROVIDERS[provider]
+    const providerApiKeys = normalizeProviderApiKeys(config, provider)
 
     return {
       provider,
-      apiKey: config.apiKey || config.deepseekApiKey || '',
+      apiKey: providerApiKeys[provider] || '',
+      providerApiKeys,
       baseUrl: config.baseUrl || config.deepseekBaseUrl || providerDefaults.baseUrl,
       model: config.model || config.deepseekModel || providerDefaults.model,
+      modelSupportsMultimodal:
+        typeof config.modelSupportsMultimodal === 'boolean'
+          ? config.modelSupportsMultimodal
+          : null,
+      temperatureMode: config.temperatureMode === 'custom' ? 'custom' : 'auto',
+      temperature: Number.isFinite(Number(config.temperature))
+        ? clampNumber(Number(config.temperature), 0, 2)
+        : DEFAULT_SETTINGS.temperature,
       prompt: config.prompt || DEFAULT_TRANSLATION_PROMPT,
       enableMultimodalTranslation: config.enableMultimodalTranslation === true,
       rightPanelWidth: clampNumber(
@@ -5208,7 +5708,7 @@ function App() {
 
     if (moduleName === 'importExport') {
       setSettingsTab('importExport')
-      void loadSettingsData()
+      void Promise.all([loadSettingsData(), loadExportSettingsData(), refreshLibrary()])
       return
     }
 
@@ -5224,17 +5724,59 @@ function App() {
     }))
   }
 
-  function updateSettingsProvider(provider) {
-    const nextProvider = normalizeProviderKey(provider)
+  function updateSettingsApiKey(apiKey) {
+    setSettingsForm((currentSettings) => {
+      const provider = normalizeProviderKey(currentSettings.provider)
+
+      return {
+        ...currentSettings,
+        apiKey,
+        providerApiKeys: {
+          ...currentSettings.providerApiKeys,
+          [provider]: apiKey,
+        },
+      }
+    })
+  }
+
+  function updateSettingsModel(modelId) {
+    const normalizedModelId = String(modelId || '')
+    const modelMetadata = availableModels.find((model) => model.id === normalizedModelId)
 
     setSettingsForm((currentSettings) => ({
       ...currentSettings,
-      provider: nextProvider,
-      baseUrl: PROVIDERS[nextProvider].baseUrl,
-      model: PROVIDERS[nextProvider].model,
-      enableMultimodalTranslation:
-        currentSettings.enableMultimodalTranslation && PROVIDERS[nextProvider].supportsMultimodal,
+      model: normalizedModelId,
+      modelSupportsMultimodal:
+        typeof modelMetadata?.supportsMultimodal === 'boolean'
+          ? modelMetadata.supportsMultimodal
+          : null,
     }))
+  }
+
+  function updateSettingsProvider(provider) {
+    const nextProvider = normalizeProviderKey(provider)
+
+    setSettingsForm((currentSettings) => {
+      const currentProvider = normalizeProviderKey(currentSettings.provider)
+      const providerApiKeys = {
+        ...currentSettings.providerApiKeys,
+        [currentProvider]: currentSettings.apiKey,
+      }
+
+      return {
+        ...currentSettings,
+        provider: nextProvider,
+        apiKey: providerApiKeys[nextProvider] || '',
+        providerApiKeys,
+        baseUrl: PROVIDERS[nextProvider].baseUrl,
+        model: '',
+        modelSupportsMultimodal: null,
+        temperatureMode: 'auto',
+        temperature: DEFAULT_SETTINGS.temperature,
+        enableMultimodalTranslation:
+          currentSettings.enableMultimodalTranslation && PROVIDERS[nextProvider].supportsMultimodal,
+      }
+    })
   }
 
   function resetPrompt() {
@@ -5282,13 +5824,31 @@ function App() {
       return
     }
 
+    if (settingsForm.temperatureMode === 'custom') {
+      const temperature = Number(settingsForm.temperature)
+      if (
+        String(settingsForm.temperature).trim() === '' ||
+        !Number.isFinite(temperature) ||
+        temperature < 0 ||
+        temperature > 2
+      ) {
+        setSettingsStatus('Temperature 必须是 0 到 2 之间的数字')
+        return
+      }
+    }
+
     setIsSavingSettings(true)
     setSettingsStatus('')
 
     try {
+      const provider = normalizeProviderKey(settingsForm.provider)
       const savedConfig = await window.electronAPI.saveConfig({
         ...settingsForm,
-        provider: normalizeProviderKey(settingsForm.provider),
+        provider,
+        providerApiKeys: {
+          ...settingsForm.providerApiKeys,
+          [provider]: settingsForm.apiKey,
+        },
         enableMultimodalTranslation: settingsSupportMultimodal(settingsForm),
         rightPanelWidth,
       })
@@ -5756,6 +6316,12 @@ function App() {
   }
 
   function updateSelectionHighlights() {
+    if (annotationInteractionSuspendedRef.current) {
+      setHighlightRects([])
+      setPreviewHighlight(null)
+      return
+    }
+
     const selection = window.getSelection()
 
     if (!selection || selection.isCollapsed) {
@@ -6048,6 +6614,680 @@ function App() {
     }
   }
 
+  function cropSelectionRectsImage(rects = []) {
+    const pdfViewer = pdfViewerRef.current
+    const canvas = pdfViewer?.querySelector('.react-pdf__Page canvas')
+    if (!pdfViewer || !canvas || !rects.length) return null
+
+    const viewerRect = pdfViewer.getBoundingClientRect()
+    const canvasRect = canvas.getBoundingClientRect()
+    const scaleX = canvas.width / Math.max(canvasRect.width, 1)
+    const scaleY = canvas.height / Math.max(canvasRect.height, 1)
+    const lineCrops = rects
+      .map((rect) => {
+        const paddingX = Math.max(3, rect.height * 0.3)
+        const paddingY = Math.max(3, rect.height * 0.5)
+        const viewportRect = {
+          left: viewerRect.left - pdfViewer.scrollLeft + rect.left - paddingX,
+          top: viewerRect.top - pdfViewer.scrollTop + rect.top - paddingY,
+          right: viewerRect.left - pdfViewer.scrollLeft + rect.left + rect.width + paddingX,
+          bottom: viewerRect.top - pdfViewer.scrollTop + rect.top + rect.height + paddingY,
+        }
+        const clippedRect = {
+          left: Math.max(viewportRect.left, canvasRect.left),
+          top: Math.max(viewportRect.top, canvasRect.top),
+          right: Math.min(viewportRect.right, canvasRect.right),
+          bottom: Math.min(viewportRect.bottom, canvasRect.bottom),
+        }
+        if (clippedRect.right - clippedRect.left < 4 || clippedRect.bottom - clippedRect.top < 4) {
+          return null
+        }
+
+        const sourceX = Math.max(0, Math.floor((clippedRect.left - canvasRect.left) * scaleX))
+        const sourceY = Math.max(0, Math.floor((clippedRect.top - canvasRect.top) * scaleY))
+        const sourceWidth = Math.min(
+          canvas.width - sourceX,
+          Math.max(1, Math.ceil((clippedRect.right - clippedRect.left) * scaleX)),
+        )
+        const sourceHeight = Math.min(
+          canvas.height - sourceY,
+          Math.max(1, Math.ceil((clippedRect.bottom - clippedRect.top) * scaleY)),
+        )
+
+        return { sourceX, sourceY, sourceWidth, sourceHeight }
+      })
+      .filter(Boolean)
+
+    if (!lineCrops.length) return null
+
+    const gap = 6
+    const outputCanvas = document.createElement('canvas')
+    outputCanvas.width = Math.max(...lineCrops.map((crop) => crop.sourceWidth))
+    outputCanvas.height =
+      lineCrops.reduce((height, crop) => height + crop.sourceHeight, 0) +
+      gap * Math.max(0, lineCrops.length - 1)
+    const context = outputCanvas.getContext('2d')
+    context.fillStyle = '#ffffff'
+    context.fillRect(0, 0, outputCanvas.width, outputCanvas.height)
+
+    let targetY = 0
+    lineCrops.forEach((crop) => {
+      context.drawImage(
+        canvas,
+        crop.sourceX,
+        crop.sourceY,
+        crop.sourceWidth,
+        crop.sourceHeight,
+        0,
+        targetY,
+        crop.sourceWidth,
+        crop.sourceHeight,
+      )
+      targetY += crop.sourceHeight + gap
+    })
+
+    return {
+      image: outputCanvas.toDataURL('image/png'),
+      width: outputCanvas.width,
+      height: outputCanvas.height,
+      lineCount: lineCrops.length,
+    }
+  }
+
+  function getOcrRectIntersectionArea(firstRect, secondRect) {
+    const firstRight = firstRect.x + firstRect.width
+    const firstBottom = firstRect.y + firstRect.height
+    const secondRight = secondRect.x + secondRect.width
+    const secondBottom = secondRect.y + secondRect.height
+
+    return Math.max(0, Math.min(firstRight, secondRight) - Math.max(firstRect.x, secondRect.x)) *
+      Math.max(0, Math.min(firstBottom, secondBottom) - Math.max(firstRect.y, secondRect.y))
+  }
+
+  function getPdfTextLayerOcrBlocks(croppedImage) {
+    const pdfViewer = pdfViewerRef.current
+    const canvas = pdfViewer?.querySelector('.react-pdf__Page canvas')
+    if (!pdfViewer || !canvas) return []
+
+    const canvasRect = canvas.getBoundingClientRect()
+    const pageElement = canvas.closest('.react-pdf__Page') || pdfViewer
+    const scaleX = Number(croppedImage.scaleX) || canvas.width / Math.max(canvasRect.width, 1)
+    const scaleY = Number(croppedImage.scaleY) || canvas.height / Math.max(canvasRect.height, 1)
+    const cropRect = {
+      x: Number(croppedImage.sourceX) || 0,
+      y: Number(croppedImage.sourceY) || 0,
+      width: Number(croppedImage.sourceWidth) || croppedImage.width,
+      height: Number(croppedImage.sourceHeight) || croppedImage.height,
+    }
+    const tokens = Array.from(
+      pageElement.querySelectorAll('.textLayer span, .react-pdf__Page__textContent span'),
+    )
+      .map((span) => {
+        const text = String(span.textContent || '').replace(/\s+/g, ' ').trim()
+        const hasInvalidCharacter = Array.from(text).some((character) => {
+          const characterCode = character.charCodeAt(0)
+          return (
+            character === '\ufffd' ||
+            characterCode <= 8 ||
+            characterCode === 11 ||
+            characterCode === 12 ||
+            (characterCode >= 14 && characterCode <= 31)
+          )
+        })
+        if (!text || hasInvalidCharacter) return null
+
+        const rect = span.getBoundingClientRect()
+        const tokenRectOnCanvas = {
+          x: (rect.left - canvasRect.left) * scaleX,
+          y: (rect.top - canvasRect.top) * scaleY,
+          width: rect.width * scaleX,
+          height: rect.height * scaleY,
+        }
+        const intersectionArea = getOcrRectIntersectionArea(tokenRectOnCanvas, cropRect)
+        const tokenArea = Math.max(tokenRectOnCanvas.width * tokenRectOnCanvas.height, 1)
+        if (intersectionArea / tokenArea < 0.42) return null
+
+        const style = window.getComputedStyle(span)
+        const renderedFontSize = (Number.parseFloat(style.fontSize) || rect.height) * scaleY
+        const left = tokenRectOnCanvas.x - cropRect.x
+        const top = tokenRectOnCanvas.y - cropRect.y
+
+        return {
+          text,
+          left,
+          top,
+          right: left + tokenRectOnCanvas.width,
+          bottom: top + tokenRectOnCanvas.height,
+          width: tokenRectOnCanvas.width,
+          height: Math.max(tokenRectOnCanvas.height, renderedFontSize),
+          fontSize: Math.max(1, renderedFontSize),
+        }
+      })
+      .filter(Boolean)
+
+    const blocks = []
+
+    groupTokensByLine(
+      tokens.sort((firstToken, secondToken) => firstToken.top - secondToken.top || firstToken.left - secondToken.left),
+    ).forEach((line) => {
+      const sortedTokens = line.tokens.sort((firstToken, secondToken) => firstToken.left - secondToken.left)
+      const tokenGroups = []
+
+      sortedTokens.forEach((token) => {
+        const currentGroup = tokenGroups[tokenGroups.length - 1]
+        const previousToken = currentGroup?.[currentGroup.length - 1]
+        const gap = previousToken ? token.left - previousToken.right : 0
+        const splitGap = Math.max(18, line.maxHeight * 2.1)
+
+        if (!currentGroup || (previousToken && gap > splitGap)) {
+          tokenGroups.push([token])
+        } else {
+          currentGroup.push(token)
+        }
+      })
+
+      tokenGroups.forEach((group) => {
+        const x0 = Math.min(...group.map((token) => token.left))
+        const y0 = Math.min(...group.map((token) => token.top))
+        const x1 = Math.max(...group.map((token) => token.right))
+        const y1 = Math.max(...group.map((token) => token.bottom))
+        const formattedText = renderFormattedLine(group)
+        const hasFormulaSyntax =
+          /\\[A-Za-z]+|[_^]\{|[=<>±×÷→←↔ΔμΩλπσ∑∫√∞≈≠≤≥·′°₀-₉⁰-⁹]/.test(formattedText) ||
+          /(?:[A-Za-z]\d|\d[A-Za-z])/.test(formattedText)
+        const normalizedFormula = hasFormulaSyntax ? normalizeSimpleInlineLatex(formattedText) : null
+        const text = normalizedFormula?.text || formattedText.replace(/\s+/g, ' ').trim()
+        if (!text) return
+        const x = clampNumber(x0, 0, Math.max(croppedImage.width - 1, 0))
+        const y = clampNumber(y0, 0, Math.max(croppedImage.height - 1, 0))
+
+        blocks.push({
+          index: blocks.length,
+          text,
+          sourceText: text,
+          x,
+          y,
+          width: Math.max(1, Math.min(x1 - x0, croppedImage.width - x)),
+          height: Math.max(1, Math.min(y1 - y0, croppedImage.height - y)),
+          fontSize: median(group.map((token) => token.fontSize)) || Math.max(1, y1 - y0),
+          confidence: 100,
+          nearEdge: false,
+          pdfTextLayer: true,
+          pdfTextTokens: group,
+          inlineFormulas: getInlineFormulaMetadataFromText(text, 'pdf-text-layer'),
+        })
+      })
+    })
+
+    return blocks.sort((firstBlock, secondBlock) => firstBlock.y - secondBlock.y || firstBlock.x - secondBlock.x)
+  }
+
+  function getUsefulOcrCharacterCount(text) {
+    return (String(text || '').match(/[A-Za-z0-9\u0370-\u03ff]/g) || []).length
+  }
+
+  function shouldPreferPdfTextLayer(pdfTextBlocks, tesseractText) {
+    const pdfText = pdfTextBlocks.map((block) => block.text).join(' ')
+    const pdfCharacters = getUsefulOcrCharacterCount(pdfText)
+    const tesseractCharacters = getUsefulOcrCharacterCount(tesseractText)
+
+    if (pdfCharacters < 2) return false
+    if (tesseractCharacters < 2) return true
+
+    return pdfCharacters / Math.max(pdfCharacters, tesseractCharacters) >= 0.55
+  }
+
+  function isDenseFormulaOrSymbolText(text) {
+    const normalizedText = normalizeScientificText(String(text || ''))
+    const compactText = normalizedText.replace(/\s+/g, '')
+    if (!compactText) return false
+    if (isScientificExpressionOnly(normalizedText)) return true
+
+    const normalWords = normalizedText.match(/[A-Za-z][A-Za-z'-]{2,}/g) || []
+    const formulaSymbols = normalizedText.match(/[=<>±×÷→←↔^_{}[\]ΔμΩλπσ∑∫√∞≈≠≤≥·′°₀-₉⁰-⁹]/g) || []
+    const operators = normalizedText.match(/[=<>±×÷→←↔^_+\-*/∑∫√∞≈≠≤≥·]/g) || []
+    const formulaRatio = formulaSymbols.length / Math.max(compactText.length, 1)
+
+    if (formulaSymbols.length >= 4 && formulaRatio >= 0.24 && normalWords.length < 5) return true
+    if (operators.length >= 4 && normalWords.length < 6) return true
+    if (/\\(?:begin|end|frac|dfrac|tfrac|matrix|cases|sum|prod|int|lim)\b/.test(normalizedText)) return true
+
+    return false
+  }
+
+  function hasInlineFormulaClue(word) {
+    const text = String(word?.text || '').trim()
+    if (!text) return false
+
+    const hasScientificSymbol = /[=<>±×÷→←↔^_{}[\]ΔμΩλπσ∑∫√∞≈≠≤≥·′°₀-₉⁰-⁹]/.test(text)
+    const hasMixedLetterNumber = /(?:[A-Za-z]\d|\d[A-Za-z])/.test(text)
+    const hasGarbledSymbol =
+      /[�|\\~`]/.test(text) ||
+      /[^\u0020-\u007e\u0370-\u03ff\u2070-\u209f±×÷→←↔∑∫√∞≈≠≤≥·′°]/.test(text)
+    const lowConfidenceWithNonLetter =
+      Number(word.confidence) < 55 &&
+      /[^A-Za-z.,;:'"!?()-]/.test(text)
+
+    return hasScientificSymbol || hasMixedLetterNumber || hasGarbledSymbol || lowConfidenceWithNonLetter
+  }
+
+  function getInlineFormulaMetadataFromText(text, source) {
+    return String(text || '')
+      .split(/\s+/)
+      .map((token) => token.replace(/^[,.;:!?()[\]"']+|[,.;:!?()[\]"']+$/g, ''))
+      .filter((token) => token && hasInlineFormulaClue({ text: token, confidence: 100 }))
+      .map((token) => {
+        const normalized = normalizeSimpleInlineLatex(token)
+        return normalized?.text
+          ? {
+              text: normalized.text,
+              latex: normalized.latex,
+              source,
+            }
+          : null
+      })
+      .filter(Boolean)
+      .filter((formula, index, formulas) =>
+        formulas.findIndex((candidate) => candidate.text === formula.text) === index)
+  }
+
+  function getInlineFormulaCandidates(data, imageSize) {
+    const candidates = []
+    const words = getAllOcrWords(data)
+      .map((word) => normalizeOcrWord(word, imageSize))
+      .filter(Boolean)
+
+    groupOcrWordsIntoRows(words).forEach((row) => {
+      const sortedWords = row.words.slice().sort((firstWord, secondWord) => firstWord.x0 - secondWord.x0)
+      const rowText = sortedWords.map((word) => word.text).join(' ')
+      const normalWordIndexes = sortedWords
+        .map((word, index) => (/^[A-Za-z][A-Za-z'-]{2,}[,.;:]?$/.test(word.text) ? index : -1))
+        .filter((index) => index >= 0)
+      if (normalWordIndexes.length < 2 || isDenseFormulaOrSymbolText(rowText)) return
+
+      const suspiciousIndexes = sortedWords
+        .map((word, index) => (hasInlineFormulaClue(word) ? index : -1))
+        .filter((index) => index >= 0)
+      if (!suspiciousIndexes.length || suspiciousIndexes.length > Math.max(4, sortedWords.length * 0.34)) return
+
+      const groups = []
+      suspiciousIndexes.forEach((wordIndex) => {
+        const currentGroup = groups[groups.length - 1]
+        if (!currentGroup || wordIndex > currentGroup[currentGroup.length - 1] + 1) {
+          groups.push([wordIndex])
+        } else {
+          currentGroup.push(wordIndex)
+        }
+      })
+
+      const rowLeft = Math.min(...sortedWords.map((word) => word.x0))
+      const rowRight = Math.max(...sortedWords.map((word) => word.x1))
+      const rowWidth = Math.max(rowRight - rowLeft, 1)
+
+      groups.forEach((group) => {
+        const firstIndex = group[0]
+        const lastIndex = group[group.length - 1]
+        const hasNormalBefore = normalWordIndexes.some((index) => index < firstIndex)
+        const hasNormalAfter = normalWordIndexes.some((index) => index > lastIndex)
+        if ((!hasNormalBefore && !hasNormalAfter) || group.length > 3) return
+
+        const candidateWords = group.map((index) => sortedWords[index])
+        const x0 = Math.min(...candidateWords.map((word) => word.x0))
+        const y0 = Math.min(...candidateWords.map((word) => word.y0))
+        const x1 = Math.max(...candidateWords.map((word) => word.x1))
+        const y1 = Math.max(...candidateWords.map((word) => word.y1))
+        if ((x1 - x0) / rowWidth > 0.38) return
+
+        candidates.push({
+          id: `formula-${candidates.length + 1}`,
+          text: candidateWords.map((word) => word.text).join(' ').trim(),
+          x: x0,
+          y: y0,
+          width: x1 - x0,
+          height: y1 - y0,
+          confidence:
+            candidateWords.reduce((sum, word) => sum + Number(word.confidence || 0), 0) /
+            Math.max(candidateWords.length, 1),
+        })
+      })
+    })
+
+    return candidates.slice(0, 12)
+  }
+
+  function getPdfTextForFormulaCandidate(candidate, pdfTextBlocks) {
+    let bestMatch = null
+    let bestRatio = 0
+
+    pdfTextBlocks.forEach((block) => {
+      const matchingTokens = (block.pdfTextTokens || []).filter((token) => {
+        const tokenRect = {
+          x: token.left,
+          y: token.top,
+          width: token.width,
+          height: token.height,
+        }
+        const intersection = getOcrRectIntersectionArea(candidate, tokenRect)
+
+        return intersection / Math.max(Math.min(candidate.width * candidate.height, token.width * token.height), 1) >= 0.35
+      })
+      if (!matchingTokens.length) return
+
+      const matchedRect = {
+        x: Math.min(...matchingTokens.map((token) => token.left)),
+        y: Math.min(...matchingTokens.map((token) => token.top)),
+        width:
+          Math.max(...matchingTokens.map((token) => token.right)) -
+          Math.min(...matchingTokens.map((token) => token.left)),
+        height:
+          Math.max(...matchingTokens.map((token) => token.bottom)) -
+          Math.min(...matchingTokens.map((token) => token.top)),
+      }
+      const ratio =
+        getOcrRectIntersectionArea(candidate, matchedRect) /
+        Math.max(candidate.width * candidate.height, 1)
+      if (ratio <= bestRatio) return
+
+      bestRatio = ratio
+      bestMatch = renderFormattedLine(matchingTokens)
+    })
+
+    if (!bestMatch || bestRatio < 0.45) return null
+    return normalizeSimpleInlineLatex(bestMatch) || {
+      latex: '',
+      text: bestMatch.replace(/\s+/g, ' ').trim(),
+    }
+  }
+
+  function normalizeSimpleInlineLatex(rawLatex) {
+    let latex = String(rawLatex || '')
+      .replace(/^```(?:latex|tex)?\s*/i, '')
+      .replace(/```$/i, '')
+      .replace(/^generated[_\s-]*text\s*[:：]\s*/i, '')
+      .replace(/^\s*(?:\\\[|\\\(|\$\$?)/, '')
+      .replace(/(?:\\\]|\\\)|\$\$?)\s*$/, '')
+      .trim()
+    latex = latex
+      .replace(/\\([A-Za-z]+)\s+\{/g, '\\$1{')
+      .replace(/([_^])\s*\{\s*/g, '$1{')
+      .replace(/\s+\}/g, '}')
+    if (!latex || latex.length > 140 || /[\r\n]/.test(latex)) return null
+    if (/\\(?:begin|end|frac|dfrac|tfrac|matrix|cases|sum|prod|int|lim|overset|underset)\b/.test(latex)) {
+      return null
+    }
+
+    const allowedCommands = new Set([
+      'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'theta', 'lambda', 'mu', 'nu', 'pi', 'rho',
+      'sigma', 'tau', 'phi', 'chi', 'psi', 'omega', 'Gamma', 'Delta', 'Theta', 'Lambda', 'Xi', 'Pi',
+      'Sigma', 'Phi', 'Psi', 'Omega', 'pm', 'mp', 'times', 'cdot', 'div', 'le', 'leq', 'ge', 'geq',
+      'neq', 'approx', 'sim', 'infty', 'to', 'rightarrow', 'leftarrow', 'leftrightarrow', 'degree',
+      'prime', 'sqrt', 'mathrm', 'mathbf', 'mathit', 'text',
+    ])
+    const commands = [...latex.matchAll(/\\([A-Za-z]+)/g)].map((match) => match[1])
+    if (commands.some((command) => !allowedCommands.has(command))) return null
+    if (commands.length > 6) return null
+
+    const replacements = {
+      '\\leftrightarrow': '↔',
+      '\\rightarrow': '→',
+      '\\leftarrow': '←',
+      '\\times': '×',
+      '\\cdot': '·',
+      '\\approx': '≈',
+      '\\infty': '∞',
+      '\\degree': '°',
+      '\\prime': '′',
+      '\\alpha': 'α',
+      '\\beta': 'β',
+      '\\gamma': 'γ',
+      '\\delta': 'δ',
+      '\\epsilon': 'ε',
+      '\\theta': 'θ',
+      '\\lambda': 'λ',
+      '\\mu': 'μ',
+      '\\nu': 'ν',
+      '\\pi': 'π',
+      '\\rho': 'ρ',
+      '\\sigma': 'σ',
+      '\\tau': 'τ',
+      '\\phi': 'φ',
+      '\\chi': 'χ',
+      '\\psi': 'ψ',
+      '\\omega': 'ω',
+      '\\Gamma': 'Γ',
+      '\\Delta': 'Δ',
+      '\\Theta': 'Θ',
+      '\\Lambda': 'Λ',
+      '\\Xi': 'Ξ',
+      '\\Pi': 'Π',
+      '\\Sigma': 'Σ',
+      '\\Phi': 'Φ',
+      '\\Psi': 'Ψ',
+      '\\Omega': 'Ω',
+      '\\pm': '±',
+      '\\mp': '∓',
+      '\\div': '÷',
+      '\\leq': '≤',
+      '\\le': '≤',
+      '\\geq': '≥',
+      '\\ge': '≥',
+      '\\neq': '≠',
+      '\\sim': '∼',
+      '\\to': '→',
+    }
+
+    Object.entries(replacements)
+      .sort(([firstCommand], [secondCommand]) => secondCommand.length - firstCommand.length)
+      .forEach(([command, character]) => {
+        latex = latex.replaceAll(command, character)
+      })
+
+    for (let iteration = 0; iteration < 3; iteration += 1) {
+      latex = latex.replace(/\\(?:mathrm|mathbf|mathit|text)\{([^{}]*)\}/g, '$1')
+      latex = latex.replace(/\\sqrt\{([^{}]+)\}/g, '√($1)')
+    }
+
+    const superscriptMap = {
+      0: '⁰', 1: '¹', 2: '²', 3: '³', 4: '⁴', 5: '⁵', 6: '⁶', 7: '⁷', 8: '⁸', 9: '⁹',
+      '+': '⁺', '-': '⁻', '=': '⁼', '(': '⁽', ')': '⁾', n: 'ⁿ', i: 'ⁱ',
+    }
+    const subscriptMap = {
+      0: '₀', 1: '₁', 2: '₂', 3: '₃', 4: '₄', 5: '₅', 6: '₆', 7: '₇', 8: '₈', 9: '₉',
+      '+': '₊', '-': '₋', '=': '₌', '(': '₍', ')': '₎', a: 'ₐ', e: 'ₑ', h: 'ₕ', i: 'ᵢ',
+      j: 'ⱼ', k: 'ₖ', l: 'ₗ', m: 'ₘ', n: 'ₙ', o: 'ₒ', p: 'ₚ', r: 'ᵣ', s: 'ₛ', t: 'ₜ',
+      u: 'ᵤ', v: 'ᵥ', x: 'ₓ',
+    }
+    const convertScript = (value, characterMap, marker) => {
+      const normalizedValue = String(value || '').trim()
+      const characters = Array.from(normalizedValue)
+      return characters.every((character) => characterMap[character])
+        ? characters.map((character) => characterMap[character]).join('')
+        : `${marker}(${normalizedValue})`
+    }
+
+    latex = latex
+      .replace(/\^\{([^{}]{1,12})\}/g, (_match, value) => convertScript(value, superscriptMap, '^'))
+      .replace(/_\{([^{}]{1,12})\}/g, (_match, value) => convertScript(value, subscriptMap, '_'))
+      .replace(/\^([A-Za-z0-9+\-=])/g, (_match, value) => convertScript(value, superscriptMap, '^'))
+      .replace(/_([A-Za-z0-9+\-=])/g, (_match, value) => convertScript(value, subscriptMap, '_'))
+      .replace(/\\[,;! ]/g, ' ')
+      .replace(/[{}]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+    if (!latex || /\\[A-Za-z]+/.test(latex) || /[�]/.test(latex)) return null
+    const operators = latex.match(/[=<>±×÷→←↔^_+\-*/√∞≈≠≤≥·]/g) || []
+    if (latex.length > 56 || operators.length > 4) return null
+
+    return {
+      latex: String(rawLatex || '').trim(),
+      text: latex,
+    }
+  }
+
+  async function cropInlineFormulaImage(imageUrl, candidate) {
+    const sourceImage = await loadImage(imageUrl)
+    const paddingX = Math.max(3, candidate.height * 0.32)
+    const paddingY = Math.max(3, candidate.height * 0.26)
+    const sourceX = clampNumber(Math.floor(candidate.x - paddingX), 0, sourceImage.naturalWidth - 1)
+    const sourceY = clampNumber(Math.floor(candidate.y - paddingY), 0, sourceImage.naturalHeight - 1)
+    const sourceRight = clampNumber(
+      Math.ceil(candidate.x + candidate.width + paddingX),
+      sourceX + 1,
+      sourceImage.naturalWidth,
+    )
+    const sourceBottom = clampNumber(
+      Math.ceil(candidate.y + candidate.height + paddingY),
+      sourceY + 1,
+      sourceImage.naturalHeight,
+    )
+    const sourceWidth = sourceRight - sourceX
+    const sourceHeight = sourceBottom - sourceY
+    const scale = clampNumber(72 / Math.max(sourceHeight, 1), 1, 4)
+    const canvas = document.createElement('canvas')
+    const context = canvas.getContext('2d')
+
+    canvas.width = Math.max(1, Math.round(sourceWidth * scale))
+    canvas.height = Math.max(1, Math.round(sourceHeight * scale))
+    context.fillStyle = '#ffffff'
+    context.fillRect(0, 0, canvas.width, canvas.height)
+    context.imageSmoothingEnabled = true
+    context.imageSmoothingQuality = 'high'
+    context.drawImage(
+      sourceImage,
+      sourceX,
+      sourceY,
+      sourceWidth,
+      sourceHeight,
+      0,
+      0,
+      canvas.width,
+      canvas.height,
+    )
+
+    return canvas.toDataURL('image/png')
+  }
+
+  async function recognizeInlineFormulaCandidates(data, imageUrl, imageSize, pdfTextBlocks) {
+    const candidates = getInlineFormulaCandidates(data, imageSize)
+    const corrections = []
+    const unresolvedRects = []
+    let formulaPipeline = null
+
+    for (const candidate of candidates) {
+      const pdfFormula = getPdfTextForFormulaCandidate(candidate, pdfTextBlocks)
+      if (pdfFormula?.text) {
+        corrections.push({
+          ...candidate,
+          replacement: pdfFormula.text,
+          latex: pdfFormula.latex,
+          source: 'pdf-text-layer',
+        })
+        continue
+      }
+
+      try {
+        formulaPipeline ||= await getInlineFormulaOcrPipeline()
+        const formulaImage = await cropInlineFormulaImage(imageUrl, candidate)
+        const output = await formulaPipeline(formulaImage, {
+          max_new_tokens: 96,
+          num_beams: 2,
+        })
+        const generatedText = Array.isArray(output)
+          ? output[0]?.generated_text || output[0]?.text
+          : output?.generated_text || output?.text
+        const normalizedFormula = normalizeSimpleInlineLatex(generatedText)
+
+        if (!normalizedFormula?.text) {
+          unresolvedRects.push(candidate)
+          continue
+        }
+
+        corrections.push({
+          ...candidate,
+          replacement: normalizedFormula.text,
+          latex: normalizedFormula.latex,
+          source: 'local-formula-ocr',
+        })
+      } catch (error) {
+        console.warn('本地行内公式 OCR 失败，该模块将保持原图且不翻译', {
+          text: candidate.text,
+          error: error.message,
+        })
+        unresolvedRects.push(candidate)
+      }
+    }
+
+    return { corrections, unresolvedRects }
+  }
+
+  function applyInlineFormulaCorrections(blocks, formulaResult) {
+    const corrections = formulaResult?.corrections || []
+    const unresolvedRects = formulaResult?.unresolvedRects || []
+
+    return blocks.map((block) => {
+      const sourceLines = getCompareSourceBlocks(block).map((line) => ({ ...line }))
+      const inlineFormulas = [...(block.inlineFormulas || [])]
+      let skipTranslation = Boolean(block.skipTranslation)
+
+      unresolvedRects.forEach((unresolvedRect) => {
+        const overlapsBlock =
+          getOcrRectIntersectionArea(block, unresolvedRect) /
+          Math.max(unresolvedRect.width * unresolvedRect.height, 1) >= 0.3
+        if (overlapsBlock) skipTranslation = true
+      })
+
+      corrections.forEach((correction) => {
+        let bestLineIndex = -1
+        let bestOverlap = 0
+
+        sourceLines.forEach((line, lineIndex) => {
+          const overlap =
+            getOcrRectIntersectionArea(line, correction) /
+            Math.max(correction.width * correction.height, 1)
+          if (overlap <= bestOverlap) return
+          bestLineIndex = lineIndex
+          bestOverlap = overlap
+        })
+
+        if (bestLineIndex < 0 || bestOverlap < 0.3) return
+        const line = sourceLines[bestLineIndex]
+        const escapedText = correction.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        const nextText = line.text.replace(new RegExp(escapedText, 'i'), correction.replacement)
+
+        if (nextText === line.text && correction.text !== correction.replacement) {
+          skipTranslation = true
+          return
+        }
+
+        line.text = nextText
+        line.sourceText = nextText
+        inlineFormulas.push({
+          text: correction.replacement,
+          latex: correction.latex,
+          source: correction.source,
+          bbox: {
+            x: correction.x,
+            y: correction.y,
+            width: correction.width,
+            height: correction.height,
+          },
+        })
+      })
+
+      const mergedBlock = sourceLines.length
+        ? mergeOcrBlocks(sourceLines, block.index)
+        : block
+
+      return {
+        ...block,
+        ...mergedBlock,
+        inlineFormulas,
+        skipTranslation,
+      }
+    })
+  }
+
   function isNumberedLine(line) {
     return /^\s*(?:\d+[\s.)、-]+|[A-Z][.)、-]+\s*)/.test(line)
   }
@@ -6166,7 +7406,7 @@ function App() {
     const usefulAcademicPhrase =
       /\b(enzyme|substrate|product|transition|ground|state|reaction|coordinate|coenzyme|cofactor|metal|ion|ions|precursor|activity|rate|energy|enhancement|carbonic|anhydrase|isomerase|transfer|chemical|group|groups|dietary|heat|light|work|cell|cells|signal|signals|transduction|production|motion|protein|proteins|gene|genes|dna|rna)\b/i
 
-    if (isScientificExpressionOnly(normalizedText)) return false
+    if (isScientificExpressionOnly(normalizedText) || isDenseFormulaOrSymbolText(normalizedText)) return false
     if (usefulShortTerms) return true
     if (compactText.length < 3) return false
 
@@ -6230,6 +7470,7 @@ function App() {
 
   function shouldTranslateOcrBlock(block) {
     if (!block?.text) return false
+    if (block.skipTranslation || isDenseFormulaOrSymbolText(block.text)) return false
     const isNearEdge = block.nearEdge || (block.sourceBlocks || []).some((sourceBlock) => sourceBlock.nearEdge)
     const isShortLabel = isUsefulShortOcrLabel(block.text)
     if (isLikelyOcrNoiseText(block.text, block.confidence, isNearEdge)) return false
@@ -6238,18 +7479,155 @@ function App() {
     return isMeaningfulEnglishText(block.text)
   }
 
-  function getTranslatableOcrText(text) {
-    const lines = text
-      .split('\n')
-      .map((line) => line.trim())
+  function getOcrBlockContentType(block) {
+    const text = cleanOcrSourceForTranslation(block?.text || '')
+    const declaredType = String(block?.type || '').toLowerCase()
+    const sourceTypes = (block?.sourceBlocks || [])
+      .map((line) => String(line?.type || '').toLowerCase())
       .filter(Boolean)
-    const validLines = lines.filter((line) => isMeaningfulEnglishText(line))
+    const allSourceLinesAreFormula =
+      sourceTypes.length > 0 &&
+      sourceTypes.every((type) =>
+        type.includes('formula') || type.includes('equation') || type.includes('dense_symbol'),
+      )
+    if (!text) return 'noise'
+    if (
+      declaredType.includes('formula') ||
+      declaredType.includes('equation') ||
+      declaredType.includes('dense_symbol') ||
+      allSourceLinesAreFormula ||
+      isScientificExpressionOnly(text) ||
+      isDenseFormulaOrSymbolText(text)
+    ) {
+      return 'formula'
+    }
+    if (shouldTranslateOcrBlock({ ...block, text })) return 'text'
+    if (block?.skipTranslation && isMeaningfulEnglishText(text)) return 'text'
+    return 'noise'
+  }
 
-    if (validLines.length) {
-      return validLines.join('\n')
+  function getBlockInlineFormulas(block) {
+    const formulas = [
+      ...(Array.isArray(block?.inlineFormulas) ? block.inlineFormulas : []),
+      ...(Array.isArray(block?.formulaRegions) ? block.formulaRegions : []),
+      ...(block?.sourceBlocks || [])
+        .flatMap((line) => Array.isArray(line?.formulaRegions) ? line.formulaRegions : []),
+      ...(block?.sourceBlocks || [])
+        .filter((line) => String(line?.type || '').toLowerCase().includes('inline_formula'))
+        .map((line) => ({
+          text: line.text,
+          latex: line.latex,
+          source: 'multimodal',
+        })),
+      ...getInlineFormulaMetadataFromText(block?.text || '', 'detected-text'),
+    ]
+    const formulaKeys = new Set()
+
+    return formulas.filter((formula) => {
+      const text = String(formula?.text || '').trim()
+      if (!text || formulaKeys.has(text)) return false
+      formulaKeys.add(text)
+      return true
+    })
+  }
+
+  function isVisualTranslationBlock(block) {
+    const declaredType = String(block?.type || '').toLowerCase()
+    if (
+      declaredType.includes('formula') ||
+      declaredType.includes('dense_symbol') ||
+      declaredType.includes('noise') ||
+      Number(block?.symbolDensity) >= 0.55
+    ) {
+      return false
+    }
+    if (
+      block?.multimodal &&
+      ['text', 'paragraph', 'title', 'label', 'legend'].includes(declaredType)
+    ) {
+      return Boolean(cleanOcrSourceForTranslation(block.text)) &&
+        normalizeMultimodalConfidence(block.confidence) >= 18
     }
 
-    return isMeaningfulEnglishText(text) ? text : ''
+    return getOcrBlockContentType(block) === 'text'
+  }
+
+  function isVisualTranslationLine(line) {
+    const type = String(line?.type || 'text').toLowerCase()
+    if (
+      type.includes('formula') ||
+      type.includes('dense_symbol') ||
+      type.includes('noise')
+    ) {
+      return false
+    }
+
+    return !isScientificExpressionOnly(line?.text || '') &&
+      !isDenseFormulaOrSymbolText(line?.text || '')
+  }
+
+  async function translateOcrBlocksPreservingFormulas(blocks = []) {
+    const orderedBlocks = blocks
+      .filter(Boolean)
+      .slice()
+      .sort((firstBlock, secondBlock) =>
+        (Number(firstBlock.y) || 0) - (Number(secondBlock.y) || 0) ||
+        (Number(firstBlock.x) || 0) - (Number(secondBlock.x) || 0),
+      )
+    const segments = []
+
+    for (const block of orderedBlocks) {
+      const sourceText = cleanOcrSourceForTranslation(block.text)
+      const contentType = getOcrBlockContentType(block)
+      if (!sourceText || contentType === 'noise') continue
+
+      if (contentType === 'formula') {
+        segments.push({
+          type: 'formula',
+          sourceText,
+          outputText: sourceText,
+          preserveOriginal: true,
+          latex: String(block.latex || '').trim(),
+        })
+        continue
+      }
+
+      const inlineFormulas = getBlockInlineFormulas(block)
+      const translation = cleanResultText(
+        await translateOcrBlockText(sourceText, inlineFormulas),
+      )
+      if (isUselessTranslationResult(translation)) {
+        throw new Error('模型未返回有效译文')
+      }
+      segments.push({
+        type: 'text',
+        sourceText,
+        outputText: translation,
+        preserveOriginal: false,
+        inlineFormulas,
+      })
+    }
+
+    return {
+      segments,
+      translation: cleanResultText(segments.map((segment) => segment.outputText).join('\n')),
+    }
+  }
+
+  function selectionTextNeedsVisualRepair(text) {
+    const value = String(text || '').trim()
+    if (!value) return false
+
+    const invalidCharacters = Array.from(value).filter((character) => {
+      const code = character.charCodeAt(0)
+      return character === '�' || (code <= 31 && ![9, 10, 13].includes(code))
+    })
+    const unusualRuns = value.match(/(?:[|\\~`_^{}<>]|\[|\]){2,}/g) || []
+    const formulaClues = value
+      .split(/\s+/)
+      .filter((token) => hasInlineFormulaClue({ text: token, confidence: 100 }))
+
+    return invalidCharacters.length > 0 || unusualRuns.length > 0 || formulaClues.length > 0
   }
 
   function isUselessTranslationResult(text) {
@@ -6380,6 +7758,7 @@ function App() {
       y0: clippedBox.y0,
       x1: clippedBox.x1,
       y1: clippedBox.y1,
+      fontSize: Math.max(1, (clippedBox.y1 - clippedBox.y0) * 0.82),
       nearEdge: clippedBox.nearEdge,
       confidence: Number(word.confidence) || 0,
     }
@@ -6422,6 +7801,7 @@ function App() {
 
   function createBlockFromWords(words, index) {
     const sortedWords = words.slice().sort((firstWord, secondWord) => firstWord.x0 - secondWord.x0)
+    const wordHeights = sortedWords.map((word) => word.y1 - word.y0).filter((height) => height > 0)
     const text = sortedWords
       .map((word) => word.text)
       .join(' ')
@@ -6439,6 +7819,7 @@ function App() {
       y: box.y0,
       width: box.x1 - box.x0,
       height: box.y1 - box.y0,
+      fontSize: Math.max(1, (median(wordHeights) || box.y1 - box.y0) * 0.82),
       nearEdge: sortedWords.some((word) => word.nearEdge),
       confidence:
         sortedWords.reduce((sum, word) => sum + (Number(word.confidence) || 0), 0) /
@@ -6542,6 +7923,45 @@ function App() {
     )
   }
 
+  function isStrongDiagramLineContinuation(previousLine, nextLine, options = {}) {
+    const previousText = String(previousLine?.text || '').trim()
+    const nextText = String(nextLine?.text || '').trim()
+    if (!previousText || !nextText) return false
+    if (isNewListOrTableRow(nextLine)) return false
+    if (isLikelyFormulaOrTableLine(previousText) || isLikelyFormulaOrTableLine(nextText)) return false
+
+    const boundaryReview = options.boundaryReview === true
+    const lineHeight = Math.max(previousLine.height, nextLine.height, 1)
+    const verticalGap = nextLine.y - getBlockBottom(previousLine)
+    const horizontalOverlap = getHorizontalOverlapRatio(previousLine, nextLine)
+    const leftOffset = Math.abs(previousLine.x - nextLine.x)
+    const previousFontSize = Math.max(1, Number(previousLine.fontSize) || previousLine.height * 0.82)
+    const nextFontSize = Math.max(1, Number(nextLine.fontSize) || nextLine.height * 0.82)
+    const fontRatio = Math.min(previousFontSize, nextFontSize) / Math.max(previousFontSize, nextFontSize)
+    const previousWords = getWordCount(previousText)
+    const nextWords = getWordCount(nextText)
+    const previousEndsOpen =
+      /[-,(（/:：]$/.test(previousText) ||
+      /\b(of|by|for|with|from|to|in|on|at|and|or|the|a|an|into|under|over|between|within|using|via)$/i.test(previousText)
+    const nextContinues = /^[a-z(（]/.test(nextText) || isLikelyContinuationLine(nextText)
+    const bodyWrap = previousWords >= 6 && nextWords >= 3 && !hasSentenceEnding(previousText)
+    const bothShort = previousWords <= 4 && nextWords <= 4
+    const nextStartsLikeIndependentLabel = /^[A-Z0-9][A-Za-z0-9\s-]{1,}$/.test(nextText) && nextWords <= 6
+    const maximumGap = lineHeight * (boundaryReview ? 0.72 : 0.95)
+    const minimumOverlap = boundaryReview ? 0.68 : 0.56
+    const maximumLeftOffset = lineHeight * (boundaryReview ? 0.72 : 0.95)
+    const minimumFontRatio = boundaryReview ? 0.78 : 0.7
+
+    if (verticalGap < -lineHeight * 0.25 || verticalGap > maximumGap) return false
+    if (fontRatio < minimumFontRatio) return false
+    if (horizontalOverlap < minimumOverlap && leftOffset > maximumLeftOffset) return false
+    if (hasSentenceEnding(previousText) && !/[:：]$/.test(previousText)) return false
+    if (nextStartsLikeIndependentLabel && !previousEndsOpen) return false
+    if (bothShort && !previousEndsOpen && !nextContinues) return false
+
+    return previousEndsOpen || nextContinues || bodyWrap
+  }
+
   function shouldMergeWrappedLine(previousBlock, nextBlock, options = {}) {
     if (!previousBlock || !nextBlock) return false
     const previousLine = getLastSourceLine(previousBlock)
@@ -6552,6 +7972,7 @@ function App() {
     if (isNewListOrTableRow(nextLine) && !diagram) return false
     if (isLikelyFormulaOrTableLine(previousLine.text) || isLikelyFormulaOrTableLine(nextLine.text)) return false
     if (!isLikelySameTextRegion(previousLine, nextLine, options)) return false
+    if (diagram) return isStrongDiagramLineContinuation(previousLine, nextLine, options)
 
     const previousText = previousLine.text.trim()
     const nextText = nextLine.text.trim()
@@ -6564,21 +7985,6 @@ function App() {
       /[-,(]$/.test(previousText) ||
       /\b(of|by|for|with|from|to|in|on|at|and|or|the|a|an|into|under|over|between|within|using|via)$/i.test(previousText)
     const nextContinues = /^[a-z(]/.test(nextText) || isLikelyContinuationLine(nextText)
-    const previousEndsListIntro = /[:：]$/.test(previousText)
-    const nextLooksLikeListItem = isNewListOrTableRow(nextLine) || nextWords <= 4
-    const diagramShortStack =
-      diagram &&
-      previousWords <= 4 &&
-      nextWords <= 4 &&
-      verticalGap >= -lineHeight * 0.25 &&
-      verticalGap < lineHeight * 1.35 &&
-      Math.abs(previousLine.x - nextLine.x) < lineHeight * 1.8
-    const diagramListContinuation =
-      diagram &&
-      (previousEndsListIntro || previousWords <= 5 || nextLooksLikeListItem) &&
-      nextWords <= 7 &&
-      verticalGap >= -lineHeight * 0.25 &&
-      verticalGap < lineHeight * 1.55
     const previousLooksLikeHeading =
       previousWords <= 8 &&
       nextWords >= 6 &&
@@ -6588,21 +7994,12 @@ function App() {
     const titleWrap = previousWords >= 2 && nextWords >= 2 && (previousEndsOpen || nextContinues)
     const continuousBody = previousWords >= 5 && nextWords >= 3 && !previousLooksLikeHeading
 
-    if (hasSentenceEnding(previousText) && !diagramListContinuation) return false
+    if (hasSentenceEnding(previousText)) return false
     if (nextStartsLikeHeading && !previousEndsOpen) return false
     if (previousLooksLikeHeading && !previousEndsOpen) return false
-    if (
-      strict &&
-      !diagramShortStack &&
-      !diagramListContinuation &&
-      verticalGap > lineHeight * 0.72 &&
-      !previousEndsOpen &&
-      !nextContinues
-    ) {
+    if (strict && verticalGap > lineHeight * 0.72 && !previousEndsOpen && !nextContinues) {
       return false
     }
-
-    if (diagram && (diagramShortStack || diagramListContinuation)) return true
 
     if (strict) {
       return previousEndsOpen || nextContinues || bodyWrap || titleWrap || (continuousBody && previousWords >= 7)
@@ -6613,6 +8010,7 @@ function App() {
 
   function mergeOcrBlocks(blocks, index) {
     const sourceBlocks = blocks.flatMap((block) => block.sourceBlocks || [block])
+      .sort((firstBlock, secondBlock) => firstBlock.y - secondBlock.y || firstBlock.x - secondBlock.x)
     const x0 = Math.min(...sourceBlocks.map((block) => block.x))
     const y0 = Math.min(...sourceBlocks.map((block) => block.y))
     const x1 = Math.max(...sourceBlocks.map((block) => getBlockRight(block)))
@@ -6630,10 +8028,20 @@ function App() {
       y: y0,
       width: x1 - x0,
       height: y1 - y0,
+      fontSize: median(sourceBlocks.map((block) => Number(block.fontSize)).filter(Number.isFinite)) ||
+        Math.max(1, median(sourceBlocks.map((block) => block.height)) * 0.82),
       nearEdge: sourceBlocks.some((block) => block.nearEdge),
       confidence:
         sourceBlocks.reduce((sum, block) => sum + (Number(block.confidence) || 0), 0) /
         Math.max(sourceBlocks.length, 1),
+      inlineFormulas: sourceBlocks
+        .flatMap((block) => block.inlineFormulas || [])
+        .filter((formula, formulaIndex, formulas) =>
+          formulas.findIndex((candidate) =>
+            candidate.text === formula.text &&
+            candidate.source === formula.source) === formulaIndex),
+      skipTranslation: sourceBlocks.some((block) => block.skipTranslation),
+      pdfTextLayer: sourceBlocks.every((block) => block.pdfTextLayer),
       sourceBlocks,
     }
   }
@@ -6770,6 +8178,10 @@ function App() {
           y: y0,
           width: x1 - x0,
           height: y1 - y0,
+          fontSize: Math.max(
+            1,
+            Number(line.fontSize || line.font_size || line.font?.size) || (y1 - y0) * 0.82,
+          ),
           nearEdge: clippedBox.nearEdge,
           confidence: Number(line.confidence) || 0,
         }
@@ -6788,6 +8200,7 @@ function App() {
       imageSize,
       sample: nextBlocks.slice(0, 5).map((block) => ({
         text: block.text,
+        fontSize: block.fontSize,
         bbox: {
           x0: block.x,
           y0: block.y,
@@ -6797,7 +8210,7 @@ function App() {
       })),
     })
 
-    return nextBlocks.slice(0, 100)
+    return options.diagram ? nextBlocks : nextBlocks.slice(0, 100)
   }
 
   function loadImage(imageUrl) {
@@ -6839,92 +8252,441 @@ function App() {
         ...sourceBlock,
         width: Math.max(1, Number(sourceBlock.width) || 1),
         height: Math.max(1, Number(sourceBlock.height) || 1),
+        fontSize: Math.max(
+          1,
+          Number(sourceBlock.fontSize || sourceBlock.font_size || sourceBlock.font?.size) ||
+            Math.max(1, Number(sourceBlock.height) || 1) * 0.82,
+        ),
       }))
       .sort((firstBlock, secondBlock) => firstBlock.y - secondBlock.y || firstBlock.x - secondBlock.x)
   }
 
-  function getCompareModuleRect(segments, canvasWidth, canvasHeight, padding = 0) {
-    const x0 = Math.min(...segments.map((segment) => segment.x))
-    const y0 = Math.min(...segments.map((segment) => segment.y))
-    const x1 = Math.max(...segments.map((segment) => segment.x + segment.width))
-    const y1 = Math.max(...segments.map((segment) => segment.y + segment.height))
-    const x = clampNumber(x0 - padding, 0, canvasWidth - 1)
-    const y = clampNumber(y0 - padding, 0, canvasHeight - 1)
-
+  function getCompareLineWeight(line) {
+    const sourceText = String(line.text || line.sourceText || '').replace(/\s+/g, ' ').trim()
+    const textUnits = (sourceText.match(/[A-Za-z0-9\u3400-\u9fff]/g) || []).length
     return {
-      x,
-      y,
-      width: Math.max(12, Math.min(x1 - x0 + padding * 2, canvasWidth - x)),
-      height: Math.max(8, Math.min(y1 - y0 + padding * 2, canvasHeight - y)),
+      textUnits: Math.max(1, textUnits),
+      width: Math.max(1, Number(line.width) || 1),
     }
   }
 
-  function getCompareLineRects(segments, canvasWidth, canvasHeight, padding = 0) {
-    return segments.map((segment) => {
-      const x = clampNumber(segment.x - padding, 0, canvasWidth - 1)
-      const y = clampNumber(segment.y - padding, 0, canvasHeight - 1)
-      const width = Math.max(8, Math.min(segment.width + padding * 2, canvasWidth - x))
-      const height = Math.max(6, Math.min(segment.height + padding * 2, canvasHeight - y))
+  function findCompareTranslationCut(characters, idealCut, minimumCut, maximumCut) {
+    const lowerBound = Math.max(minimumCut, Math.floor(idealCut - Math.max(4, idealCut * 0.28)))
+    const upperBound = Math.min(maximumCut, Math.ceil(idealCut + Math.max(4, idealCut * 0.28)))
+    let bestCut = clampNumber(Math.round(idealCut), minimumCut, maximumCut)
+    let bestScore = Infinity
 
-      return { x, y, width, height }
+    for (let cut = lowerBound; cut <= upperBound; cut += 1) {
+      const previousCharacter = characters[cut - 1] || ''
+      const nextCharacter = characters[cut] || ''
+      const isStrongBoundary = /[。！？!?；;]/.test(previousCharacter)
+      const isSoftBoundary = /[，、,:：]/.test(previousCharacter)
+      const isSpaceBoundary = /\s/.test(previousCharacter) || /\s/.test(nextCharacter)
+      const boundaryBonus = isStrongBoundary ? 5 : isSoftBoundary ? 3 : isSpaceBoundary ? 1.5 : 0
+      const score = Math.abs(cut - idealCut) - boundaryBonus
+
+      if (score < bestScore) {
+        bestCut = cut
+        bestScore = score
+      }
+    }
+
+    return bestCut
+  }
+
+  function splitCompareTranslationAcrossLines(translation, sourceLines) {
+    const normalizedTranslation = String(translation || '').replace(/\s+/g, ' ').trim()
+    if (!sourceLines.length) return []
+    if (sourceLines.length === 1) return [normalizedTranslation]
+
+    const characters = Array.from(normalizedTranslation)
+    if (!characters.length) return sourceLines.map(() => '')
+
+    const lineMetrics = sourceLines.map(getCompareLineWeight)
+    const totalTextUnits = lineMetrics.reduce((sum, metrics) => sum + metrics.textUnits, 0)
+    const totalWidth = lineMetrics.reduce((sum, metrics) => sum + metrics.width, 0)
+    const weights = lineMetrics.map((metrics) =>
+      0.65 * (metrics.textUnits / Math.max(totalTextUnits, 1)) +
+      0.35 * (metrics.width / Math.max(totalWidth, 1)),
+    )
+    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0)
+    const parts = []
+    let cursor = 0
+    let consumedWeight = 0
+
+    for (let index = 0; index < sourceLines.length - 1; index += 1) {
+      consumedWeight += weights[index]
+      const remainingLines = sourceLines.length - index - 1
+      const idealCut = characters.length * (consumedWeight / Math.max(totalWeight, 1))
+      const minimumCut = Math.min(characters.length, cursor + (cursor < characters.length ? 1 : 0))
+      const maximumCut = Math.max(minimumCut, characters.length - remainingLines)
+      const cut = findCompareTranslationCut(characters, idealCut, minimumCut, maximumCut)
+
+      parts.push(characters.slice(cursor, cut).join('').trim())
+      cursor = cut
+    }
+
+    parts.push(characters.slice(cursor).join('').trim())
+    return sourceLines.map((_line, index) => parts[index] || '')
+  }
+
+  function getCompareLineAssignments(block) {
+    const sourceLines = getCompareSourceBlocks(block)
+      .filter((line) => isVisualTranslationLine(line))
+    const translations = splitCompareTranslationAcrossLines(block.translation, sourceLines)
+
+    return sourceLines.map((line, index) => ({
+      ...line,
+      translation: translations[index] || '',
+    }))
+  }
+
+  function isShortCompareModule(block) {
+    const sourceText = cleanOcrSourceForTranslation(block?.text || '')
+    const words = sourceText.match(/[A-Za-z][A-Za-z'-]*/g) || []
+
+    return words.length <= 8 || sourceText.length <= 48
+  }
+
+  function assessCompareTranslation(block) {
+    const sourceText = cleanOcrSourceForTranslation(block?.text || '')
+    const translation = cleanResultText(block?.translation || '')
+    if (block?.visualLayoutIssue) {
+      return { valid: false, reason: block.visualLayoutIssue }
+    }
+    if (!translation || isUselessTranslationResult(translation)) {
+      return { valid: false, reason: 'empty' }
+    }
+    if (translation.toLowerCase() === sourceText.toLowerCase()) {
+      return { valid: false, reason: 'untranslated' }
+    }
+    if (hasWeirdDiagramTranslationStack(translation, block)) {
+      return { valid: false, reason: 'stacked' }
+    }
+    if (isShortCompareModule(block)) return { valid: true, reason: '' }
+
+    const sourceWords = sourceText.match(/[A-Za-z][A-Za-z'-]*/g) || []
+    const targetCjkCharacters = translation.match(/[\u3400-\u9fff]/g) || []
+    const targetLatinTokens = translation.match(/[A-Za-z0-9]+/g) || []
+    const targetUnits = targetCjkCharacters.length + targetLatinTokens.length
+    const minimumTargetUnits = Math.max(8, Math.ceil(sourceWords.length * 0.58))
+    const sourceLooksOpen =
+      /^[a-z]/.test(sourceText) ||
+      /[-,;:(]$/.test(sourceText) ||
+      /\b(of|by|for|with|from|to|in|on|at|and|or|the|a|an|into|under|over|between|within|using|via)$/i.test(sourceText)
+    const translationLooksOpen =
+      /(?:的|和|与|或|及|以及|在|从|向|对|为|由|通过|由于|因为|如果|当|将|被|使|而|但|且|并|从而|以便)[，,;；:]?$/.test(
+        translation,
+      )
+    const sourceEndsSentence = /[.!?]["')\]]*$/.test(sourceText)
+    const translationEndsSentence = /[。！？!?]["')\]]*$/.test(translation)
+
+    if (targetUnits < minimumTargetUnits) return { valid: false, reason: 'missing-content' }
+    if (
+      targetLatinTokens.length >= Math.max(5, Math.ceil(sourceWords.length * 0.45)) &&
+      targetCjkCharacters.length < Math.max(4, sourceWords.length * 0.5)
+    ) {
+      return { valid: false, reason: 'untranslated-residue' }
+    }
+    if (translationLooksOpen) return { valid: false, reason: 'open-translation' }
+    if (sourceLooksOpen && sourceWords.length >= 10) {
+      return { valid: false, reason: 'open-source-boundary' }
+    }
+    if (sourceEndsSentence && !translationEndsSentence && targetUnits < sourceWords.length * 0.9) {
+      return { valid: false, reason: 'truncated-sentence' }
+    }
+
+    return { valid: true, reason: '' }
+  }
+
+  function getVerticalOverlapRatio(firstBlock, secondBlock) {
+    const overlap = Math.max(
+      0,
+      Math.min(getBlockBottom(firstBlock), getBlockBottom(secondBlock)) -
+        Math.max(firstBlock.y, secondBlock.y),
+    )
+    const referenceHeight = Math.max(1, Math.min(firstBlock.height, secondBlock.height))
+
+    return overlap / referenceHeight
+  }
+
+  function getCompareModuleMergeScore(firstBlock, secondBlock, attempt) {
+    const referenceHeight = Math.max(
+      median(getCompareSourceBlocks(firstBlock).map((line) => line.height)),
+      median(getCompareSourceBlocks(secondBlock).map((line) => line.height)),
+      1,
+    )
+    const verticalGap = Math.max(
+      0,
+      Math.max(firstBlock.y, secondBlock.y) -
+        Math.min(getBlockBottom(firstBlock), getBlockBottom(secondBlock)),
+    )
+    const horizontalGap = Math.max(
+      0,
+      Math.max(firstBlock.x, secondBlock.x) -
+        Math.min(getBlockRight(firstBlock), getBlockRight(secondBlock)),
+    )
+    const horizontalOverlap = getHorizontalOverlapRatio(firstBlock, secondBlock)
+    const verticalOverlap = getVerticalOverlapRatio(firstBlock, secondBlock)
+    const verticalNeighbor =
+      verticalGap <= referenceHeight * (attempt === 1 ? 1.8 : 3.4) &&
+      horizontalOverlap >= (attempt === 1 ? 0.42 : 0.24)
+    const horizontalNeighbor =
+      horizontalGap <= referenceHeight * (attempt === 1 ? 4.2 : 7.5) &&
+      verticalOverlap >= (attempt === 1 ? 0.5 : 0.3)
+
+    if (!verticalNeighbor && !horizontalNeighbor) return null
+
+    const verticalScore = verticalGap / referenceHeight + (1 - horizontalOverlap) * 1.15
+    const horizontalScore = horizontalGap / referenceHeight + (1 - verticalOverlap) * 1.35 + 0.25
+
+    return Math.min(
+      verticalNeighbor ? verticalScore : Infinity,
+      horizontalNeighbor ? horizontalScore : Infinity,
+    )
+  }
+
+  function findCompareBoundaryCandidateIndex(blocks, blockIndex, attempt, consumedIndexes) {
+    let bestIndex = -1
+    let bestScore = Infinity
+
+    blocks.forEach((candidate, candidateIndex) => {
+      if (candidateIndex === blockIndex || consumedIndexes.has(candidateIndex)) return
+      const score = getCompareModuleMergeScore(blocks[blockIndex], candidate, attempt)
+      if (score === null || score >= bestScore) return
+
+      bestIndex = candidateIndex
+      bestScore = score
+    })
+
+    return bestIndex
+  }
+
+  function splitCompareBlockByStrictBoundaries(block, boundaryReview = false) {
+    const sourceLines = getCompareSourceBlocks(block)
+    if (sourceLines.length <= 1) {
+      return [{ ...block, sourceBlocks: sourceLines }]
+    }
+
+    const lineGroups = []
+    sourceLines.forEach((line) => {
+      const currentGroup = lineGroups[lineGroups.length - 1]
+      if (!currentGroup?.length) {
+        lineGroups.push([line])
+        return
+      }
+
+      const currentBlock = mergeOcrBlocks(currentGroup, Number(block.index) || 0)
+      if (
+        shouldMergeWrappedLine(currentBlock, line, {
+          strict: true,
+          boundaryReview,
+        })
+      ) {
+        currentGroup.push(line)
+      } else {
+        lineGroups.push([line])
+      }
+    })
+
+    if (lineGroups.length === 1) {
+      return [{ ...block, sourceBlocks: sourceLines }]
+    }
+
+    return lineGroups.map((lines, groupIndex) => {
+      const splitBlock = mergeOcrBlocks(lines, (Number(block.index) || 0) + groupIndex / 1000)
+      return {
+        ...splitBlock,
+        moduleId: `${block.moduleId || `m${Number(block.index) + 1 || 1}`}-c${groupIndex + 1}`,
+        sourceText: splitBlock.text,
+        translation: '',
+        formulaRegions: (block.formulaRegions || []).filter((region) =>
+          getRectOverlapArea(region, splitBlock) > 0,
+        ),
+        multimodal: Boolean(block.multimodal),
+        compareBoundaryRetries: block.compareBoundaryRetries || 0,
+      }
+    })
+  }
+
+  function mergeCompareModuleBlocks(firstBlock, secondBlock, attempt) {
+    const uniqueLines = []
+    const lineKeys = new Set()
+
+    ;[...getCompareSourceBlocks(firstBlock), ...getCompareSourceBlocks(secondBlock)]
+      .sort((firstLine, secondLine) => firstLine.y - secondLine.y || firstLine.x - secondLine.x)
+      .forEach((line) => {
+        const lineKey = [
+          Math.round(line.x),
+          Math.round(line.y),
+          Math.round(line.width),
+          Math.round(line.height),
+          line.text,
+        ].join('|')
+        if (lineKeys.has(lineKey)) return
+        lineKeys.add(lineKey)
+        uniqueLines.push(line)
+      })
+
+    const merged = mergeOcrBlocks(uniqueLines, Math.min(firstBlock.index, secondBlock.index))
+
+    return {
+      ...merged,
+      sourceText: merged.text,
+      translation: '',
+      formulaRegions: [
+        ...(firstBlock.formulaRegions || []),
+        ...(secondBlock.formulaRegions || []),
+      ],
+      multimodal: Boolean(firstBlock.multimodal || secondBlock.multimodal),
+      compareBoundaryRetries: attempt,
+    }
+  }
+
+  async function translateCompareModule(block, force = false) {
+    const sourceText = cleanOcrSourceForTranslation(block.text)
+    const existingTranslation = cleanResultText(block.translation || '')
+
+    if (!force && existingTranslation && !isUselessTranslationResult(existingTranslation)) {
+      return {
+        ...block,
+        sourceText,
+        translation: existingTranslation,
+      }
+    }
+
+    try {
+      const translation = cleanResultText(
+        await translateOcrBlockText(sourceText, getBlockInlineFormulas(block)),
+      )
+      if (isUselessTranslationResult(translation)) {
+        return getOcrTranslationFallback(block, sourceText, 'empty-translation')
+      }
+
+      return {
+        ...block,
+        sourceText,
+        translation,
+      }
+    } catch (error) {
+      return getOcrTranslationFallback(block, sourceText, error.message)
+    }
+  }
+
+  async function translateCompareBlocks(blocks, reviewOptions = {}) {
+    const strictBlocks = blocks
+      .filter((item) => isVisualTranslationBlock(item))
+      .slice(0, 120)
+      .flatMap((block) => splitCompareBlockByStrictBoundaries(block))
+    let workingBlocks = await mapWithConcurrency(
+      strictBlocks,
+      3,
+      (block) => translateCompareModule(block),
+    )
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const assessments = workingBlocks.map(assessCompareTranslation)
+      const incompleteIndexes = assessments
+        .map((assessment, index) => (!assessment.valid ? index : -1))
+        .filter((index) => index >= 0)
+      if (!incompleteIndexes.length) break
+
+      const consumedIndexes = new Set()
+      const revisedBlocks = []
+
+      for (const blockIndex of incompleteIndexes) {
+        if (consumedIndexes.has(blockIndex)) continue
+
+        const block = workingBlocks[blockIndex]
+        const assessment = assessments[blockIndex]
+        consumedIndexes.add(blockIndex)
+        if (reviewOptions.multimodal) {
+          const reviewedBlocks = await reviewVisualModuleBoundary({
+            mode: 'compare',
+            image: reviewOptions.image,
+            imageSize: reviewOptions.imageSize,
+            block,
+            blocks: workingBlocks,
+            attempt,
+            reason: assessment.reason,
+          })
+          const reviewedTextBlocks = reviewedBlocks.filter(isVisualTranslationBlock)
+          if (reviewedTextBlocks.length) {
+            const translatedReviewedBlocks = await mapWithConcurrency(
+              reviewedTextBlocks,
+              3,
+              (reviewedBlock) => translateCompareModule({
+                ...reviewedBlock,
+                compareBoundaryRetries: attempt,
+              }, true),
+            )
+            revisedBlocks.push(...translatedReviewedBlocks)
+            continue
+          }
+        }
+
+        const splitBlocks = splitCompareBlockByStrictBoundaries(block, true)
+        if (splitBlocks.length > 1) {
+          const translatedSplitBlocks = await mapWithConcurrency(
+            splitBlocks,
+            3,
+            (splitBlock) => translateCompareModule({
+              ...splitBlock,
+              compareBoundaryRetries: attempt,
+            }, true),
+          )
+          revisedBlocks.push(...translatedSplitBlocks)
+          continue
+        }
+
+        const candidateIndex = findCompareBoundaryCandidateIndex(
+          workingBlocks,
+          blockIndex,
+          attempt,
+          consumedIndexes,
+        )
+
+        if (candidateIndex >= 0) {
+          consumedIndexes.add(candidateIndex)
+          const mergedBlock = mergeCompareModuleBlocks(
+            workingBlocks[blockIndex],
+            workingBlocks[candidateIndex],
+            attempt,
+          )
+          revisedBlocks.push(await translateCompareModule(mergedBlock, true))
+        } else {
+          revisedBlocks.push(await translateCompareModule({
+            ...workingBlocks[blockIndex],
+            compareBoundaryRetries: attempt,
+          }, true))
+        }
+      }
+
+      workingBlocks = workingBlocks
+        .filter((_block, index) => !consumedIndexes.has(index))
+        .concat(revisedBlocks)
+        .sort((firstBlock, secondBlock) => firstBlock.y - secondBlock.y || firstBlock.x - secondBlock.x)
+    }
+
+    return workingBlocks.map((block) => {
+      const assessment = assessCompareTranslation(block)
+      if (assessment.valid) {
+        return {
+          ...block,
+          translationFallback: false,
+          translationError: '',
+        }
+      }
+      return getOcrTranslationFallback(
+        block,
+        cleanOcrSourceForTranslation(block.text),
+        block.translationError || assessment.reason,
+      )
     })
   }
 
   function getCompareCanvasFont(fontSize) {
     return `${fontSize}px "Microsoft YaHei", Arial, sans-serif`
-  }
-
-  function getCompareTextSlots(segments, fontSize, canvasWidth, canvasHeight) {
-    const lineRects = getCompareLineRects(segments, canvasWidth, canvasHeight)
-    const horizontalPadding = clampNumber(fontSize * 0.22, 3, 7)
-    const verticalPadding = clampNumber(fontSize * 0.08, 1, 3)
-
-    return lineRects.map((rect) => {
-      const lineFontSize = clampNumber(Math.floor(Math.min(fontSize, rect.height * 0.92)), 10, fontSize)
-      const minBackgroundHeight = lineFontSize * 1.18
-      const backgroundX = clampNumber(rect.x - horizontalPadding, 0, canvasWidth - 1)
-      const backgroundY = clampNumber(
-        rect.y - verticalPadding,
-        0,
-        Math.max(0, canvasHeight - minBackgroundHeight),
-      )
-      const backgroundWidth = Math.max(
-        10,
-        Math.min(rect.width + horizontalPadding * 2, canvasWidth - backgroundX),
-      )
-      const backgroundHeight = Math.max(
-        minBackgroundHeight,
-        Math.min(rect.height + verticalPadding * 2, canvasHeight - backgroundY),
-      )
-      const textAreaWidth = Math.max(8, backgroundWidth - horizontalPadding * 2)
-
-      return {
-        x: backgroundX + horizontalPadding,
-        slotX: backgroundX + horizontalPadding,
-        y: backgroundY + Math.max(0, (backgroundHeight - lineFontSize) / 2),
-        maxWidth: textAreaWidth,
-        lineHeight: backgroundHeight,
-        fontSize: lineFontSize,
-        backgroundRect: {
-          x: backgroundX,
-          y: backgroundY,
-          width: backgroundWidth,
-          height: backgroundHeight,
-        },
-      }
-    })
-  }
-
-  function trimCanvasTextToWidth(context, text, maxWidth) {
-    const characters = Array.from(text)
-    let nextText = characters.join('')
-
-    while (nextText && context.measureText(`${nextText}…`).width > maxWidth) {
-      characters.pop()
-      nextText = characters.join('')
-    }
-
-    return nextText ? `${nextText}…` : '…'
   }
 
   function getPaddedLineBox(segment, canvasWidth, canvasHeight) {
@@ -6943,64 +8705,6 @@ function App() {
     }
   }
 
-  function drawTextInBox(context, text, box, options = {}) {
-    const color = options.color || '#111827'
-    const minFontSize = Number(options.minFontSize) || 10
-    const maxFontSize = Number(options.maxFontSize) || 18
-    const initialFontSize = clampNumber(
-      Number(options.fontSize) || Math.floor(box.height * 0.75),
-      minFontSize,
-      maxFontSize,
-    )
-    let fallback = null
-
-    for (let fontSize = initialFontSize; fontSize >= minFontSize; fontSize -= 1) {
-      context.font = getCompareCanvasFont(fontSize)
-      const lineHeight = fontSize * 1.16
-      const maxLines = Math.max(1, Math.floor(box.height / lineHeight))
-      const wrappedLines = wrapCanvasText(context, text, box.width)
-      const visibleLines = wrappedLines.slice(0, maxLines)
-      const truncated = wrappedLines.length > maxLines
-
-      fallback = { fontSize, lineHeight, lines: visibleLines, wrappedLines, maxLines, truncated }
-
-      if (!truncated) break
-    }
-
-    if (!fallback?.lines?.length) return { lines: [], truncated: true }
-
-    const lines = fallback.lines.slice()
-    if (fallback.truncated && lines.length) {
-      const lastLine = lines[lines.length - 1]
-      context.font = getCompareCanvasFont(fallback.fontSize)
-      lines[lines.length - 1] = trimCanvasTextToWidth(context, `${lastLine}${fallback.wrappedLines.slice(fallback.maxLines).join('')}`, box.width)
-    }
-
-    context.save()
-    context.fillStyle = color
-    context.textBaseline = 'top'
-    context.font = getCompareCanvasFont(fallback.fontSize)
-    lines.forEach((line, index) => {
-      context.fillText(line, box.x, box.y + index * fallback.lineHeight)
-    })
-    context.restore()
-
-    return {
-      lines,
-      fontSize: fallback.fontSize,
-      lineHeight: fallback.lineHeight,
-      truncated: fallback.truncated,
-    }
-  }
-
-  function hasLineLevelMultimodalTranslations(block) {
-    return Boolean(
-      block?.multimodal &&
-      Array.isArray(block.sourceBlocks) &&
-      block.sourceBlocks.some((line) => line.translation && !isUselessTranslationResult(line.translation)),
-    )
-  }
-
   function drawDebugLayoutBoxes(context, blocks, canvasWidth, canvasHeight) {
     if (!MULTIMODAL_OCR_DEBUG) return
 
@@ -7015,202 +8719,6 @@ function App() {
       })
     })
     context.restore()
-  }
-
-  function wrapCanvasTextAcrossSlots(context, text, slots) {
-    const normalizedText = text.replace(/\s+/g, ' ').trim()
-    const characters = Array.from(normalizedText)
-    const lines = []
-    let cursor = 0
-
-    slots.forEach((slot, slotIndex) => {
-      if (cursor >= characters.length) return
-
-      const remainingSlots = slots.slice(slotIndex)
-      const remainingWidth = remainingSlots.reduce((sum, item) => sum + item.maxWidth, 0)
-      const remainingCharacters = characters.length - cursor
-      const targetCount =
-        slotIndex === slots.length - 1
-          ? remainingCharacters
-          : Math.max(1, Math.round(remainingCharacters * (slot.maxWidth / Math.max(remainingWidth, 1))))
-      let lineText = ''
-      let lineCharacters = 0
-
-      context.font = getCompareCanvasFont(slot.fontSize || 12)
-      while (cursor < characters.length) {
-        const remainingSlotsAfterCurrent = slots.length - slotIndex - 1
-        const remainingAfterTakingNextCharacter = characters.length - cursor - 1
-
-        if (
-          lineText &&
-          remainingSlotsAfterCurrent > 0 &&
-          remainingAfterTakingNextCharacter < remainingSlotsAfterCurrent
-        ) {
-          break
-        }
-
-        const nextLine = `${lineText}${characters[cursor]}`
-        if (lineText && context.measureText(nextLine).width > slot.maxWidth) break
-
-        lineText = nextLine
-        cursor += 1
-        lineCharacters += 1
-
-        if (
-          slotIndex < slots.length - 1 &&
-          lineCharacters >= targetCount &&
-          characters.length - cursor >= remainingSlotsAfterCurrent
-        ) {
-          break
-        }
-      }
-
-      if (lineText) {
-        const text = lineText.trim() || lineText
-
-        lines.push({
-          ...slot,
-          x: slot.x,
-          slotX: slot.x,
-          text,
-        })
-      }
-    })
-
-    const truncated = cursor < characters.length
-
-    if (truncated && lines.length) {
-      const lastLine = lines[lines.length - 1]
-      context.font = getCompareCanvasFont(lastLine.fontSize || 12)
-      lastLine.text = trimCanvasTextToWidth(context, `${lastLine.text}${characters.slice(cursor).join('')}`, lastLine.maxWidth)
-      lastLine.x = lastLine.slotX ?? lastLine.x
-    }
-
-    return { lines, truncated }
-  }
-
-  function hasOverlappingCompareLineBackgrounds(slots) {
-    for (let index = 1; index < slots.length; index += 1) {
-      const previousRect = slots[index - 1].backgroundRect
-      const currentRect = slots[index].backgroundRect
-
-      if (!previousRect || !currentRect) continue
-      if (currentRect.y < previousRect.y + previousRect.height - 1) return true
-    }
-
-    return false
-  }
-
-  function shouldUseCompareModuleFallback(segments, slots) {
-    if (segments.length < 2) return false
-
-    const sortedSegments = segments.slice().sort((firstSegment, secondSegment) => firstSegment.y - secondSegment.y)
-    const segmentHeights = sortedSegments.map((segment) => segment.height).filter((height) => height > 0)
-    const averageHeight =
-      segmentHeights.reduce((sum, height) => sum + height, 0) / Math.max(segmentHeights.length, 1)
-    const gaps = sortedSegments.slice(1).map((segment, index) => segment.y - getBlockBottom(sortedSegments[index]))
-    const averageGap = gaps.reduce((sum, gap) => sum + gap, 0) / Math.max(gaps.length, 1)
-    const moduleHeight = Math.max(...sortedSegments.map((segment) => getBlockBottom(segment))) - Math.min(...sortedSegments.map((segment) => segment.y))
-    const tightLineBoxes = averageHeight < 11 || averageGap < Math.max(1, averageHeight * 0.12)
-    const denseModule =
-      sortedSegments.length >= 5 &&
-      averageGap < averageHeight * 0.28 &&
-      averageHeight * sortedSegments.length > moduleHeight * 0.72
-
-    return tightLineBoxes || denseModule || hasOverlappingCompareLineBackgrounds(slots)
-  }
-
-  function getCompareModuleFallbackPlan(context, block, segments, canvasWidth, canvasHeight, maxFontSize, minFontSize) {
-    const modulePadding = clampNumber(maxFontSize * 0.34, 4, 8)
-    const moduleRect = getCompareModuleRect(segments, canvasWidth, canvasHeight, modulePadding)
-    const horizontalPadding = clampNumber(maxFontSize * 0.28, 4, 8)
-    const verticalPadding = clampNumber(maxFontSize * 0.22, 3, 6)
-    let fallback = {
-      lines: [],
-      fontSize: minFontSize,
-      segments,
-      moduleRect,
-      backgroundRects: [moduleRect],
-      mode: 'module-fallback',
-      truncated: true,
-    }
-
-    for (let fontSize = clampNumber(maxFontSize, 11, 20); fontSize >= Math.max(10, minFontSize); fontSize -= 1) {
-      context.font = getCompareCanvasFont(fontSize)
-      const lineHeight = fontSize * 1.22
-      const maxWidth = Math.max(8, moduleRect.width - horizontalPadding * 2)
-      const maxLines = Math.max(1, Math.floor((moduleRect.height - verticalPadding * 2) / lineHeight))
-      const wrappedLines = wrapCanvasText(context, block.translation, maxWidth)
-      const lines = wrappedLines.slice(0, maxLines).map((line, index) => ({
-        text: line,
-        x: moduleRect.x + horizontalPadding,
-        y: moduleRect.y + verticalPadding + index * lineHeight,
-        maxWidth,
-        lineHeight,
-        fontSize,
-      }))
-      const truncated = wrappedLines.length > maxLines
-
-      if (truncated && lines.length) {
-        const lastLine = lines[lines.length - 1]
-        lastLine.text = trimCanvasTextToWidth(context, `${lastLine.text}${wrappedLines.slice(maxLines).join('')}`, maxWidth)
-      }
-
-      fallback = {
-        lines,
-        fontSize,
-        segments,
-        moduleRect,
-        backgroundRects: [moduleRect],
-        mode: 'module-fallback',
-        truncated,
-      }
-
-      if (lines.length && !truncated) return fallback
-    }
-
-    return fallback
-  }
-
-  function getCompareReplacementPlan(context, block, canvasWidth, canvasHeight) {
-    const segments = getCompareSourceBlocks(block)
-    const segmentHeights = segments.map((segment) => segment.height).filter((height) => height > 0)
-    const baseHeight = median(segmentHeights) || block.height || 14
-    const maxFontSize = clampNumber(Math.floor(baseHeight * 0.98), 12, 24)
-    const minFontSize = Math.min(10, maxFontSize)
-    const initialSlots = getCompareTextSlots(segments, maxFontSize, canvasWidth, canvasHeight)
-    let fallback = null
-
-    if (shouldUseCompareModuleFallback(segments, initialSlots)) {
-      return getCompareModuleFallbackPlan(context, block, segments, canvasWidth, canvasHeight, maxFontSize, minFontSize)
-    }
-
-    for (let fontSize = maxFontSize; fontSize >= minFontSize; fontSize -= 1) {
-      const slots = getCompareTextSlots(segments, fontSize, canvasWidth, canvasHeight)
-      const plan = wrapCanvasTextAcrossSlots(context, block.translation, slots)
-      const moduleRect = getCompareModuleRect(segments, canvasWidth, canvasHeight, 0)
-      fallback = {
-        ...plan,
-        fontSize,
-        segments,
-        moduleRect,
-        backgroundRects: slots.map((slot) => slot.backgroundRect),
-      }
-
-      if (plan.lines.length && !plan.truncated) {
-        return fallback
-      }
-    }
-
-    return fallback?.lines?.length
-      ? getCompareModuleFallbackPlan(context, block, segments, canvasWidth, canvasHeight, maxFontSize, minFontSize)
-      : {
-          lines: [],
-          fontSize: minFontSize,
-          segments,
-          moduleRect: getCompareModuleRect(segments, canvasWidth, canvasHeight, 4),
-          backgroundRects: getCompareTextSlots(segments, minFontSize, canvasWidth, canvasHeight).map((slot) => slot.backgroundRect),
-        }
   }
 
   function getRectOverlapArea(firstRect, secondRect) {
@@ -7284,34 +8792,345 @@ function App() {
     return String(text || '').replace(/@@\s*OCRF\s*(\d+)\s*@@/gi, (_match, index) => tokens[Number(index)] || _match)
   }
 
-  async function translateOcrBlockText(text) {
-    const protectedResult = protectOcrFormulaTokens(text)
+  function protectInlineFormulaTokens(text, formulas = []) {
+    const tokens = []
+    let protectedText = String(text || '')
+
+    formulas
+      .map((formula) => String(formula?.text || '').trim())
+      .filter(Boolean)
+      .sort((firstFormula, secondFormula) => secondFormula.length - firstFormula.length)
+      .forEach((formula) => {
+        if (!protectedText.includes(formula)) return
+        const tokenIndex = tokens.length
+        tokens.push(formula)
+        protectedText = protectedText.replaceAll(formula, `@@OCRX${tokenIndex}@@`)
+      })
+
+    return { protectedText, tokens }
+  }
+
+  function restoreInlineFormulaTokens(text, tokens) {
+    return String(text || '').replace(/@@\s*OCRX\s*(\d+)\s*@@/gi, (_match, index) => tokens[Number(index)] || _match)
+  }
+
+  async function translateOcrBlockText(text, inlineFormulas = []) {
+    const inlineProtectedResult = protectInlineFormulaTokens(text, inlineFormulas)
+    const protectedResult = protectOcrFormulaTokens(inlineProtectedResult.protectedText)
     const chunks = splitOcrTextForTranslation(protectedResult.protectedText)
     const translations = []
 
     for (const chunk of chunks) {
       try {
         const translation = cleanResultText(await requestTranslation(chunk))
-        translations.push(isUselessTranslationResult(translation) ? chunk : translation)
+        if (isUselessTranslationResult(translation)) {
+          throw new Error('模型未返回有效译文')
+        }
+        translations.push(translation)
       } catch (error) {
-        console.warn('OCR 模块分段翻译失败，使用原文兜底', {
+        console.warn('OCR 模块分段翻译失败', {
           textLength: chunk.length,
           error: error.message,
         })
-        translations.push(chunk)
+        throw new Error(error.message || '翻译失败', { cause: error })
       }
     }
 
-    return restoreOcrFormulaTokens(translations.join('\n').trim(), protectedResult.tokens)
+    const formulaRestoredText = restoreOcrFormulaTokens(
+      translations.join('\n').trim(),
+      protectedResult.tokens,
+    )
+
+    return restoreInlineFormulaTokens(formulaRestoredText, inlineProtectedResult.tokens)
   }
+
+  function getSelectionWordSimilarity(firstText, secondText) {
+    const firstWords = (String(firstText || '').toLowerCase().match(/[a-z]{2,}/g) || [])
+    const secondWords = new Set(String(secondText || '').toLowerCase().match(/[a-z]{2,}/g) || [])
+    if (!firstWords.length) return secondWords.size ? 0 : 1
+
+    const matchedWords = firstWords.filter((word) => secondWords.has(word))
+    return matchedWords.length / firstWords.length
+  }
+
+  function applyFormulaCorrectionsToText(text, corrections = []) {
+    let correctedText = String(text || '')
+
+    corrections.forEach((correction) => {
+      const sourceText = String(correction?.text || '').trim()
+      const replacement = String(correction?.replacement || '').trim()
+      if (!sourceText || !replacement) return
+
+      const escapedText = sourceText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      correctedText = correctedText.replace(new RegExp(escapedText, 'i'), replacement)
+    })
+
+    return cleanOcrSourceForTranslation(correctedText)
+  }
+
+  async function recognizeSelectionWithLocalFormulaOcr(text, capture) {
+    const originalText = cleanOcrSourceForTranslation(text)
+    const detectedFormulas = getInlineFormulaMetadataFromText(originalText, 'selection-text')
+    if (!capture?.image || !selectionTextNeedsVisualRepair(originalText)) {
+      return {
+        text: originalText,
+        inlineFormulas: detectedFormulas,
+        unresolved: false,
+      }
+    }
+
+    if (isDenseFormulaOrSymbolText(originalText) || isScientificExpressionOnly(originalText)) {
+      try {
+        const formulaPipeline = await getInlineFormulaOcrPipeline()
+        const output = await formulaPipeline(capture.image, {
+          max_new_tokens: 128,
+          num_beams: 2,
+        })
+        const generatedText = Array.isArray(output)
+          ? output[0]?.generated_text || output[0]?.text
+          : output?.generated_text || output?.text
+        const normalizedFormula = normalizeSimpleInlineLatex(generatedText)
+
+        if (normalizedFormula?.text) {
+          return {
+            text: normalizedFormula.text,
+            inlineFormulas: [{
+              text: normalizedFormula.text,
+              latex: normalizedFormula.latex,
+              source: 'local-formula-ocr',
+            }],
+            unresolved: false,
+          }
+        }
+      } catch (error) {
+        console.warn('划词公式 OCR 失败，保留原公式', {
+          error: error.message,
+        })
+      }
+
+      return {
+        text: originalText,
+        inlineFormulas: detectedFormulas,
+        unresolved: selectionTextNeedsVisualRepair(originalText),
+      }
+    }
+
+    let worker = null
+
+    try {
+      worker = await createWorker('eng', 1, {
+        workerPath: `${TESSERACT_ASSET_BASE}/worker.min.js`,
+        corePath: `${TESSERACT_ASSET_BASE}/core/tesseract-core-simd-lstm.wasm.js`,
+        langPath: `${TESSERACT_ASSET_BASE}/lang`,
+        cacheMethod: 'none',
+      })
+      const { data } = await worker.recognize(capture.image, {}, { text: true, blocks: true })
+      const recognizedText = cleanOcrText(data.text || '')
+      const formulaResult = await recognizeInlineFormulaCandidates(
+        data,
+        capture.image,
+        capture,
+        [],
+      )
+      const correctedText = applyFormulaCorrectionsToText(recognizedText, formulaResult.corrections)
+      const canUseRecognizedText =
+        correctedText &&
+        formulaResult.corrections.length > 0 &&
+        getSelectionWordSimilarity(originalText, correctedText) >= 0.55
+      const inlineFormulas = formulaResult.corrections.map((correction) => ({
+        text: correction.replacement,
+        latex: correction.latex,
+        source: correction.source,
+      }))
+
+      return {
+        text: canUseRecognizedText ? correctedText : originalText,
+        inlineFormulas: inlineFormulas.length ? inlineFormulas : detectedFormulas,
+        unresolved:
+          formulaResult.unresolvedRects.length > 0 ||
+          (selectionTextNeedsVisualRepair(originalText) && formulaResult.corrections.length === 0) ||
+          (/�/.test(originalText) && !canUseRecognizedText),
+      }
+    } catch (error) {
+      console.warn('划词局部 OCR 失败，保留 PDF 文本层结果', {
+        error: error.message,
+      })
+      return {
+        text: originalText,
+        inlineFormulas: detectedFormulas,
+        unresolved: selectionTextNeedsVisualRepair(originalText),
+      }
+    } finally {
+      if (worker) await worker.terminate()
+    }
+  }
+
+  function getMultimodalRecognitionText(blocks = []) {
+    return cleanOcrText(
+      blocks
+        .slice()
+        .sort((firstBlock, secondBlock) =>
+          (Number(firstBlock.y) || 0) - (Number(secondBlock.y) || 0) ||
+          (Number(firstBlock.x) || 0) - (Number(secondBlock.x) || 0),
+        )
+        .map((block) => block.text)
+        .filter(Boolean)
+        .join('\n'),
+    )
+  }
+
+  function getMultimodalRecognitionFormulas(blocks = []) {
+    return blocks.flatMap((block) => {
+      const blockType = String(block.type || '').toLowerCase()
+      const formulas = []
+
+      if (blockType.includes('formula') && block.text) {
+        formulas.push({
+          text: block.text,
+          latex: block.latex,
+          source: 'multimodal',
+        })
+      }
+      ;(block.formulaRegions || []).forEach((region) => {
+        if (!region.text) return
+        formulas.push({
+          text: region.text,
+          latex: region.latex,
+          source: region.source || 'multimodal',
+        })
+      })
+      ;(block.sourceBlocks || []).forEach((line) => {
+        const lineType = String(line.type || '').toLowerCase()
+        ;(line.formulaRegions || []).forEach((region) => {
+          if (!region.text) return
+          formulas.push({
+            text: region.text,
+            latex: region.latex,
+            source: region.source || 'multimodal',
+          })
+        })
+        if (!lineType.includes('formula') || !line.text) return
+        formulas.push({
+          text: line.text,
+          latex: line.latex,
+          source: 'multimodal',
+        })
+      })
+
+      return formulas
+    })
+  }
+
+  function getRecognitionInvalidCharacterCount(text) {
+    return Array.from(String(text || '')).filter((character) => {
+      const code = character.charCodeAt(0)
+      return character === '�' || (code <= 31 && ![9, 10, 13].includes(code))
+    }).length
+  }
+
+  function shouldPreferMultimodalRecognition(localBlocks = [], multimodalBlocks = []) {
+    const localText = cleanOcrText(localBlocks.map((block) => block.text).filter(Boolean).join('\n'))
+    const multimodalText = getMultimodalRecognitionText(multimodalBlocks)
+    if (!multimodalText) return false
+    if (!localText) return true
+
+    const localInvalidCount = getRecognitionInvalidCharacterCount(localText)
+    const multimodalInvalidCount = getRecognitionInvalidCharacterCount(multimodalText)
+    if (multimodalInvalidCount > localInvalidCount) return false
+    if (localInvalidCount > multimodalInvalidCount) return true
+
+    const localUsefulCount = getUsefulOcrCharacterCount(localText)
+    const multimodalUsefulCount = getUsefulOcrCharacterCount(multimodalText)
+    const wordSimilarity = getSelectionWordSimilarity(localText, multimodalText)
+    const multimodalHasFormulaMetadata = multimodalBlocks.some((block) =>
+      getOcrBlockContentType(block) === 'formula' ||
+      getBlockInlineFormulas(block).length > 0,
+    )
+    const localHasFormulaMetadata = localBlocks.some((block) =>
+      getOcrBlockContentType(block) === 'formula' ||
+      getBlockInlineFormulas(block).length > 0,
+    )
+
+    if (multimodalHasFormulaMetadata && !localHasFormulaMetadata) {
+      return multimodalUsefulCount >= Math.max(1, localUsefulCount * 0.55)
+    }
+
+    return (
+      multimodalUsefulCount >= Math.max(1, localUsefulCount * 0.75) &&
+      wordSimilarity >= 0.5
+    )
+  }
+
+  async function prepareSelectionTranslation(text, capture) {
+    const originalText = cleanOcrSourceForTranslation(text)
+    let result = await recognizeSelectionWithLocalFormulaOcr(originalText, capture)
+
+    if (
+      capture?.image &&
+      settingsSupportMultimodal(settingsFormRef.current) &&
+      (result.unresolved || /�/.test(originalText))
+    ) {
+      try {
+        const blocks = await requestMultimodalTextRecognition(
+          capture.image,
+          capture,
+          'selection',
+        )
+        const multimodalText = getMultimodalRecognitionText(blocks)
+        const canUseMultimodalText =
+          multimodalText &&
+          (
+            /�/.test(result.text) ||
+            getSelectionWordSimilarity(originalText, multimodalText) >= 0.55
+          )
+
+        if (canUseMultimodalText) {
+          result = {
+            text: multimodalText,
+            inlineFormulas: [
+              ...getMultimodalRecognitionFormulas(blocks),
+              ...getInlineFormulaMetadataFromText(multimodalText, 'multimodal-selection'),
+            ],
+            unresolved: false,
+          }
+        }
+      } catch (error) {
+        console.warn('划词多模态纠错失败，使用本地识别结果', {
+          error: error.message,
+        })
+      }
+    }
+
+    const sourceText = cleanOcrSourceForTranslation(result.text || originalText)
+    const formulaOnly =
+      isScientificExpressionOnly(sourceText) ||
+      isDenseFormulaOrSymbolText(sourceText)
+    if (formulaOnly) {
+      return {
+        sourceText,
+        translation: sourceText,
+        inlineFormulas: result.inlineFormulas,
+        preserveOriginal: true,
+      }
+    }
+
+    return {
+      sourceText,
+      translation: await translateOcrBlockText(sourceText, result.inlineFormulas),
+      inlineFormulas: result.inlineFormulas,
+      preserveOriginal: false,
+    }
+  }
+
+  prepareSelectionTranslationRef.current = prepareSelectionTranslation
 
   function getOcrTranslationFallback(block, sourceText, reason) {
     return {
       ...block,
       sourceText,
-      translation: sourceText || block.text,
+      translation: '',
       translationFallback: true,
-      translationError: reason,
+      translationError: reason || '翻译失败',
     }
   }
 
@@ -7421,7 +9240,125 @@ function App() {
     }
   }
 
-  function scorePlacementCandidate(rect, block, placedRects, sourceRects, context, imageWidth, imageHeight) {
+  function getPathSegments(points = []) {
+    return points.slice(1).map((point, index) => ({
+      start: points[index],
+      end: point,
+    }))
+  }
+
+  function getPointOrientation(firstPoint, secondPoint, thirdPoint) {
+    return (
+      (secondPoint.y - firstPoint.y) * (thirdPoint.x - secondPoint.x) -
+      (secondPoint.x - firstPoint.x) * (thirdPoint.y - secondPoint.y)
+    )
+  }
+
+  function doLineSegmentsIntersect(firstSegment, secondSegment) {
+    const firstOrientation = getPointOrientation(
+      firstSegment.start,
+      firstSegment.end,
+      secondSegment.start,
+    )
+    const secondOrientation = getPointOrientation(
+      firstSegment.start,
+      firstSegment.end,
+      secondSegment.end,
+    )
+    const thirdOrientation = getPointOrientation(
+      secondSegment.start,
+      secondSegment.end,
+      firstSegment.start,
+    )
+    const fourthOrientation = getPointOrientation(
+      secondSegment.start,
+      secondSegment.end,
+      firstSegment.end,
+    )
+
+    return (
+      ((firstOrientation > 0 && secondOrientation < 0) ||
+        (firstOrientation < 0 && secondOrientation > 0)) &&
+      ((thirdOrientation > 0 && fourthOrientation < 0) ||
+        (thirdOrientation < 0 && fourthOrientation > 0))
+    )
+  }
+
+  function doesLineSegmentCrossRect(segment, rect) {
+    const edges = [
+      [{ x: rect.x, y: rect.y }, { x: rect.x + rect.width, y: rect.y }],
+      [{ x: rect.x + rect.width, y: rect.y }, { x: rect.x + rect.width, y: rect.y + rect.height }],
+      [{ x: rect.x + rect.width, y: rect.y + rect.height }, { x: rect.x, y: rect.y + rect.height }],
+      [{ x: rect.x, y: rect.y + rect.height }, { x: rect.x, y: rect.y }],
+    ]
+
+    return edges.some(([start, end]) =>
+      doLineSegmentsIntersect(segment, { start, end }),
+    )
+  }
+
+  function scoreConnectorPath(points, obstacleRects, existingPaths) {
+    const segments = getPathSegments(points)
+    const obstacleCount = obstacleRects.reduce(
+      (count, rect) =>
+        count + (segments.some((segment) => doesLineSegmentCrossRect(segment, rect)) ? 1 : 0),
+      0,
+    )
+    const crossingCount = existingPaths.reduce(
+      (count, path) =>
+        count + getPathSegments(path).filter((existingSegment) =>
+          segments.some((segment) => doLineSegmentsIntersect(segment, existingSegment)),
+        ).length,
+      0,
+    )
+    const length = segments.reduce(
+      (sum, segment) =>
+        sum + Math.hypot(
+          segment.end.x - segment.start.x,
+          segment.end.y - segment.start.y,
+        ),
+      0,
+    )
+
+    return obstacleCount * 8 + crossingCount * 3 + length * 0.002
+  }
+
+  function getDiagramConnectorPath(sourceRect, translationRect, obstacleRects, existingPaths) {
+    const connector = getDiagramConnectorPoints(sourceRect, translationRect)
+    const directPath = [connector.start, connector.end]
+    if (scoreConnectorPath(directPath, obstacleRects, existingPaths) < 1) {
+      return directPath
+    }
+
+    const horizontalFirst = [
+      connector.start,
+      { x: connector.end.x, y: connector.start.y },
+      connector.end,
+    ]
+    const verticalFirst = [
+      connector.start,
+      { x: connector.start.x, y: connector.end.y },
+      connector.end,
+    ]
+
+    return [directPath, horizontalFirst, verticalFirst]
+      .map((points) => ({
+        points,
+        score: scoreConnectorPath(points, obstacleRects, existingPaths),
+      }))
+      .sort((firstPath, secondPath) => firstPath.score - secondPath.score)[0].points
+  }
+
+  function scorePlacementCandidate(
+    rect,
+    block,
+    placedRects,
+    sourceRects,
+    placedConnectorPaths,
+    context,
+    imageWidth,
+    imageHeight,
+  ) {
     const rectArea = rect.width * rect.height
     const sourceOverlap = sourceRects.reduce((sum, sourceRect) => sum + getRectOverlapArea(rect, sourceRect), 0)
     const placedOverlap = placedRects.reduce((sum, placedRect) => sum + getRectOverlapArea(rect, placedRect), 0)
@@ -7438,6 +9375,17 @@ function App() {
     const leftSpace = block.x > rect.width * 1.05 && Math.abs(getRectCenter(rect).y - getRectCenter(block).y) < block.height * 3
     const sideBonus = isRightSide && rightSpace ? 0.24 : isLeftSide && leftSpace ? 0.16 : 0
     const candidatePriorityPenalty = rect.priority * 0.035
+    const connector = getDiagramConnectorPoints(block, rect)
+    const connectorCrossings = placedConnectorPaths.reduce(
+      (count, path) =>
+        count + getPathSegments(path).filter((segment) =>
+          doLineSegmentsIntersect(
+            { start: connector.start, end: connector.end },
+            segment,
+          ),
+        ).length,
+      0,
+    )
 
     return (
       blankScore * 0.42 +
@@ -7445,6 +9393,7 @@ function App() {
       sideBonus -
       sourceOverlapRatio * 4.8 -
       placedOverlapRatio * 7.2 -
+      connectorCrossings * 0.85 -
       candidatePriorityPenalty
     )
   }
@@ -7495,6 +9444,7 @@ function App() {
     imageHeight,
     placedRects,
     sourceRects,
+    placedConnectorPaths,
     context,
   ) {
     const padding = 8
@@ -7506,7 +9456,16 @@ function App() {
       )
       .map((rect) => ({
         rect,
-        score: scorePlacementCandidate(rect, block, placedRects, sourceRects, context, imageWidth, imageHeight),
+        score: scorePlacementCandidate(
+          rect,
+          block,
+          placedRects,
+          sourceRects,
+          placedConnectorPaths,
+          context,
+          imageWidth,
+          imageHeight,
+        ),
       }))
 
     scoredCandidates.sort((firstCandidate, secondCandidate) => secondCandidate.score - firstCandidate.score)
@@ -7562,44 +9521,412 @@ function App() {
     return fallback
   }
 
-  async function translateDiagramBlocks(blocks) {
-    const translatedBlocks = []
-    const translatableBlocks = blocks.filter((item) => shouldTranslateOcrBlock(item)).slice(0, 120)
+  function splitDiagramBlockByStrictBoundaries(block, boundaryReview = false) {
+    const sourceLines = getCompareSourceBlocks(block)
+    if (sourceLines.length <= 1) {
+      return [{
+        ...block,
+        sourceBlocks: sourceLines,
+      }]
+    }
 
-    console.log('OCR 模块翻译统计', {
-      inputCount: blocks.length,
-      translatableCount: translatableBlocks.length,
-      skippedCount: Math.max(0, blocks.length - translatableBlocks.length),
-      moduleTextLengths: translatableBlocks.slice(0, 20).map((block) => block.text.length),
+    const lineGroups = []
+
+    sourceLines.forEach((line) => {
+      const currentGroup = lineGroups[lineGroups.length - 1]
+      if (!currentGroup?.length) {
+        lineGroups.push([line])
+        return
+      }
+
+      const currentBlock = mergeOcrBlocks(currentGroup, Number(block.index) || 0)
+      if (
+        shouldMergeWrappedLine(currentBlock, line, {
+          strict: true,
+          diagram: true,
+          boundaryReview,
+        })
+      ) {
+        currentGroup.push(line)
+        return
+      }
+
+      lineGroups.push([line])
     })
 
-    for (const block of translatableBlocks) {
-      const sourceText = cleanOcrSourceForTranslation(block.text)
+    if (lineGroups.length === 1) {
+      return [{
+        ...block,
+        sourceBlocks: sourceLines,
+      }]
+    }
 
-      try {
-        const translation = cleanResultText(await translateOcrBlockText(sourceText))
+    return lineGroups.map((lines, groupIndex) => {
+      const splitBlock = mergeOcrBlocks(lines, (Number(block.index) || 0) + groupIndex / 1000)
 
-        if (isUselessTranslationResult(translation)) {
-          console.warn('OCR 图解/对照模式使用原文兜底', { text: block.text, translation })
-          translatedBlocks.push(getOcrTranslationFallback(block, sourceText, 'empty-translation'))
-          continue
-        }
+      return {
+        ...splitBlock,
+        moduleId: `${block.moduleId || `m${Number(block.index) + 1 || 1}`}-s${groupIndex + 1}`,
+        sourceText: splitBlock.text,
+        translation: '',
+        formulaRegions: (block.formulaRegions || []).filter((region) =>
+          getRectOverlapArea(region, splitBlock) > 0,
+        ),
+        multimodal: Boolean(block.multimodal),
+        diagramBoundarySplit: true,
+      }
+    })
+  }
 
-        translatedBlocks.push({
-          ...block,
-          sourceText,
-          translation,
-        })
-      } catch (error) {
-        console.warn('OCR 图解/对照模式单块翻译失败，使用原文兜底', {
-          text: block.text,
-          error: error.message,
-        })
-        translatedBlocks.push(getOcrTranslationFallback(block, sourceText, error.message))
+  function getDiagramTranslationUnits(text) {
+    const cjkCharacters = String(text || '').match(/[\u3400-\u9fff]/g) || []
+    const latinTokens = String(text || '').match(/[A-Za-z0-9]+/g) || []
+
+    return cjkCharacters.length + latinTokens.length
+  }
+
+  function hasWeirdDiagramTranslationStack(translation, block) {
+    const normalizedTranslation = cleanResultText(translation || '').trim()
+    if (!normalizedTranslation) return true
+
+    const compactTranslation = normalizedTranslation.replace(/\s+/g, '')
+    const sourceLines = getCompareSourceBlocks(block)
+    const sentenceParts = normalizedTranslation
+      .split(/[\n。！？!?；;]+/)
+      .map((part) => part.replace(/[\s，、,:：]/g, '').trim())
+      .filter((part) => part.length >= 2)
+    const seenParts = new Set()
+    const hasRepeatedPart = sentenceParts.some((part) => {
+      const key = part.toLowerCase()
+      if (seenParts.has(key)) return true
+      seenParts.add(key)
+      return false
+    })
+    const lineCount = normalizedTranslation.split(/\n+/).filter((line) => line.trim()).length
+    const sourceText = cleanOcrSourceForTranslation(block?.text || '')
+    const sourceWords = sourceText.match(/[A-Za-z][A-Za-z'-]*/g) || []
+    const targetUnits = getDiagramTranslationUnits(normalizedTranslation)
+
+    if (getRecognitionInvalidCharacterCount(normalizedTranslation) > 0) return true
+    if (/(.)\1{4,}/u.test(compactTranslation)) return true
+    if (/(.{2,12})(?:\1){2,}/u.test(compactTranslation)) return true
+    if (hasRepeatedPart) return true
+    if (lineCount > Math.max(3, sourceLines.length * 2 + 1)) return true
+    if (targetUnits > Math.max(70, sourceWords.length * 5.5)) return true
+
+    return false
+  }
+
+  function assessDiagramTranslation(block) {
+    const sourceText = cleanOcrSourceForTranslation(block?.text || '')
+    const translation = cleanResultText(block?.translation || '')
+    const sourceWords = sourceText.match(/[A-Za-z][A-Za-z'-]*/g) || []
+    const isShort = sourceWords.length <= 8 || sourceText.length <= 48
+
+    if (block?.visualLayoutIssue) {
+      return {
+        valid: false,
+        isShort,
+        needsExpansion: false,
+        reason: block.visualLayoutIssue,
+      }
+    }
+    if (!translation || isUselessTranslationResult(translation)) {
+      return { valid: false, isShort, needsExpansion: !isShort, reason: 'empty' }
+    }
+    if (translation.toLowerCase() === sourceText.toLowerCase()) {
+      const canRemainUntranslated =
+        isLikelyFormulaOrTableLine(sourceText) ||
+        /^(?:[A-Z0-9]{1,12}|pH)$/.test(sourceText)
+      if (canRemainUntranslated) {
+        return { valid: true, isShort, needsExpansion: false, reason: '' }
+      }
+      return { valid: false, isShort, needsExpansion: !isShort, reason: 'untranslated' }
+    }
+    if (hasWeirdDiagramTranslationStack(translation, block)) {
+      return { valid: false, isShort, needsExpansion: false, reason: 'stacked' }
+    }
+
+    const targetUnits = getDiagramTranslationUnits(translation)
+    if (isShort) {
+      return { valid: true, isShort, needsExpansion: false, reason: '' }
+    }
+
+    const minimumTargetUnits = Math.max(8, Math.ceil(sourceWords.length * 0.58))
+    const targetCjkCharacters = translation.match(/[\u3400-\u9fff]/g) || []
+    const targetLatinTokens = translation.match(/[A-Za-z0-9]+/g) || []
+    const sourceLooksOpen =
+      /^[a-z]/.test(sourceText) ||
+      /[-,;:(（]$/.test(sourceText) ||
+      /\b(of|by|for|with|from|to|in|on|at|and|or|the|a|an|into|under|over|between|within|using|via)$/i.test(sourceText)
+    const translationLooksOpen =
+      /(?:的|和|与|或|及|以及|在|从|向|对|为|由|通过|由于|因为|如果|当|将|被|使|而|但|且|并|从而|以便)[，,;；:]?$/.test(
+        translation,
+      )
+    const sourceEndsSentence = /[.!?]["')\]]*$/.test(sourceText)
+    const translationEndsSentence = /[。！？!?]["')\]]*$/.test(translation)
+
+    if (targetUnits < minimumTargetUnits) {
+      return { valid: false, isShort, needsExpansion: true, reason: 'missing-content' }
+    }
+    if (
+      targetLatinTokens.length >= Math.max(5, Math.ceil(sourceWords.length * 0.45)) &&
+      targetCjkCharacters.length < Math.max(4, sourceWords.length * 0.5)
+    ) {
+      return { valid: false, isShort, needsExpansion: false, reason: 'untranslated-residue' }
+    }
+    if (sourceLooksOpen || translationLooksOpen) {
+      return { valid: false, isShort, needsExpansion: true, reason: 'open-boundary' }
+    }
+    if (sourceEndsSentence && !translationEndsSentence && targetUnits < sourceWords.length * 0.9) {
+      return { valid: false, isShort, needsExpansion: true, reason: 'truncated-sentence' }
+    }
+
+    return { valid: true, isShort, needsExpansion: false, reason: '' }
+  }
+
+  function getDiagramBoundaryMergeScore(firstBlock, secondBlock, attempt) {
+    const firstComesFirst =
+      firstBlock.y < secondBlock.y ||
+      (Math.abs(firstBlock.y - secondBlock.y) < Math.max(firstBlock.height, secondBlock.height) * 0.45 &&
+        firstBlock.x <= secondBlock.x)
+    const previousBlock = firstComesFirst ? firstBlock : secondBlock
+    const nextBlock = firstComesFirst ? secondBlock : firstBlock
+    const previousLine = getLastSourceLine(previousBlock)
+    const nextLine = getFirstSourceLine(nextBlock)
+    const previousText = String(previousLine.text || '').trim()
+    const nextText = String(nextLine.text || '').trim()
+    const previousWords = getWordCount(previousText)
+    const nextWords = getWordCount(nextText)
+    const previousEndsOpen =
+      /[-,(（/:：]$/.test(previousText) ||
+      /\b(of|by|for|with|from|to|in|on|at|and|or|the|a|an|into|under|over|between|within|using|via)$/i.test(previousText)
+    const nextContinues = /^[a-z(（]/.test(nextText) || isLikelyContinuationLine(nextText)
+    const longBodyContinuation =
+      previousWords >= (attempt === 1 ? 7 : 6) &&
+      nextWords >= 3 &&
+      !hasSentenceEnding(previousText)
+
+    if (hasSentenceEnding(previousText) && !/[:：]$/.test(previousText)) return null
+    if (previousWords <= 4 && nextWords <= 4 && /^[A-Z0-9]/.test(nextText) && !previousEndsOpen) return null
+    if (!previousEndsOpen && !nextContinues && !longBodyContinuation) return null
+
+    const geometricScore = getCompareModuleMergeScore(firstBlock, secondBlock, attempt)
+    if (geometricScore === null) return null
+
+    return geometricScore +
+      (previousEndsOpen ? 0 : 0.2) +
+      (nextContinues ? 0 : 0.2)
+  }
+
+  function findDiagramBoundaryCandidateIndex(blocks, blockIndex, attempt, consumedIndexes) {
+    let bestIndex = -1
+    let bestScore = Infinity
+
+    blocks.forEach((candidate, candidateIndex) => {
+      if (candidateIndex === blockIndex || consumedIndexes.has(candidateIndex)) return
+      const score = getDiagramBoundaryMergeScore(blocks[blockIndex], candidate, attempt)
+      if (score === null || score >= bestScore) return
+
+      bestIndex = candidateIndex
+      bestScore = score
+    })
+
+    return bestIndex
+  }
+
+  function mergeDiagramModuleBlocks(firstBlock, secondBlock, attempt) {
+    const uniqueLines = []
+    const lineKeys = new Set()
+
+    ;[...getCompareSourceBlocks(firstBlock), ...getCompareSourceBlocks(secondBlock)]
+      .sort((firstLine, secondLine) => firstLine.y - secondLine.y || firstLine.x - secondLine.x)
+      .forEach((line) => {
+        const lineKey = [
+          Math.round(line.x),
+          Math.round(line.y),
+          Math.round(line.width),
+          Math.round(line.height),
+          line.text,
+        ].join('|')
+        if (lineKeys.has(lineKey)) return
+        lineKeys.add(lineKey)
+        uniqueLines.push(line)
+      })
+
+    const merged = mergeOcrBlocks(uniqueLines, Math.min(firstBlock.index, secondBlock.index))
+
+    return {
+      ...merged,
+      sourceText: merged.text,
+      translation: '',
+      formulaRegions: [
+        ...(firstBlock.formulaRegions || []),
+        ...(secondBlock.formulaRegions || []),
+      ],
+      multimodal: Boolean(firstBlock.multimodal || secondBlock.multimodal),
+      diagramBoundaryRetries: attempt,
+    }
+  }
+
+  async function translateDiagramModule(block, force = false) {
+    const sourceText = cleanOcrSourceForTranslation(block.text)
+    const existingTranslation = cleanResultText(block.translation || '')
+
+    if (!force && existingTranslation && !isUselessTranslationResult(existingTranslation)) {
+      return {
+        ...block,
+        sourceText,
+        translation: existingTranslation,
       }
     }
 
-    return translatedBlocks
+    try {
+      const translation = cleanResultText(
+        await translateOcrBlockText(sourceText, getBlockInlineFormulas(block)),
+      )
+      if (isUselessTranslationResult(translation)) {
+        return getOcrTranslationFallback(block, sourceText, 'empty-translation')
+      }
+
+      return {
+        ...block,
+        sourceText,
+        translation,
+        translationFallback: false,
+        translationError: '',
+      }
+    } catch (error) {
+      console.warn('OCR 图解模式单模块翻译失败，保留原图区域', {
+        text: block.text,
+        error: error.message,
+      })
+      return getOcrTranslationFallback(block, sourceText, error.message)
+    }
+  }
+
+  async function translateDiagramBlocks(blocks, reviewOptions = {}) {
+    const strictBlocks = blocks
+      .filter((item) => isVisualTranslationBlock(item))
+      .flatMap((block) => splitDiagramBlockByStrictBoundaries(block))
+    let workingBlocks = await mapWithConcurrency(
+      strictBlocks,
+      3,
+      (block) => translateDiagramModule(block),
+    )
+
+    console.log('OCR 图解模块翻译统计', {
+      inputCount: blocks.length,
+      strictModuleCount: strictBlocks.length,
+      skippedCount: Math.max(0, blocks.length - strictBlocks.length),
+      moduleTextLengths: strictBlocks.slice(0, 20).map((block) => block.text.length),
+    })
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const assessments = workingBlocks.map(assessDiagramTranslation)
+      const invalidIndexes = assessments
+        .map((assessment, index) => (!assessment.valid ? index : -1))
+        .filter((index) => index >= 0)
+      if (!invalidIndexes.length) break
+
+      const consumedIndexes = new Set()
+      const revisedBlocks = []
+
+      for (const blockIndex of invalidIndexes) {
+        if (consumedIndexes.has(blockIndex)) continue
+
+        const block = workingBlocks[blockIndex]
+        const assessment = assessments[blockIndex]
+        const splitBlocks = splitDiagramBlockByStrictBoundaries(block, true)
+        consumedIndexes.add(blockIndex)
+
+        if (reviewOptions.multimodal) {
+          const reviewedBlocks = await reviewVisualModuleBoundary({
+            mode: 'diagram',
+            image: reviewOptions.image,
+            imageSize: reviewOptions.imageSize,
+            block,
+            blocks: workingBlocks,
+            attempt,
+            reason: assessment.reason,
+          })
+          const reviewedTextBlocks = reviewedBlocks.filter(isVisualTranslationBlock)
+          if (reviewedTextBlocks.length) {
+            const translatedReviewedBlocks = await mapWithConcurrency(
+              reviewedTextBlocks,
+              3,
+              (reviewedBlock) => translateDiagramModule({
+                ...reviewedBlock,
+                diagramBoundaryRetries: attempt,
+              }, true),
+            )
+            revisedBlocks.push(...translatedReviewedBlocks)
+            continue
+          }
+        }
+
+        if (splitBlocks.length > 1) {
+          for (const splitBlock of splitBlocks) {
+            revisedBlocks.push(await translateDiagramModule({
+              ...splitBlock,
+              diagramBoundaryRetries: attempt,
+            }, true))
+          }
+          continue
+        }
+
+        const candidateIndex = assessment.needsExpansion
+          ? findDiagramBoundaryCandidateIndex(workingBlocks, blockIndex, attempt, consumedIndexes)
+          : -1
+
+        if (candidateIndex >= 0) {
+          consumedIndexes.add(candidateIndex)
+          const mergedBlock = mergeDiagramModuleBlocks(block, workingBlocks[candidateIndex], attempt)
+          revisedBlocks.push(await translateDiagramModule(mergedBlock, true))
+        } else {
+          revisedBlocks.push(await translateDiagramModule({
+            ...block,
+            diagramBoundaryRetries: attempt,
+            diagramComplianceReason: assessment.reason,
+          }, true))
+        }
+      }
+
+      workingBlocks = workingBlocks
+        .filter((_block, index) => !consumedIndexes.has(index))
+        .concat(revisedBlocks)
+        .sort((firstBlock, secondBlock) => firstBlock.y - secondBlock.y || firstBlock.x - secondBlock.x)
+    }
+
+    console.log('OCR 图解模块合规复检', {
+      moduleCount: workingBlocks.length,
+      modules: workingBlocks.slice(0, 30).map((block) => ({
+        text: block.text,
+        assessment: assessDiagramTranslation(block),
+        boundaryRetries: block.diagramBoundaryRetries || 0,
+      })),
+    })
+
+    const completedBlocks = workingBlocks.map((block) => {
+      const assessment = assessDiagramTranslation(block)
+      if (assessment.valid) {
+        return {
+          ...block,
+          translationFallback: false,
+          translationError: '',
+        }
+      }
+      return getOcrTranslationFallback(
+        block,
+        cleanOcrSourceForTranslation(block.text),
+        block.translationError || assessment.reason,
+      )
+    })
+
+    return completedBlocks.map((block, index) => ({
+      ...block,
+      index,
+    }))
   }
 
   function normalizeMultimodalCoordinate(value, total) {
@@ -7647,6 +9974,42 @@ function App() {
     return ''
   }
 
+  function normalizeMultimodalConfidence(value, fallback = 100) {
+    const confidence = Number(value)
+    return Number.isFinite(confidence)
+      ? clampNumber(confidence, 0, 100)
+      : fallback
+  }
+
+  function normalizeMultimodalFormulaRegions(item = {}, imageSize = {}) {
+    const regions = Array.isArray(item.formulaRegions)
+      ? item.formulaRegions
+      : Array.isArray(item.formula_regions)
+        ? item.formula_regions
+        : Array.isArray(item.inlineFormulas)
+          ? item.inlineFormulas
+          : []
+
+    return regions
+      .map((region, index) => {
+        const rect = normalizeMultimodalRect(region, imageSize)
+        const text = cleanOcrSourceForTranslation(
+          getMultimodalTextValue(region, ['original', 'text', 'sourceText', 'formula']),
+        )
+        if (!rect || !text) return null
+
+        return {
+          id: region.id || region.formulaId || `formula-${index + 1}`,
+          type: String(region.type || 'inline_formula'),
+          text,
+          latex: String(region.latex || region.tex || '').trim(),
+          confidence: normalizeMultimodalConfidence(region.confidence),
+          ...rect,
+        }
+      })
+      .filter(Boolean)
+  }
+
   function getMultimodalUnionRect(rects) {
     if (!rects.length) return null
 
@@ -7658,7 +10021,7 @@ function App() {
     return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }
   }
 
-  function normalizeMultimodalTranslationBlocks(rawBlocks = [], imageSize = {}) {
+  function normalizeMultimodalTranslationBlocks(rawBlocks = [], imageSize = {}, options = {}) {
     return (Array.isArray(rawBlocks) ? rawBlocks : [])
       .map((block, index) => {
         const sourceBlocks = (Array.isArray(block?.sourceBlocks) && block.sourceBlocks.length
@@ -7676,14 +10039,32 @@ function App() {
             return {
               index: lineIndex,
               lineId: line.lineId || line.id || `${index}-${lineIndex}`,
+              type: String(line.type || line.contentType || 'text'),
               text,
               sourceText: text,
               translation: isUselessTranslationResult(translation) ? '' : translation,
+              latex: String(line.latex || line.tex || '').trim(),
+              symbolDensity: Math.max(0, Math.min(1, Number(line.symbolDensity || line.symbol_density) || 0)),
+              formulaRegions: normalizeMultimodalFormulaRegions(line, imageSize),
               ...rect,
-              confidence: Number(line.confidence) || 100,
+              fontSize: Math.max(
+                1,
+                Number(line.fontSize || line.font_size || line.font?.size) || rect.height * 0.82,
+              ),
+              confidence: normalizeMultimodalConfidence(line.confidence),
             }
           })
           .filter(Boolean)
+        const formulaRegions = [
+          ...normalizeMultimodalFormulaRegions(block, imageSize),
+          ...sourceBlocks.flatMap((line) => line.formulaRegions || []),
+        ].filter((region, regionIndex, regions) =>
+          regions.findIndex((candidate) =>
+            candidate.text === region.text &&
+            Math.abs(candidate.x - region.x) < 2 &&
+            Math.abs(candidate.y - region.y) < 2,
+          ) === regionIndex,
+        )
         const rect = normalizeMultimodalRect(block, imageSize) || getMultimodalUnionRect(sourceBlocks)
         const text = cleanOcrSourceForTranslation(
           getMultimodalTextValue(block, ['original', 'text', 'sourceText', 'originalText', 'moduleText']) ||
@@ -7694,32 +10075,256 @@ function App() {
           sourceBlocks.map((line) => line.translation).filter(Boolean).join('\n'),
         )
 
-        if (!rect || !text || !translation || isUselessTranslationResult(translation)) return null
+        const requireTranslation = options.requireTranslation !== false
+        if (
+          !rect ||
+          !text ||
+          (requireTranslation && (!translation || isUselessTranslationResult(translation)))
+        ) {
+          return null
+        }
 
         return {
           index,
           moduleId: block.moduleId || block.id || `m${index + 1}`,
+          type: String(block.type || block.contentType || 'text'),
           text,
           sourceText: text,
-          translation,
+          translation: isUselessTranslationResult(translation) ? '' : translation,
+          latex: String(block.latex || block.tex || '').trim(),
+          symbolDensity: Math.max(0, Math.min(1, Number(block.symbolDensity || block.symbol_density) || 0)),
+          formulaRegions,
           ...rect,
-          confidence: Number(block.confidence) || 100,
+          confidence: normalizeMultimodalConfidence(block.confidence),
           sourceBlocks: sourceBlocks.length
             ? sourceBlocks
-            : [{ index: 0, text, ...rect, confidence: Number(block.confidence) || 100 }],
+            : [{
+                index: 0,
+                text,
+                ...rect,
+                fontSize: Math.max(1, Number(block.fontSize || block.font_size) || rect.height * 0.82),
+                confidence: Number(block.confidence) || 100,
+              }],
           multimodal: true,
         }
       })
       .filter(Boolean)
-      .slice(0, 120)
+      .slice(0, options.mode === 'diagram' && Array.isArray(rawBlocks) ? rawBlocks.length : 120)
   }
 
-  async function requestMultimodalImageTranslation(image, imageSize, mode) {
+  function getVisualRectArea(rect) {
+    return Math.max(0, Number(rect?.width) || 0) * Math.max(0, Number(rect?.height) || 0)
+  }
+
+  function getVisualRectOverlapRatio(firstRect, secondRect) {
+    return getRectOverlapArea(firstRect, secondRect) /
+      Math.max(1, Math.min(getVisualRectArea(firstRect), getVisualRectArea(secondRect)))
+  }
+
+  function validateMultimodalVisualBlocks(blocks = [], imageSize = {}, mode = 'compare') {
+    const imageWidth = Number(imageSize.originalImageWidth || imageSize.width) || 0
+    const imageHeight = Number(imageSize.originalImageHeight || imageSize.height) || 0
+    const normalizedBlocks = []
+    const duplicateKeys = new Set()
+
+    blocks
+      .slice()
+      .sort((firstBlock, secondBlock) => firstBlock.y - secondBlock.y || firstBlock.x - secondBlock.x)
+      .forEach((block) => {
+        const text = cleanOcrSourceForTranslation(block.text)
+        const sourceBlocks = getCompareSourceBlocks(block)
+        const lineRect = getMultimodalUnionRect(sourceBlocks)
+        if (!text || !lineRect || !imageWidth || !imageHeight) return
+
+        const textKey = text.toLowerCase().replace(/\s+/g, ' ')
+        const duplicate = normalizedBlocks.some((candidate) =>
+          candidate.text.toLowerCase().replace(/\s+/g, ' ') === textKey &&
+          getVisualRectOverlapRatio(candidate, block) >= 0.72,
+        )
+        if (duplicate || duplicateKeys.has(`${textKey}|${Math.round(block.x)}|${Math.round(block.y)}`)) {
+          return
+        }
+        duplicateKeys.add(`${textKey}|${Math.round(block.x)}|${Math.round(block.y)}`)
+
+        const blockRight = block.x + block.width
+        const blockBottom = block.y + block.height
+        const lineRight = lineRect.x + lineRect.width
+        const lineBottom = lineRect.y + lineRect.height
+        const missesLineBounds =
+          lineRect.x < block.x - 2 ||
+          lineRect.y < block.y - 2 ||
+          lineRight > blockRight + 2 ||
+          lineBottom > blockBottom + 2
+        const x = clampNumber(Math.min(block.x, lineRect.x), 0, Math.max(imageWidth - 1, 0))
+        const y = clampNumber(Math.min(block.y, lineRect.y), 0, Math.max(imageHeight - 1, 0))
+        const right = clampNumber(Math.max(blockRight, lineRight), x + 1, imageWidth)
+        const bottom = clampNumber(Math.max(blockBottom, lineBottom), y + 1, imageHeight)
+
+        normalizedBlocks.push({
+          ...block,
+          text,
+          x,
+          y,
+          width: right - x,
+          height: bottom - y,
+          sourceBlocks,
+          visualLayoutIssue: missesLineBounds ? 'line-coverage' : '',
+        })
+      })
+
+    const consolidatedBlocks = []
+    normalizedBlocks.forEach((block) => {
+      const previousBlock = consolidatedBlocks[consolidatedBlocks.length - 1]
+      if (
+        previousBlock &&
+        isVisualTranslationBlock(previousBlock) &&
+        isVisualTranslationBlock(block) &&
+        shouldMergeWrappedLine(previousBlock, block, {
+          strict: true,
+          diagram: mode === 'diagram',
+        })
+      ) {
+        const mergedBlock = mergeOcrBlocks([previousBlock, block], previousBlock.index)
+        consolidatedBlocks[consolidatedBlocks.length - 1] = {
+          ...mergedBlock,
+          moduleId: previousBlock.moduleId,
+          type: previousBlock.type,
+          formulaRegions: [
+            ...(previousBlock.formulaRegions || []),
+            ...(block.formulaRegions || []),
+          ],
+          multimodal: true,
+          visualLayoutIssue:
+            previousBlock.visualLayoutIssue || block.visualLayoutIssue || '',
+        }
+        return
+      }
+      consolidatedBlocks.push(block)
+    })
+
+    consolidatedBlocks.forEach((block, blockIndex) => {
+      consolidatedBlocks.forEach((candidate, candidateIndex) => {
+        if (candidateIndex <= blockIndex) return
+        const overlapRatio = getVisualRectOverlapRatio(block, candidate)
+        if (overlapRatio < 0.58) return
+
+        block.visualLayoutIssue ||= 'module-overlap'
+        candidate.visualLayoutIssue ||= 'module-overlap'
+      })
+    })
+
+    debugMultimodalOcr('local layout validation', {
+      mode,
+      inputCount: blocks.length,
+      outputCount: consolidatedBlocks.length,
+      duplicateCount: Math.max(0, blocks.length - normalizedBlocks.length),
+      issueCount: consolidatedBlocks.filter((block) => block.visualLayoutIssue).length,
+      issues: consolidatedBlocks
+        .filter((block) => block.visualLayoutIssue)
+        .slice(0, 20)
+        .map((block) => ({
+          moduleId: block.moduleId,
+          issue: block.visualLayoutIssue,
+          bbox: {
+            x: block.x,
+            y: block.y,
+            width: block.width,
+            height: block.height,
+          },
+        })),
+    })
+
+    return consolidatedBlocks
+  }
+
+  async function mapWithConcurrency(items, concurrency, mapper) {
+    const results = new Array(items.length)
+    let nextIndex = 0
+
+    async function runWorker() {
+      while (nextIndex < items.length) {
+        const index = nextIndex
+        nextIndex += 1
+        results[index] = await mapper(items[index], index)
+      }
+    }
+
+    await Promise.all(
+      Array.from(
+        { length: Math.min(Math.max(1, concurrency), Math.max(1, items.length)) },
+        () => runWorker(),
+      ),
+    )
+    return results
+  }
+
+  async function enrichVisualInlineFormulas(blocks = [], imageUrl) {
+    const formulaTargets = blocks.flatMap((block, blockIndex) =>
+      (isVisualTranslationBlock(block) && Array.isArray(block.formulaRegions)
+        ? block.formulaRegions
+        : [])
+        .filter((region) => String(region.type || '').toLowerCase().includes('inline'))
+        .map((region, regionIndex) => ({ blockIndex, regionIndex, region })),
+    ).slice(0, 12)
+    if (!formulaTargets.length || !imageUrl) return blocks
+
+    let formulaPipeline
+    try {
+      formulaPipeline = await getInlineFormulaOcrPipeline()
+    } catch (error) {
+      console.warn('多模态行内公式的本地公式 OCR 加载失败，保留视觉识别结果', {
+        error: error.message,
+      })
+      return blocks
+    }
+
+    const nextBlocks = blocks.map((block) => ({
+      ...block,
+      formulaRegions: (block.formulaRegions || []).map((region) => ({ ...region })),
+    }))
+
+    for (const target of formulaTargets) {
+      try {
+        const formulaImage = await cropInlineFormulaImage(imageUrl, target.region)
+        const output = await formulaPipeline(formulaImage, {
+          max_new_tokens: 128,
+          num_beams: 2,
+        })
+        const generatedText = Array.isArray(output)
+          ? output[0]?.generated_text || output[0]?.text
+          : output?.generated_text || output?.text
+        const normalizedFormula = normalizeSimpleInlineLatex(generatedText)
+        if (!normalizedFormula?.text) continue
+
+        const block = nextBlocks[target.blockIndex]
+        const region = block.formulaRegions[target.regionIndex]
+        block.text = applyFormulaCorrectionsToText(block.text, [{
+          text: region.text,
+          replacement: normalizedFormula.text,
+        }])
+        block.formulaRegions[target.regionIndex] = {
+          ...region,
+          text: normalizedFormula.text,
+          latex: normalizedFormula.latex,
+          source: 'local-formula-ocr',
+        }
+      } catch (error) {
+        console.warn('多模态行内公式的本地公式 OCR 失败，保留原符号', {
+          error: error.message,
+        })
+      }
+    }
+
+    return nextBlocks
+  }
+
+  async function requestMultimodalVisualLayout(image, imageSize, mode, reviewContext = null) {
     const payload = {
       image,
       mode,
       imageWidth: imageSize.originalImageWidth || imageSize.width,
       imageHeight: imageSize.originalImageHeight || imageSize.height,
+      reviewContext,
     }
     const isDiagramMode = mode === 'diagram'
     debugMultimodalOcr('request image', {
@@ -7734,8 +10339,14 @@ function App() {
           : window.electronAPI.translateImageOCR(payload))
       : await requestBackendJson(isDiagramMode ? '/ai/translate-image-diagram' : '/ai/translate-image-ocr', payload)
 
-    const blocks = normalizeMultimodalTranslationBlocks(data.blocks || [], imageSize)
-    if (!blocks.length) throw new Error('多模态翻译未返回可用文字模块')
+    if (data.layout?.validation?.sizeMismatch) {
+      throw new Error('多模态模型返回的图片尺寸与原图不一致')
+    }
+    const blocks = normalizeMultimodalTranslationBlocks(data.blocks || [], imageSize, {
+      mode,
+      requireTranslation: false,
+    })
+    if (!blocks.length) throw new Error('多模态识别未返回可用文字模块')
 
     debugMultimodalOcr('provider layout', {
       raw: data.raw,
@@ -7748,9 +10359,197 @@ function App() {
         y: line.y,
         width: line.width,
         height: line.height,
+        fontSize: line.fontSize,
       })),
     })
 
+    return {
+      blocks,
+      layout: data.layout || null,
+    }
+  }
+
+  async function cropVisualBoundaryReviewImage(imageUrl, block, attempt) {
+    const sourceImage = await loadImage(imageUrl)
+    const paddingRatio = attempt === 1 ? 0.15 : 0.32
+    const paddingX = Math.max(12, block.width * paddingRatio)
+    const paddingY = Math.max(12, block.height * paddingRatio)
+    const sourceX = clampNumber(Math.floor(block.x - paddingX), 0, sourceImage.naturalWidth - 1)
+    const sourceY = clampNumber(Math.floor(block.y - paddingY), 0, sourceImage.naturalHeight - 1)
+    const sourceRight = clampNumber(
+      Math.ceil(block.x + block.width + paddingX),
+      sourceX + 1,
+      sourceImage.naturalWidth,
+    )
+    const sourceBottom = clampNumber(
+      Math.ceil(block.y + block.height + paddingY),
+      sourceY + 1,
+      sourceImage.naturalHeight,
+    )
+    const canvas = document.createElement('canvas')
+    canvas.width = sourceRight - sourceX
+    canvas.height = sourceBottom - sourceY
+    canvas.getContext('2d').drawImage(
+      sourceImage,
+      sourceX,
+      sourceY,
+      canvas.width,
+      canvas.height,
+      0,
+      0,
+      canvas.width,
+      canvas.height,
+    )
+
+    return {
+      image: canvas.toDataURL('image/png'),
+      width: canvas.width,
+      height: canvas.height,
+      originalImageWidth: canvas.width,
+      originalImageHeight: canvas.height,
+      offsetX: sourceX,
+      offsetY: sourceY,
+    }
+  }
+
+  function getReviewRelativeModule(block, crop) {
+    const x = clampNumber(block.x - crop.offsetX, 0, Math.max(crop.width - 1, 0))
+    const y = clampNumber(block.y - crop.offsetY, 0, Math.max(crop.height - 1, 0))
+    const right = clampNumber(
+      block.x + block.width - crop.offsetX,
+      x + 1,
+      crop.width,
+    )
+    const bottom = clampNumber(
+      block.y + block.height - crop.offsetY,
+      y + 1,
+      crop.height,
+    )
+
+    return {
+      moduleId: block.moduleId,
+      type: block.type,
+      bbox: {
+        x,
+        y,
+        width: right - x,
+        height: bottom - y,
+      },
+    }
+  }
+
+  function offsetReviewedVisualBlock(block, crop) {
+    const offsetRect = (rect) => ({
+      ...rect,
+      x: rect.x + crop.offsetX,
+      y: rect.y + crop.offsetY,
+    })
+
+    return {
+      ...offsetRect(block),
+      sourceBlocks: getCompareSourceBlocks(block).map(offsetRect),
+      formulaRegions: (block.formulaRegions || []).map(offsetRect),
+      visualLayoutIssue: block.visualLayoutIssue || '',
+      multimodalBoundaryReview: true,
+    }
+  }
+
+  async function reviewVisualModuleBoundary({
+    mode,
+    image,
+    imageSize,
+    block,
+    blocks,
+    attempt,
+    reason,
+  }) {
+    if (!image || !imageSize || !block) return []
+
+    try {
+      const crop = await cropVisualBoundaryReviewImage(image, block, attempt)
+      const cropRect = {
+        x: crop.offsetX,
+        y: crop.offsetY,
+        width: crop.width,
+        height: crop.height,
+      }
+      const neighborModules = blocks
+        .filter((candidate) =>
+          candidate !== block &&
+          getRectOverlapArea(candidate, cropRect) > 0,
+        )
+        .sort((firstBlock, secondBlock) =>
+          getRectDistance(firstBlock, block) - getRectDistance(secondBlock, block),
+        )
+        .slice(0, 8)
+        .map((candidate) => getReviewRelativeModule(candidate, crop))
+      const reviewContext = {
+        attempt,
+        reason,
+        targetModule: getReviewRelativeModule(block, crop),
+        neighborModules,
+      }
+      const result = await requestMultimodalVisualLayout(
+        crop.image,
+        crop,
+        mode,
+        reviewContext,
+      )
+      const reviewedCropBlocks = validateMultimodalVisualBlocks(result.blocks, crop, mode)
+      const enrichedCropBlocks = await enrichVisualInlineFormulas(reviewedCropBlocks, crop.image)
+      const reviewedBlocks = enrichedCropBlocks
+        .map((candidate) => offsetReviewedVisualBlock(candidate, crop))
+        .filter((candidate) => {
+          const expandedTarget = {
+            x: block.x - block.width * 0.4,
+            y: block.y - block.height * 0.4,
+            width: block.width * 1.8,
+            height: block.height * 1.8,
+          }
+          return getRectOverlapArea(candidate, expandedTarget) > 0
+        })
+
+      debugMultimodalOcr('boundary review result', {
+        mode,
+        attempt,
+        reason,
+        sourceModuleId: block.moduleId,
+        reviewedCount: reviewedBlocks.length,
+        crop: {
+          x: crop.offsetX,
+          y: crop.offsetY,
+          width: crop.width,
+          height: crop.height,
+        },
+      })
+      return reviewedBlocks
+    } catch (error) {
+      console.warn('多模态模块边界复核失败，保留本地回退流程', {
+        mode,
+        attempt,
+        reason,
+        error: error.message,
+      })
+      return []
+    }
+  }
+
+  async function requestMultimodalTextRecognition(image, imageSize, mode) {
+    const payload = {
+      image,
+      mode,
+      imageWidth: imageSize.originalImageWidth || imageSize.width,
+      imageHeight: imageSize.originalImageHeight || imageSize.height,
+    }
+    const data = window.electronAPI?.translateImageOCR
+      ? await window.electronAPI.translateImageOCR(payload)
+      : await requestBackendJson('/ai/translate-image-ocr', payload)
+    const blocks = normalizeMultimodalTranslationBlocks(data.blocks || [], imageSize, {
+      mode,
+      requireTranslation: false,
+    })
+
+    if (!blocks.length) throw new Error('多模态模型未返回可用文字')
     return blocks
   }
 
@@ -7764,8 +10563,23 @@ function App() {
     ocrSelectionRect,
     fallbackNotice = '',
   }) {
+    const successfulBlocks = translatedBlocks.filter((block) => {
+      const translation = cleanResultText(block.translation || '')
+      return !block.translationFallback &&
+        translation &&
+        !isUselessTranslationResult(translation)
+    })
+    const failedBlocks = translatedBlocks.filter((block) => block.translationFallback)
+    if (!successfulBlocks.length && failedBlocks.length) {
+      throw new Error(failedBlocks[0].translationError || '翻译失败')
+    }
+    const resultNotice = [
+      fallbackNotice,
+      failedBlocks.length ? `${failedBlocks.length} 个模块翻译失败` : '',
+    ].filter(Boolean).join('；')
+
     if (mode === 'compare') {
-      const translatedImage = await createCompareResultImage(recognitionImage, croppedImage, translatedBlocks)
+      const translatedImage = await createCompareResultImage(recognitionImage, croppedImage, successfulBlocks)
       const layout = getCompareLayoutByAspectRatio(croppedImage.width, croppedImage.height)
       const nextCompareResult = {
         originalImage: image,
@@ -7775,7 +10589,7 @@ function App() {
 
       setSuccessfulRightPanelResult({
         type: 'ocr-compare',
-        title: fallbackNotice ? `对照模式结果（${fallbackNotice}）` : '对照模式结果',
+        title: resultNotice ? `对照模式结果（${resultNotice}）` : '对照模式结果',
         compareOriginalImage: image,
         compareTranslatedImage: translatedImage,
         compareLayout: layout,
@@ -7793,13 +10607,13 @@ function App() {
     const resultImage = await createDiagramResultImage(
       recognitionImage,
       croppedImage,
-      translatedBlocks,
+      successfulBlocks,
       sourceBlocks || translatedBlocks,
     )
 
     setSuccessfulRightPanelResult({
       type: 'ocr-diagram',
-      title: fallbackNotice ? `图解模式结果（${fallbackNotice}）` : '图解模式结果',
+      title: resultNotice ? `图解模式结果（${resultNotice}）` : '图解模式结果',
       screenshotDataUrl: recognitionImage,
       diagramResultImage: resultImage,
       ocrSelectionRect,
@@ -7811,11 +10625,56 @@ function App() {
     setOcrResult(null)
   }
 
+  function getRectBoundaryPoint(rect, targetPoint) {
+    const center = {
+      x: rect.x + rect.width / 2,
+      y: rect.y + rect.height / 2,
+    }
+    const deltaX = targetPoint.x - center.x
+    const deltaY = targetPoint.y - center.y
+    const halfWidth = Math.max(rect.width / 2, 0.5)
+    const halfHeight = Math.max(rect.height / 2, 0.5)
+
+    if (Math.abs(deltaX) < 0.001 && Math.abs(deltaY) < 0.001) {
+      return {
+        x: center.x + halfWidth,
+        y: center.y,
+      }
+    }
+
+    const scale = 1 / Math.max(
+      Math.abs(deltaX) / halfWidth,
+      Math.abs(deltaY) / halfHeight,
+    )
+
+    return {
+      x: center.x + deltaX * scale,
+      y: center.y + deltaY * scale,
+    }
+  }
+
+  function getDiagramConnectorPoints(sourceRect, translationRect) {
+    const sourceCenter = {
+      x: sourceRect.x + sourceRect.width / 2,
+      y: sourceRect.y + sourceRect.height / 2,
+    }
+    const translationCenter = {
+      x: translationRect.x + translationRect.width / 2,
+      y: translationRect.y + translationRect.height / 2,
+    }
+
+    return {
+      start: getRectBoundaryPoint(sourceRect, translationCenter),
+      end: getRectBoundaryPoint(translationRect, sourceCenter),
+    }
+  }
+
   async function createDiagramResultImage(imageUrl, imageSize, translatedBlocks, sourceBlocks = translatedBlocks) {
     const sourceImage = await loadImage(imageUrl)
     const canvas = document.createElement('canvas')
     const context = canvas.getContext('2d')
     const placedRects = []
+    const placedConnectorPaths = []
 
     canvas.width = imageSize.originalImageWidth || imageSize.width || sourceImage.naturalWidth
     canvas.height = imageSize.originalImageHeight || imageSize.height || sourceImage.naturalHeight
@@ -7843,6 +10702,7 @@ function App() {
         canvas.height,
         placedRects,
         sourceRects,
+        placedConnectorPaths,
         context,
       )
 
@@ -7861,13 +10721,28 @@ function App() {
       })
 
       const overlayStyle = getOverlayStyleForMode('diagram')
+      const connectorObstacles = [
+        ...sourceRects.filter((sourceRect) =>
+          getVisualRectOverlapRatio(sourceRect, block) < 0.72,
+        ),
+        ...placedRects,
+      ]
+      const connectorPath = getDiagramConnectorPath(
+        block,
+        rect,
+        connectorObstacles,
+        placedConnectorPaths,
+      )
       placedRects.push(rect)
+      placedConnectorPaths.push(connectorPath)
       context.save()
       context.strokeStyle = 'rgba(37, 99, 235, 0.5)'
       context.lineWidth = 1
       context.beginPath()
-      context.moveTo(block.x + block.width / 2, block.y + block.height / 2)
-      context.lineTo(rect.x + rect.width / 2, rect.y + rect.height / 2)
+      context.moveTo(connectorPath[0].x, connectorPath[0].y)
+      connectorPath.slice(1).forEach((point) => {
+        context.lineTo(point.x, point.y)
+      })
       context.stroke()
       context.shadowColor = overlayStyle.shadow
       context.shadowBlur = overlayStyle.shadowBlur
@@ -7890,11 +10765,73 @@ function App() {
         )
       })
       context.restore()
+
+      debugMultimodalOcr('diagram connector draw', {
+        text: block.text,
+        start: connectorPath[0],
+        end: connectorPath[connectorPath.length - 1],
+        bends: connectorPath.slice(1, -1),
+        sourceRect: {
+          x: block.x,
+          y: block.y,
+          width: block.width,
+          height: block.height,
+        },
+        translationRect: rect,
+      })
     })
 
     drawDebugLayoutBoxes(context, translatedBlocks, canvas.width, canvas.height)
 
     return canvas.toDataURL('image/png')
+  }
+
+  function drawCompareTranslationLine(context, line, canvasWidth, canvasHeight) {
+    const backgroundBox = getPaddedLineBox(line, canvasWidth, canvasHeight)
+    const textBox = {
+      x: backgroundBox.x + backgroundBox.paddingX,
+      y: backgroundBox.y + backgroundBox.paddingY,
+      width: Math.max(6, backgroundBox.width - backgroundBox.paddingX * 2),
+      height: Math.max(6, backgroundBox.height - backgroundBox.paddingY * 2),
+    }
+    const originalFontSize = Math.max(1, Number(line.fontSize) || line.height * 0.82)
+    const initialTranslationFontSize = clampNumber(
+      Math.min(originalFontSize * 0.88, textBox.height * 0.82),
+      1,
+      24,
+    )
+    const minimumTranslationFontSize = Math.max(1, originalFontSize * 0.65)
+    const translation = cleanResultText(line.translation || '').replace(/\s*\n+\s*/g, ' ')
+    let translationFontSize = initialTranslationFontSize
+
+    context.save()
+    context.fillStyle = '#ffffff'
+    context.fillRect(backgroundBox.x, backgroundBox.y, backgroundBox.width, backgroundBox.height)
+    if (translation) {
+      context.font = getCompareCanvasFont(translationFontSize)
+      while (
+        translationFontSize > minimumTranslationFontSize &&
+        context.measureText(translation).width > textBox.width
+      ) {
+        translationFontSize = Math.max(
+          minimumTranslationFontSize,
+          translationFontSize - 0.5,
+        )
+        context.font = getCompareCanvasFont(translationFontSize)
+      }
+      context.font = getCompareCanvasFont(translationFontSize)
+      context.textBaseline = 'top'
+      context.fillStyle = '#111827'
+      const textY = textBox.y + Math.max(0, (textBox.height - translationFontSize * 1.12) / 2)
+      context.fillText(translation, textBox.x, textY, textBox.width)
+    }
+    context.restore()
+
+    return {
+      backgroundBox,
+      originalFontSize,
+      translationFontSize,
+    }
   }
 
   async function createCompareResultImage(imageUrl, imageSize, translatedBlocks) {
@@ -7916,56 +10853,20 @@ function App() {
     })
 
     translatedBlocks.forEach((block) => {
-      if (hasLineLevelMultimodalTranslations(block)) {
-        getCompareSourceBlocks(block).forEach((line) => {
-          const translation = cleanResultText(line.translation || '')
-          if (!translation || isUselessTranslationResult(translation)) return
+      if (block.translationFallback || !cleanResultText(block.translation || '')) return
+      getCompareLineAssignments(block).forEach((line) => {
+        const drawResult = drawCompareTranslationLine(context, line, canvas.width, canvas.height)
 
-          const backgroundBox = getPaddedLineBox(line, canvas.width, canvas.height)
-          const textBox = {
-            x: backgroundBox.x + backgroundBox.paddingX,
-            y: backgroundBox.y + backgroundBox.paddingY,
-            width: Math.max(6, backgroundBox.width - backgroundBox.paddingX * 2),
-            height: Math.max(6, backgroundBox.height - backgroundBox.paddingY * 2),
-          }
-
-          context.save()
-          context.fillStyle = 'rgba(255, 255, 255, 0.88)'
-          context.fillRect(backgroundBox.x, backgroundBox.y, backgroundBox.width, backgroundBox.height)
-          context.restore()
-          drawTextInBox(context, translation, textBox, {
-            fontSize: clampNumber(line.height * 0.75, 10, 18),
-            minFontSize: 10,
-            maxFontSize: 18,
-          })
-
-          debugMultimodalOcr('compare line draw', {
-            text: line.text,
-            translation,
-            bbox: { x: line.x, y: line.y, width: line.width, height: line.height },
-            backgroundBox,
-          })
+        debugMultimodalOcr('compare line draw', {
+          text: line.text,
+          translation: line.translation,
+          bbox: { x: line.x, y: line.y, width: line.width, height: line.height },
+          backgroundBox: drawResult.backgroundBox,
+          originalFontSize: drawResult.originalFontSize,
+          translationFontSize: drawResult.translationFontSize,
+          boundaryRetries: block.compareBoundaryRetries || 0,
         })
-        return
-      }
-
-      const plan = getCompareReplacementPlan(context, block, canvas.width, canvas.height)
-      if (!plan.lines.length) return
-
-      context.save()
-      // 对照模式：每行单独白底，保留轻微透明感（仅影响对照模式，不影响图解模式）。
-      context.fillStyle = 'rgba(255, 255, 255, 0.9)'
-      plan.backgroundRects.forEach((rect) => {
-        context.fillRect(rect.x, rect.y, rect.width, rect.height)
       })
-
-      context.textBaseline = 'top'
-      context.fillStyle = '#111827'
-      plan.lines.forEach((line) => {
-        context.font = getCompareCanvasFont(line.fontSize || plan.fontSize)
-        context.fillText(line.text, line.x, line.y)
-      })
-      context.restore()
     })
 
     drawDebugLayoutBoxes(context, translatedBlocks, canvas.width, canvas.height)
@@ -8019,7 +10920,11 @@ function App() {
         error: '',
       })
 
-      if ((mode === 'diagram' || mode === 'compare') && settingsSupportMultimodal(settingsFormRef.current)) {
+      if (
+        MULTIMODAL_VISUAL_OCR_ENABLED &&
+        (mode === 'diagram' || mode === 'compare') &&
+        settingsSupportMultimodal(settingsFormRef.current)
+      ) {
         try {
           setOcrResult({
             status: mode === 'diagram' ? 'diagram-translating' : 'compare-translating',
@@ -8029,7 +10934,24 @@ function App() {
             translation: '',
             error: '',
           })
-          const translatedBlocks = await requestMultimodalImageTranslation(image, croppedImage, mode)
+          const multimodalLayout = await requestMultimodalVisualLayout(image, croppedImage, mode)
+          const validatedBlocks = validateMultimodalVisualBlocks(
+            multimodalLayout.blocks,
+            croppedImage,
+            mode,
+          )
+          const multimodalBlocks = await enrichVisualInlineFormulas(validatedBlocks, image)
+          const translatedBlocks = mode === 'compare'
+            ? await translateCompareBlocks(multimodalBlocks, {
+                multimodal: true,
+                image,
+                imageSize: croppedImage,
+              })
+            : await translateDiagramBlocks(multimodalBlocks, {
+                multimodal: true,
+                image,
+                imageSize: croppedImage,
+              })
 
           debugMultimodalOcr('multimodal result', {
             mode,
@@ -8050,7 +10972,7 @@ function App() {
             recognitionImage: image,
             croppedImage,
             translatedBlocks,
-            sourceBlocks: translatedBlocks,
+            sourceBlocks: multimodalBlocks,
             ocrSelectionRect,
           })
           return
@@ -8071,6 +10993,18 @@ function App() {
         }
       }
 
+      const multimodalTextRecognitionPromise =
+        mode === 'sidebar' &&
+        settingsSupportMultimodal(settingsFormRef.current)
+          ? requestMultimodalTextRecognition(image, croppedImage, 'text')
+              .catch((error) => {
+                console.warn('OCR 文本多模态纠错失败，继续使用本地识别结果', {
+                  error: error.message,
+                })
+                return []
+              })
+          : Promise.resolve([])
+
       worker = await createWorker('eng', 1, {
         workerPath: `${TESSERACT_ASSET_BASE}/worker.min.js`,
         corePath: `${TESSERACT_ASSET_BASE}/core/tesseract-core-simd-lstm.wasm.js`,
@@ -8078,7 +11012,36 @@ function App() {
         cacheMethod: 'none',
       })
       const { data } = await worker.recognize(recognitionImage, {}, { text: true, blocks: true })
-      const recognizedText = cleanOcrText(data.text || '')
+      const tesseractText = cleanOcrText(data.text || '')
+      const pdfTextBlocks = getPdfTextLayerOcrBlocks(croppedImage)
+      const usePdfTextLayer = shouldPreferPdfTextLayer(pdfTextBlocks, tesseractText)
+      const blockOptions = {
+        strict: mode === 'compare' || mode === 'diagram',
+        diagram: mode === 'diagram',
+      }
+      let textBlocks = usePdfTextLayer
+        ? mergeWrappedLinesIntoBlocks(pdfTextBlocks, blockOptions)
+        : getOcrTextBlocks(data, croppedImage, blockOptions)
+      let formulaResult = { corrections: [], unresolvedRects: [] }
+
+      if (!usePdfTextLayer && textBlocks.length) {
+        formulaResult = await recognizeInlineFormulaCandidates(
+          data,
+          recognitionImage,
+          croppedImage,
+          pdfTextBlocks,
+        )
+        textBlocks = applyInlineFormulaCorrections(textBlocks, formulaResult)
+      }
+
+      const multimodalTextBlocks = await multimodalTextRecognitionPromise
+      if (shouldPreferMultimodalRecognition(textBlocks, multimodalTextBlocks)) {
+        textBlocks = multimodalTextBlocks
+      }
+
+      const recognizedText = textBlocks.length
+        ? textBlocks.map((block) => block.text).join('\n')
+        : tesseractText
 
       if (!recognizedText) {
         setOcrResult({
@@ -8102,17 +11065,17 @@ function App() {
       })
 
       if (mode === 'diagram' || mode === 'compare') {
-        const textBlocks = getOcrTextBlocks(data, croppedImage, {
-          strict: mode === 'compare' || mode === 'diagram',
-          diagram: mode === 'diagram',
-        })
-        const validTextBlocks = textBlocks.filter((block) => shouldTranslateOcrBlock(block))
+        const validTextBlocks = textBlocks.filter((block) => isVisualTranslationBlock(block))
 
         console.log('OCR 模块流程统计', {
           mode,
+          source: usePdfTextLayer ? 'pdf-text-layer' : 'tesseract',
           rawLineCount: collectOcrLines(data).length,
           mergedModuleCount: textBlocks.length,
           validModuleCount: validTextBlocks.length,
+          formulaCorrectionCount: formulaResult.corrections.length,
+          unresolvedFormulaCount: formulaResult.unresolvedRects.length,
+          skippedDenseFormulaCount: textBlocks.filter((block) => isDenseFormulaOrSymbolText(block.text)).length,
           moduleTextLengths: validTextBlocks.slice(0, 20).map((block) => block.text.length),
         })
 
@@ -8120,7 +11083,9 @@ function App() {
           throw new Error('未识别到可翻译的英文文本')
         }
 
-        const translatedBlocks = await translateDiagramBlocks(validTextBlocks)
+        const translatedBlocks = mode === 'compare'
+          ? await translateCompareBlocks(validTextBlocks)
+          : await translateDiagramBlocks(validTextBlocks)
 
         if (!translatedBlocks.length) {
           throw new Error('未识别到可翻译的英文文本')
@@ -8153,34 +11118,18 @@ function App() {
         return
       }
 
-      const sidebarTextBlocks = getOcrTextBlocks(data, croppedImage)
-      const logicalOcrText = sidebarTextBlocks.length
-        ? sidebarTextBlocks.map((block) => block.text).join('\n')
-        : recognizedText
-      const translatableText = getTranslatableOcrText(logicalOcrText)
-
-      if (!translatableText) {
+      const {
+        segments: translatedSegments,
+        translation: nextTranslation,
+      } = await translateOcrBlocksPreservingFormulas(textBlocks)
+      if (!translatedSegments.length || isUselessTranslationResult(nextTranslation)) {
         setOcrResult({
           status: 'error',
           mode,
           image: recognitionImage,
           text: recognizedText,
           translation: '',
-          error: '未识别到可翻译的英文文本',
-        })
-        return
-      }
-
-      const nextTranslation = cleanResultText(await requestTranslation(translatableText))
-
-      if (isUselessTranslationResult(nextTranslation)) {
-        setOcrResult({
-          status: 'error',
-          mode,
-          image: recognitionImage,
-          text: recognizedText,
-          translation: '',
-          error: '未识别到可翻译的英文文本',
+          error: '未识别到可展示的英文文本或公式',
         })
         return
       }
@@ -8191,6 +11140,7 @@ function App() {
         screenshotDataUrl: recognitionImage,
         ocrText: recognizedText,
         translation: nextTranslation,
+        translationSegments: translatedSegments,
         ocrSelectionRect,
         timestamp: Date.now(),
       })
@@ -8245,6 +11195,8 @@ function App() {
   function handleSelectionStart(event) {
     if (isInteractiveElement(event.target)) return
 
+    annotationInteractionSuspendedRef.current = false
+
     if (isOcrMode) {
       handleOcrSelectionStart(event)
       return
@@ -8259,6 +11211,8 @@ function App() {
   function handleSelectionMove(event) {
     if (isInteractiveElement(event.target)) return
 
+    if (annotationInteractionSuspendedRef.current) return
+
     if (isOcrMode) {
       handleOcrSelectionMove(event)
       return
@@ -8270,9 +11224,13 @@ function App() {
   }
 
   async function handleTextSelection(event) {
+    if (annotationInteractionSuspendedRef.current) {
+      releasePdfTextSelection()
+      return
+    }
+
     if (event?.target && isInteractiveElement(event.target)) {
-      isSelectingRef.current = false
-      setPreviewHighlight(null)
+      releasePdfTextSelection()
       return
     }
 
@@ -8289,21 +11247,20 @@ function App() {
     }
 
     const selection = window.getSelection()
-    const selectionText = selection.toString().trim()
+    const selectionText = selection?.toString().trim() || ''
     const formattedText = getFormattedSelectionText(selection, selectionText)
     const text = formattedText.trim()
 
     if (!text || text.length <= 1) {
-      setPreviewHighlight(null)
+      releasePdfTextSelection()
       clearTranslation()
       return
     }
 
     const nextHighlightRects = getSelectionHighlightRects(selection)
-    setHighlightRects(nextHighlightRects)
 
     if (nextHighlightRects.length === 0) {
-      setPreviewHighlight(null)
+      releasePdfTextSelection()
       return
     }
 
@@ -8312,6 +11269,12 @@ function App() {
       const rects = nextHighlightRects
         .map((rect) => normalizeViewerRectToPage(rect, pageBox))
         .filter(Boolean)
+
+      // Release the native PDF selection before persistence begins. The saved
+      // highlight can render while the IPC/PDF write is still pending, so a
+      // delayed cleanup here would race with opening its note dialog.
+      releasePdfTextSelection()
+      const selectionInteractionVersion = ++selectionInteractionVersionRef.current
 
       if (rects.length && !hasDuplicateHighlight(text, rects)) {
         const now = Date.now()
@@ -8336,17 +11299,19 @@ function App() {
 
         const savedAnnotation = await addAnnotation(annotation)
         await maybeEmbedHighlightInPdf(savedAnnotation || annotation)
-        setActiveAnnotationId(annotation.id)
-        setAnnotationStatus('')
+        if (selectionInteractionVersionRef.current === selectionInteractionVersion) {
+          setActiveAnnotationId(annotation.id)
+          setAnnotationStatus('')
+        }
       } else if (rects.length) {
         setAnnotationStatus('已存在相同高亮')
       }
 
-      window.getSelection()?.removeAllRanges()
-      setHighlightRects([])
-      setPreviewHighlight(null)
       return
     }
+
+    setHighlightRects(nextHighlightRects)
+    const nextSelectionCapture = cropSelectionRectsImage(nextHighlightRects)
 
     if (text) {
       setRightPanelResult(null)
@@ -8360,6 +11325,7 @@ function App() {
       setImagePreviewZoom(1)
       setIsImagePreviewFullscreen(false)
       lastTranslatedTextRef.current = ''
+      setSelectionCapture(nextSelectionCapture)
       setSelectedText(text)
     }
   }
@@ -8379,9 +11345,13 @@ function App() {
     }
 
     function handleDocumentMouseUp(event) {
+      if (getTextEntryElement(event.target)) {
+        suspendPdfTextSelection()
+        return
+      }
+
       if (isInteractiveElement(event.target)) {
-        isSelectingRef.current = false
-        setPreviewHighlight(null)
+        releasePdfTextSelection()
         return
       }
 
@@ -8940,7 +11910,7 @@ function App() {
               }}
               title="打开 OCR 笔记"
             >
-              📝
+              <NotebookPen size={14} strokeWidth={1.9} aria-hidden="true" />
             </button>
           )
         }) : null}
@@ -9126,6 +12096,129 @@ function App() {
         ) : null}
       </section>
     )
+  }
+
+  function getFileExportDocumentIds() {
+    if (fileExportScope === 'current') {
+      const documentId = selectedExportDetailDocumentId || currentDocument?.documentId
+      return documentId ? [documentId] : []
+    }
+    if (fileExportScope === 'selected') return selectedFileExportDocumentIds
+    if (fileExportScope === 'all') return libraryDocuments.map((document) => document.documentId)
+    if (fileExportScope === 'recycle') return recycledLibraryDocuments.map((document) => document.documentId)
+    const folderId = fileExportFolderId === 'unfiled' ? null : fileExportFolderId
+    const folderIds = fileExportScope === 'folder-tree' && folderId
+      ? getLibraryDescendantFolderIds(folderId)
+      : new Set(folderId ? [folderId] : [])
+    return libraryDocuments
+      .filter((document) => (folderId ? folderIds.has(document.folderId) : !document.folderId))
+      .map((document) => document.documentId)
+  }
+
+  function getSelectedExportRecordCount(items, options) {
+    return items.reduce((total, item) => {
+      const highlights = item.annotations.filter((annotation) => annotation.type === 'text-highlight').length
+      const annotations = item.annotations.length - highlights
+      return total +
+        (options.exportNotes ? item.notes.length : 0) +
+        (options.exportHistories ? item.histories.length : 0) +
+        (options.exportHighlights ? highlights : 0) +
+        (options.exportAnnotations ? annotations : 0) +
+        (options.exportBookmarks ? item.bookmarks.length : 0)
+    }, 0)
+  }
+
+  function openFileExportFromHistory() {
+    const selectedDocument = getHistoryLibraryDocuments().find((document) => document.documentId === selectedExportDetailDocumentId)
+    if (historyLibraryNodeId === 'recycle' && historySelectedRecycleIds.length > 1) {
+      setSelectedFileExportDocumentIds(historySelectedRecycleIds)
+      setFileExportScope('selected')
+    } else if (selectedDocument) {
+      setSelectedFileExportDocumentIds([selectedDocument.documentId])
+      setFileExportScope('current')
+    } else if (historyLibraryNodeId === 'all') {
+      setFileExportScope('all')
+    } else if (historyLibraryNodeId === 'recycle') {
+      setFileExportScope('recycle')
+    } else {
+      setFileExportFolderId(historyLibraryNodeId)
+      setFileExportScope('folder-tree')
+      setFileExportMethod('folder')
+    }
+    setImportExportTab('fileExport')
+    setExportStatus('')
+    setExportFailures([])
+  }
+
+  async function exportFiles() {
+    const documentIds = Array.from(new Set(getFileExportDocumentIds()))
+    if (!documentIds.length) {
+      setExportStatus('请选择文献')
+      return
+    }
+    if (!hasSelectedContentExportOption(fileExportContents)) {
+      setExportStatus('请至少选择一项导出内容')
+      return
+    }
+
+    setIsFileExporting(true)
+    setExportStatus('')
+    setExportFailures([])
+    try {
+      const generatorOptions = fileExportFormat === 'markdown'
+        ? { ...fileExportContents, ...markdownFormatOptions }
+        : { ...fileExportContents, ...pdfFormatOptions }
+      const items = await collectMarkdownExportItems(documentIds, '文件导出')
+      const recordCount = getSelectedExportRecordCount(items, fileExportContents)
+      if (!recordCount) throw new Error('所选文献没有符合条件的记录')
+
+      const outputName = batchExportNameRef.current.trim() || `${fileExportFormat === 'markdown' ? 'Markdown' : 'PDF'}导出_${items.length}篇文献`
+      const exportDocumentsById = new Map(exportableDocuments.map((document) => [document.documentId, document]))
+      let result
+      if (fileExportFormat === 'markdown') {
+        result = fileExportMethod === 'merged'
+          ? await window.electronAPI.saveMarkdownFile({
+              markdown: buildBatchPdfMarkdown(items, generatorOptions),
+              defaultFileName: makeSafeMarkdownFileName(outputName),
+            })
+          : await window.electronAPI.saveMarkdownBatchFiles({
+              outputName,
+              files: items.map((item) => ({
+                fileName: makeSafeMarkdownFileName(getPdfDisplayName(item.pdf)),
+                markdown: buildPdfMarkdown(item, generatorOptions),
+                relativePath: fileExportMethod === 'folder' ? getFileExportRelativePath(exportDocumentsById.get(item.pdf.documentId) || item.pdf) : '',
+              })),
+            })
+      } else {
+        result = fileExportMethod === 'merged'
+          ? await window.electronAPI.savePdfReport({
+              html: assertPdfReportHtml(buildBatchPdfReportHtml(items, generatorOptions)),
+              defaultFileName: makeSafePdfReportFileName(outputName),
+            })
+          : await window.electronAPI.saveBatchPdfReports({
+              outputName,
+              files: items.map((item) => ({
+                fileName: makeSafePdfReportFileName(getPdfDisplayName(item.pdf)),
+                html: assertPdfReportHtml(buildPdfReportHtml(item, generatorOptions)),
+                relativePath: fileExportMethod === 'folder' ? getFileExportRelativePath(exportDocumentsById.get(item.pdf.documentId) || item.pdf) : '',
+              })),
+            })
+      }
+
+      setExportFailures(result?.errors || [])
+      if (result?.error) {
+        const detail = (result.errors || []).map((failure) => `${failure.fileName}：${failure.error}`).join('；')
+        throw new Error(detail ? `${result.error}：${detail}` : result.error)
+      }
+      if (!result?.canceled) {
+        const failures = result.errors?.length || 0
+        setExportStatus(`导出完成\n文献 ${(result.filePaths?.length || (result.filePath ? items.length : 0))}\n记录 ${recordCount}\n失败 ${failures}`)
+      }
+    } catch (error) {
+      setExportStatus(error.message || '导出失败')
+    } finally {
+      setIsFileExporting(false)
+    }
   }
 
   function renderBookmarksPanel() {
@@ -9348,6 +12441,12 @@ function App() {
   }
 
   function renderContentExportOptions(options, setOptions, disabled = false) {
+    const toggleOption = (key) => {
+      setOptions((currentOptions) => ({
+        ...currentOptions,
+        [key]: !currentOptions[key],
+      }))
+    }
     return (
       <fieldset className="content-export-options" aria-label="选择导出内容">
         <div className="content-export-option-list">
@@ -9357,49 +12456,13 @@ function App() {
                 type="checkbox"
                 checked={Boolean(options[item.key])}
                 disabled={disabled}
-                onChange={() => toggleContentExportOption(setOptions, item.key)}
+                onChange={() => toggleOption(item.key)}
               />
               <span>{item.label}</span>
             </label>
           ))}
         </div>
       </fieldset>
-    )
-  }
-
-  function renderExportDocumentList({ selectedIds = [], onToggle, className = '', disabled = false, emptyText = '暂无可导出的文献数据' }) {
-    const selectedIdSet = new Set(selectedIds)
-    const listClassName = ['exportable-document-list', className].filter(Boolean).join(' ')
-
-    return (
-      <div className={listClassName}>
-        {exportableDocuments.length ? exportableDocuments.map((document) => {
-          const documentName = getExportDocumentDisplayName(document)
-          const isActive = selectedExportDetailDocumentId === document.documentId
-
-          return (
-            <article
-              className={isActive ? 'exportable-document-item active' : 'exportable-document-item'}
-              key={document.documentId}
-            >
-              <input
-                type="checkbox"
-                checked={selectedIdSet.has(document.documentId)}
-                disabled={disabled}
-                aria-label={`选择 ${documentName}`}
-                onChange={() => onToggle(document.documentId)}
-              />
-              <button
-                type="button"
-                className="exportable-document-name-button"
-                onClick={() => setSelectedExportDetailDocumentId(document.documentId)}
-              >
-                {documentName}
-              </button>
-            </article>
-          )
-        }) : <p className="history-empty">{emptyText}</p>}
-      </div>
     )
   }
 
@@ -9451,7 +12514,8 @@ function App() {
           <div className="export-detail-grid">
             {renderExportDetailGroup('笔记', detail?.notes || [], getExportNoteDetailPreview)}
             {renderExportDetailGroup('翻译历史', detail?.histories || [], getExportHistoryDetailPreview)}
-            {renderExportDetailGroup('批注', detail?.annotations || [], getExportAnnotationDetailPreview)}
+            {renderExportDetailGroup('高亮', (detail?.annotations || []).filter((item) => item.type === 'text-highlight'), getExportAnnotationDetailPreview)}
+            {renderExportDetailGroup('批注', (detail?.annotations || []).filter((item) => item.type !== 'text-highlight'), getExportAnnotationDetailPreview)}
             {renderExportDetailGroup('书签', detail?.bookmarks || [], getExportBookmarkDetailPreview)}
           </div>
         )}
@@ -9474,13 +12538,13 @@ function App() {
         <section className="search-dialog" role="dialog" aria-modal="true" aria-label={dialogTitle}>
           <header className="search-dialog-header">
             <h2>{dialogTitle}</h2>
-            <button type="button" className="search-dialog-close" onClick={closeSearchDialog} aria-label="关闭搜索">
-              ×
-            </button>
+            <IconButton className="search-dialog-close" onClick={closeSearchDialog} label="关闭搜索">
+              <X size={17} strokeWidth={1.9} />
+            </IconButton>
           </header>
           <div className="search-dialog-controls">
             <label className="search-dialog-input">
-              <span aria-hidden="true">⌕</span>
+              <Search size={17} strokeWidth={1.8} aria-hidden="true" />
               <input
                 ref={searchDialogInputRef}
                 type="search"
@@ -9523,42 +12587,349 @@ function App() {
     )
   }
 
+  function toggleFileExportDocument(documentId) {
+    setSelectedExportDetailDocumentId(documentId)
+    setSelectedFileExportDocumentIds((currentIds) => (
+      currentIds.includes(documentId)
+        ? currentIds.filter((id) => id !== documentId)
+        : [...currentIds, documentId]
+    ))
+  }
+
+  function toggleExportFolderTreeExpanded(folderId) {
+    setExportFolderTreeExpandedIds((currentIds) => {
+      const nextIds = new Set(currentIds)
+      if (nextIds.has(folderId)) nextIds.delete(folderId)
+      else nextIds.add(folderId)
+      return nextIds
+    })
+  }
+
+  function renderFileExportDocumentRow(document, {
+    selectedIds = selectedFileExportDocumentIds,
+    onToggle = toggleFileExportDocument,
+    disabled = isFileExporting,
+    depth = 0,
+  } = {}) {
+    const documentName = getExportDocumentDisplayName(document)
+    return (
+      <div className="file-export-document-row" key={`file-export-${document.documentId}`} style={{ '--folder-depth': depth }}>
+        <input
+          type="checkbox"
+          checked={selectedIds.includes(document.documentId)}
+          disabled={disabled}
+          onChange={() => onToggle(document.documentId)}
+        />
+        <button type="button" onClick={() => setSelectedExportDetailDocumentId(document.documentId)}>{documentName}</button>
+        <span>{document.recordCount || 0}</span>
+      </div>
+    )
+  }
+
+  function renderFileExportFolderBranch(folder, depth = 1, options = {}) {
+    const {
+      selectedIds = [],
+      onToggle = () => {},
+      disabled = false,
+      showDocuments = true,
+      selectFolder = false,
+    } = options
+    const documents = exportableDocuments.filter((document) => document.status !== 'recycled' && document.folderId === folder.id)
+    const children = getLibraryFolderChildren(folder.id)
+    const isExpanded = exportFolderTreeExpandedIds.has(folder.id)
+    const isSelected = selectFolder && fileExportFolderId === folder.id
+    const canExpand = children.length > 0 || (showDocuments && documents.length > 0)
+
+    return (
+      <div className="file-export-folder-branch" key={`export-folder-${folder.id}`}>
+        <div className="file-export-folder-tree-row" style={{ '--folder-depth': depth }}>
+          {canExpand ? (
+            <TreeChevron
+              expanded={isExpanded}
+              onToggle={() => toggleExportFolderTreeExpanded(folder.id)}
+            />
+          ) : <span className="tree-chevron-spacer" />}
+          {selectFolder ? (
+            <button
+              type="button"
+              className={isSelected ? 'file-export-folder-node active' : 'file-export-folder-node'}
+              onClick={() => setFileExportFolderId(folder.id)}
+            >
+              <span>{folder.name}</span>
+            </button>
+          ) : <div className="file-export-folder-node"><span>{folder.name}</span></div>}
+        </div>
+        {isExpanded ? (
+          <>
+            {showDocuments ? documents.map((document) => renderFileExportDocumentRow(document, {
+              selectedIds,
+              onToggle,
+              disabled,
+              depth: depth + 1,
+            })) : null}
+            {children.map((child) => renderFileExportFolderBranch(child, depth + 1, options))}
+          </>
+        ) : null}
+      </div>
+    )
+  }
+
+  function renderFileExportFolderTree({
+    selectedIds = [],
+    onToggle = () => {},
+    disabled = false,
+    showDocuments = true,
+    selectFolder = false,
+    includeRecycle = false,
+  } = {}) {
+    const isUnfiledSelected = selectFolder && fileExportFolderId === 'unfiled'
+    const unfiledDocuments = exportableDocuments.filter((document) => document.status !== 'recycled' && !document.folderId)
+    const recycledDocuments = exportableDocuments.filter((document) => document.status === 'recycled')
+    const options = { selectedIds, onToggle, disabled, showDocuments, selectFolder }
+
+    return (
+      <div className="file-export-selection-tree">
+        <div className="file-export-folder-branch">
+          <div className="file-export-folder-tree-row" style={{ '--folder-depth': 0 }}>
+            <TreeChevron
+              expanded={exportFolderTreeRootExpanded}
+              onToggle={() => setExportFolderTreeRootExpanded((expanded) => !expanded)}
+            />
+            <div className="file-export-folder-node"><span>全部文献</span></div>
+          </div>
+          {exportFolderTreeRootExpanded ? (
+            <>
+              <div className="file-export-folder-branch">
+                <div className="file-export-folder-tree-row" style={{ '--folder-depth': 1 }}>
+                  {showDocuments && unfiledDocuments.length ? (
+                    <TreeChevron
+                      expanded={exportFolderTreeUnfiledExpanded}
+                      onToggle={() => setExportFolderTreeUnfiledExpanded((expanded) => !expanded)}
+                    />
+                  ) : <span className="tree-chevron-spacer" />}
+                  {selectFolder ? (
+                    <button
+                      type="button"
+                      className={isUnfiledSelected ? 'file-export-folder-node active' : 'file-export-folder-node'}
+                      onClick={() => setFileExportFolderId('unfiled')}
+                    >
+                      <span>未分类</span>
+                    </button>
+                  ) : <div className="file-export-folder-node"><span>未分类</span></div>}
+                </div>
+                {showDocuments && exportFolderTreeUnfiledExpanded ? unfiledDocuments.map((document) => renderFileExportDocumentRow(document, {
+                  selectedIds,
+                  onToggle,
+                  disabled,
+                  depth: 2,
+                })) : null}
+              </div>
+              {getLibraryFolderChildren(null).map((folder) => renderFileExportFolderBranch(folder, 1, options))}
+            </>
+          ) : null}
+        </div>
+        {includeRecycle ? (
+          <div className="file-export-folder-branch recycle">
+            <div className="file-export-folder-tree-row" style={{ '--folder-depth': 0 }}>
+              {showDocuments && recycledDocuments.length ? (
+                <TreeChevron
+                  expanded={exportFolderTreeRecycleExpanded}
+                  onToggle={() => setExportFolderTreeRecycleExpanded((expanded) => !expanded)}
+                />
+              ) : <span className="tree-chevron-spacer" />}
+              <div className="file-export-folder-node"><span>回收箱</span></div>
+            </div>
+            {showDocuments && exportFolderTreeRecycleExpanded ? recycledDocuments.map((document) => renderFileExportDocumentRow(document, {
+              selectedIds,
+              onToggle,
+              disabled,
+              depth: 1,
+            })) : null}
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
+  function getFileExportRelativePath(document) {
+    if (document.status === 'recycled') return '回收箱'
+    if (!document.folderId) return '未分类'
+    const names = []
+    const visited = new Set()
+    let folderId = document.folderId
+    while (folderId && !visited.has(folderId)) {
+      visited.add(folderId)
+      const folder = libraryFolders.find((item) => item.id === folderId)
+      if (!folder) break
+      names.unshift(folder.name)
+      folderId = folder.parentId
+    }
+    return names.join('/') || '未分类'
+  }
+
   function renderImportExportSettings() {
+    const historyDocuments = getHistoryLibraryDocuments()
+    const historyRecordCount = historyDocuments.reduce((total, document) => total + (document.recordCount || 0), 0)
+    const selectedRecycleIdSet = new Set(historySelectedRecycleIds)
+
     return (
       <div className="settings-dialog module-settings-panel import-export-settings-panel">
         <div className="settings-dialog-body">
-          <nav className="settings-tabs" aria-label="导出数据分类">
+          <nav className="settings-tabs" aria-label="文献数据工具">
           <button
             type="button"
-            className={importExportTab === 'importExport' ? 'settings-tab active' : 'settings-tab'}
-            onClick={() => setImportExportTab('importExport')}
+            className={importExportTab === 'libraryRecords' ? 'settings-tab active' : 'settings-tab'}
+            onClick={() => setImportExportTab('libraryRecords')}
           >
-            导出数据
+            文献与记录
           </button>
           <button
             type="button"
-            className={importExportTab === 'markdown' ? 'settings-tab active' : 'settings-tab'}
-            onClick={() => setImportExportTab('markdown')}
+            className={importExportTab === 'backupRestore' ? 'settings-tab active' : 'settings-tab'}
+            onClick={() => setImportExportTab('backupRestore')}
           >
-            导出 Markdown
+            备份与恢复
           </button>
           <button
             type="button"
-            className={importExportTab === 'pdfReport' ? 'settings-tab active' : 'settings-tab'}
-            onClick={() => setImportExportTab('pdfReport')}
+            className={importExportTab === 'fileExport' ? 'settings-tab active' : 'settings-tab'}
+            onClick={() => setImportExportTab('fileExport')}
           >
-            导出 PDF
+            导出文件
           </button>
           </nav>
 
           <div className="settings-content">
             <section className="settings-page import-export-page">
 
-        {importExportTab === 'importExport' ? (
+        {importExportTab === 'libraryRecords' ? (
+          <section className="history-library-browser">
+            <aside className="history-library-tree">
+              <div className="history-library-tree-header">
+                <strong>文献分类</strong>
+                <small>{libraryLiteratures.length}</small>
+              </div>
+              <button
+                type="button"
+                className={historyLibraryNodeId === 'all' ? 'library-folder-button active' : 'library-folder-button'}
+                onClick={() => setHistoryLibraryNodeId('all')}
+              >
+                <span>全部文献</span>
+                <small>{libraryDocuments.length}</small>
+              </button>
+              <div className="history-library-folder-tree">
+                <div className="library-folder-tree-row history-mode" style={{ '--folder-depth': 0 }}>
+                  <span className="tree-chevron-spacer" />
+                  <button
+                    type="button"
+                    className={historyLibraryNodeId === 'unfiled' ? 'library-folder-button active' : 'library-folder-button'}
+                    onClick={() => setHistoryLibraryNodeId('unfiled')}
+                  >
+                    <span>未分类</span>
+                    <small>{libraryDocuments.filter((document) => !document.folderId).length}</small>
+                  </button>
+                </div>
+                {getLibraryFolderChildren(null).map((folder) => renderLibraryFolderTreeNode(folder, 0, 'history'))}
+              </div>
+              <div className="history-library-system-divider" />
+              <button
+                type="button"
+                className={historyLibraryNodeId === 'recycle' ? 'library-folder-button active recycle' : 'library-folder-button recycle'}
+                onClick={() => setHistoryLibraryNodeId('recycle')}
+              >
+                <span>回收箱</span>
+                <small>{recycledLibraryDocuments.length}</small>
+              </button>
+            </aside>
+
+            <div className="history-library-content">
+              <div className="history-library-toolbar">
+                <div>
+                  <strong>{historyLibraryNodeId === 'recycle' ? '回收箱' : historyLibraryNodeId === 'all' ? '全部文献' : getLibraryFolderName(historyLibraryNodeId)}</strong>
+                  <span>{historyDocuments.length} 篇 · {historyRecordCount} 条记录</span>
+                </div>
+                {!["all", "unfiled", "recycle"].includes(historyLibraryNodeId) ? (
+                  <label className="history-library-toggle">
+                    <input
+                      type="checkbox"
+                      checked={historyIncludeDescendants}
+                      onChange={(event) => setHistoryIncludeDescendants(event.target.checked)}
+                    />
+                    包含子文件夹
+                  </label>
+                ) : null}
+                <button type="button" className="settings-primary-button" onClick={openFileExportFromHistory}>
+                  导出
+                </button>
+              </div>
+
+              {historyLibraryNodeId === 'recycle' && historySelectedRecycleIds.length ? (
+                <div className="history-library-selection-bar">
+                  <span>已选 {historySelectedRecycleIds.length} 篇</span>
+                  <button type="button" className="settings-secondary-button" onClick={() => void restoreRecycledDocuments(historySelectedRecycleIds)}>
+                    恢复
+                  </button>
+                  <button type="button" className="settings-secondary-button" onClick={() => void permanentlyDeleteRecycledDocuments(historySelectedRecycleIds)}>
+                    永久删除
+                  </button>
+                </div>
+              ) : null}
+
+              <div className="history-library-document-list">
+                {historyDocuments.length ? historyDocuments.map((document) => (
+                  <article className={document.recordCount ? 'history-library-document' : 'history-library-document empty-records'} key={document.documentId}>
+                    {historyLibraryNodeId === 'recycle' ? (
+                      <input
+                        type="checkbox"
+                        checked={selectedRecycleIdSet.has(document.documentId)}
+                        onChange={() => setHistorySelectedRecycleIds((current) => (
+                          current.includes(document.documentId)
+                            ? current.filter((id) => id !== document.documentId)
+                            : [...current, document.documentId]
+                        ))}
+                        aria-label={`选择 ${document.displayName || document.fileName}`}
+                      />
+                    ) : null}
+                    <button type="button" className="history-library-document-main" onClick={() => setSelectedExportDetailDocumentId(document.documentId)}>
+                      <strong>{document.displayName || document.fileName}</strong>
+                      <span>{document.recordCount || 0} 条记录</span>
+                    </button>
+                    <span className="history-library-document-folder">
+                      {historyLibraryNodeId === 'recycle'
+                        ? `移入 ${formatHistoryTime(document.recycledAt)}`
+                        : getLibraryFolderName(document.folderId)}
+                    </span>
+                    {historyLibraryNodeId === 'recycle' ? (
+                      <div className="history-library-document-actions">
+                        <IconButton onClick={() => void restoreRecycledDocuments([document.documentId])} label="恢复到文献库" title="恢复">
+                          <RotateCcw size={15} />
+                        </IconButton>
+                        <button type="button" onClick={() => {
+                          setSelectedFileExportDocumentIds([document.documentId])
+                          setSelectedExportDetailDocumentId(document.documentId)
+                          setFileExportScope('selected')
+                          setImportExportTab('fileExport')
+                        }}>导出</button>
+                        <IconButton onClick={() => void permanentlyDeleteRecycledDocuments([document.documentId])} label="永久删除" title="永久删除">
+                          <Trash2 size={15} />
+                        </IconButton>
+                      </div>
+                    ) : null}
+                  </article>
+                )) : null}
+              </div>
+              {historyDocuments.some((document) => document.documentId === selectedExportDetailDocumentId)
+                ? renderExportDocumentDetail()
+                : null}
+            </div>
+          </section>
+        ) : null}
+
+        {importExportTab === 'backupRestore' ? (
           <>
             <section className="settings-glossary">
               <div className="settings-section-header">
-                <h3>默认导出位置</h3>
+                <h3>默认备份位置</h3>
                 <span>{exportDefaultDir || 'Downloads'}</span>
               </div>
               <div className="settings-inline-actions">
@@ -9573,191 +12944,405 @@ function App() {
 
             <section className="settings-glossary">
               <div className="settings-section-header">
-                <h3>数据备份</h3>
+                <h3>备份范围</h3>
                 <span>{selectedExportDocumentIds.length} / {exportableDocuments.length} 篇</span>
               </div>
-              <p className="markdown-export-hint">
-                完整备份包含翻译历史、笔记、批注和书签；导入多个备份文件时会自动合并并跳过重复数据。
-              </p>
+              <label className="settings-field backup-name-field">
+                <span>备份名称</span>
+                <input
+                  type="text"
+                  defaultValue={batchExportNameRef.current}
+                  onInput={(event) => {
+                    batchExportNameRef.current = event.currentTarget.value
+                  }}
+                  placeholder="Paper Reader 备份"
+                />
+              </label>
 
-              <div className="export-options-grid">
-                <label className="settings-field">
-                  <span>数据内容</span>
-                  <select value={batchDataExportType} onChange={(event) => setBatchDataExportType(event.target.value)}>
-                    {DATA_EXPORT_TYPE_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="settings-field">
-                  <span>导出方式</span>
-                  <select value={batchExportMode} onChange={(event) => setBatchExportMode(event.target.value)}>
-                    <option value="separate">每篇一个文件</option>
-                    <option value="merged">合并为一个文件</option>
-                  </select>
-                </label>
-                <label className="settings-field">
-                  <span>导出名称</span>
-                  <input
-                    type="text"
-                    value={batchExportName}
-                    onChange={(event) => setBatchExportName(event.target.value)}
-                    placeholder={batchExportMode === 'merged' ? '未命名合集' : '仅合并导出时需要填写'}
-                    disabled={batchExportMode !== 'merged'}
-                  />
-                </label>
-              </div>
-
-              {renderExportDocumentList({
+              {renderFileExportFolderTree({
                 selectedIds: selectedExportDocumentIds,
                 onToggle: toggleExportDocument,
+                includeRecycle: true,
               })}
-              {renderExportDocumentDetail()}
 
-              <div className="settings-inline-actions">
-                <button type="button" className="settings-primary-button" onClick={batchExportPaperReaderData}>
-                  开始导出
+              <div className="settings-inline-actions backup-actions">
+                <button type="button" className="settings-primary-button" onClick={() => void backupPaperReaderData('full')}>
+                  完整备份
+                </button>
+                <button type="button" className="settings-secondary-button" onClick={() => void backupPaperReaderData('selected')} disabled={!selectedExportDocumentIds.length}>
+                  选择文献备份
                 </button>
               </div>
             </section>
 
             <section className="settings-glossary">
               <div className="settings-section-header">
-                <h3>批量导入并合并</h3>
+                <h3>恢复</h3>
               </div>
               <div className="settings-inline-actions">
                 <button type="button" className="settings-primary-button" onClick={batchImportPaperReaderData}>
-                  选择导入文件
+                  导入备份
                 </button>
               </div>
             </section>
           </>
         ) : null}
 
-        {importExportTab === 'markdown' ? (
-          <>
-            <section className="settings-glossary markdown-export-panel">
-              <div className="settings-section-header">
-                <h3>导出 Markdown</h3>
-                <span>{selectedMarkdownDocumentIds.length} / {exportableDocuments.length} 篇</span>
+        {importExportTab === 'fileExport' ? (
+          <section className="file-export-workspace">
+            <section className="file-export-section">
+              <h3>导出范围</h3>
+              <div className="file-export-scope-grid">
+                {[
+                  ['current', '当前文献'],
+                  ['selected', '选中文献'],
+                  ['folder', '当前文件夹'],
+                  ['folder-tree', '当前文件夹及子文件夹'],
+                  ['all', '全部文献'],
+                  ['recycle', '回收箱'],
+                ].map(([value, label]) => (
+                  <label key={value} className={fileExportScope === value ? 'file-export-choice active' : 'file-export-choice'}>
+                    <input type="radio" name="file-export-scope" value={value} checked={fileExportScope === value} onChange={() => setFileExportScope(value)} />
+                    {label}
+                  </label>
+                ))}
               </div>
-              <p className="markdown-export-hint">
-                Markdown 用于可编辑整理；可导出全部或单独导出笔记、翻译历史、批注，批注只包含高亮内容。
-              </p>
-              {renderContentExportOptions(markdownExportOptions, setMarkdownExportOptions, isMarkdownExporting)}
+              {['folder', 'folder-tree'].includes(fileExportScope) ? renderFileExportFolderTree({
+                showDocuments: false,
+                selectFolder: true,
+              }) : null}
+              {fileExportScope === 'selected' ? (
+                renderFileExportFolderTree({
+                  selectedIds: selectedFileExportDocumentIds,
+                  onToggle: toggleFileExportDocument,
+                  disabled: isFileExporting,
+                  includeRecycle: true,
+                })
+              ) : null}
+            </section>
 
-              {renderExportDocumentList({
-                selectedIds: selectedMarkdownDocumentIds,
-                onToggle: toggleMarkdownDocument,
-                className: 'markdown-document-list',
-                disabled: isMarkdownExporting,
-              })}
-              {renderExportDocumentDetail()}
+            <section className="file-export-section">
+              <h3>导出内容</h3>
+              {renderContentExportOptions(fileExportContents, setFileExportContents, isFileExporting)}
+            </section>
 
-              <div className="settings-inline-actions markdown-export-actions">
-                <button
-                  type="button"
-                  className="settings-secondary-button"
-                  onClick={exportCurrentPdfMarkdown}
-                  disabled={isMarkdownExporting || !currentDocument?.documentId || !hasSelectedContentExportOption(markdownExportOptions)}
-                >
-                  导出当前 PDF
-                </button>
-                <button
-                  type="button"
-                  className="settings-primary-button"
-                  onClick={exportMergedMarkdown}
-                  disabled={isMarkdownExporting || !selectedMarkdownDocumentIds.length || !hasSelectedContentExportOption(markdownExportOptions)}
-                >
-                  选中文件合并导出
-                </button>
-                <button
-                  type="button"
-                  className="settings-secondary-button"
-                  onClick={exportBatchMarkdownFiles}
-                  disabled={isMarkdownExporting || !selectedMarkdownDocumentIds.length || !hasSelectedContentExportOption(markdownExportOptions)}
-                >
-                  选中文件批量导出
-                </button>
+            <section className="file-export-section file-export-two-column">
+              <div>
+                <h3>输出格式</h3>
+                <div className="segmented-control">
+                  <button type="button" className={fileExportFormat === 'markdown' ? 'active' : ''} onClick={() => setFileExportFormat('markdown')}>Markdown</button>
+                  <button type="button" className={fileExportFormat === 'pdf' ? 'active' : ''} onClick={() => setFileExportFormat('pdf')}>PDF</button>
+                </div>
+              </div>
+              <div>
+                <h3>导出方式</h3>
+                <select value={fileExportMethod} onChange={(event) => setFileExportMethod(event.target.value)}>
+                  <option value="merged">合并导出</option>
+                  <option value="batch">批量导出</option>
+                  <option value="folder">按文件夹导出</option>
+                </select>
               </div>
             </section>
-          </>
-        ) : null}
 
-        {importExportTab === 'pdfReport' ? (
-          <>
-            <section className="settings-glossary report-export-panel">
-              <div className="settings-section-header">
-                <h3>导出 PDF 报告</h3>
-                <span>{selectedPdfReportDocumentIds.length} / {exportableDocuments.length} 篇</span>
-              </div>
-              <p className="report-export-hint">
-                PDF 用于阅读整理；可导出全部或单独导出笔记、翻译历史、批注，批注只包含高亮内容，不会写回原始 PDF。
-              </p>
-              {renderContentExportOptions(pdfReportExportOptions, setPdfReportExportOptions, isPdfReportExporting)}
+            <section className="file-export-section">
+              <h3>{fileExportFormat === 'markdown' ? 'Markdown 设置' : 'PDF 设置'}</h3>
+              {fileExportFormat === 'markdown' ? (
+                <div className="file-export-option-row">
+                  <label><input type="checkbox" checked={markdownFormatOptions.includeOriginal} onChange={(event) => setMarkdownFormatOptions((current) => ({ ...current, includeOriginal: event.target.checked }))} />包含原文</label>
+                  <label><input type="checkbox" checked={markdownFormatOptions.generateToc} onChange={(event) => setMarkdownFormatOptions((current) => ({ ...current, generateToc: event.target.checked }))} />生成目录</label>
+                  <label><input type="checkbox" checked={markdownFormatOptions.groupByType} onChange={(event) => setMarkdownFormatOptions((current) => ({ ...current, groupByType: event.target.checked }))} />按记录类型分节</label>
+                </div>
+              ) : (
+                <div className="file-export-format-grid">
+                  <label><span>页面尺寸</span><select value={pdfFormatOptions.pageSize} onChange={(event) => setPdfFormatOptions((current) => ({ ...current, pageSize: event.target.value }))}><option value="A4">A4</option><option value="Letter">Letter</option></select></label>
+                  <label><span>页边距</span><select value={pdfFormatOptions.pageMargin} onChange={(event) => setPdfFormatOptions((current) => ({ ...current, pageMargin: event.target.value }))}><option value="compact">紧凑</option><option value="normal">标准</option><option value="wide">宽</option></select></label>
+                  <label><input type="checkbox" checked={pdfFormatOptions.showPageNumbers} onChange={(event) => setPdfFormatOptions((current) => ({ ...current, showPageNumbers: event.target.checked }))} />显示页码</label>
+                  <label><input type="checkbox" checked={pdfFormatOptions.includeOriginal} onChange={(event) => setPdfFormatOptions((current) => ({ ...current, includeOriginal: event.target.checked }))} />包含原文</label>
+                  <label><input type="checkbox" checked={pdfFormatOptions.groupByType} onChange={(event) => setPdfFormatOptions((current) => ({ ...current, groupByType: event.target.checked }))} />按记录类型分节</label>
+                </div>
+              )}
+            </section>
 
-              {renderExportDocumentList({
-                selectedIds: selectedPdfReportDocumentIds,
-                onToggle: togglePdfReportDocument,
-                className: 'report-document-list',
-                disabled: isPdfReportExporting,
-              })}
-              {renderExportDocumentDetail()}
-
-              <div className="settings-inline-actions report-export-actions">
-                <button
-                  type="button"
-                  className="settings-secondary-button"
-                  onClick={exportCurrentPdfReport}
-                  disabled={isPdfReportExporting || !currentDocument?.documentId || !hasSelectedContentExportOption(pdfReportExportOptions)}
-                >
-                  导出当前 PDF
-                </button>
-                <button
-                  type="button"
-                  className="settings-primary-button"
-                  onClick={exportMergedPdfReport}
-                  disabled={isPdfReportExporting || !selectedPdfReportDocumentIds.length || !hasSelectedContentExportOption(pdfReportExportOptions)}
-                >
-                  选中文件合并导出
-                </button>
-                <button
-                  type="button"
-                  className="settings-secondary-button"
-                  onClick={exportBatchPdfReports}
-                  disabled={isPdfReportExporting || !selectedPdfReportDocumentIds.length || !hasSelectedContentExportOption(pdfReportExportOptions)}
-                >
-                  选中文件批量导出
-                </button>
+            <section className="file-export-section">
+              <h3>保存设置</h3>
+              <div className="file-export-save-grid">
+                <label className="settings-field">
+                  <span>导出名称</span>
+                  <input
+                    type="text"
+                    defaultValue={batchExportNameRef.current}
+                    onInput={(event) => {
+                      batchExportNameRef.current = event.currentTarget.value
+                    }}
+                    placeholder="未命名导出"
+                  />
+                </label>
+                <div className="file-export-location"><span>{exportDefaultDir || 'Downloads'}</span><button type="button" className="settings-secondary-button" onClick={selectExportDefaultDir}>选择文件夹</button><button type="button" className="settings-secondary-button" onClick={resetExportDefaultDir}>恢复默认</button></div>
               </div>
             </section>
-          </>
+
+            <section className="file-export-section file-export-preview">
+              <div className="settings-section-header"><h3>预览</h3><span>{getFileExportDocumentIds().length} 篇</span></div>
+              {getFileExportDocumentIds().includes(selectedExportDetailDocumentId) ? renderExportDocumentDetail() : null}
+            </section>
+
+            <div className="file-export-submit">
+              <button type="button" className="settings-primary-button" onClick={() => void exportFiles()} disabled={isFileExporting || !getFileExportDocumentIds().length || !hasSelectedContentExportOption(fileExportContents)}>
+                {isFileExporting ? '导出中...' : '导出'}
+              </button>
+            </div>
+          </section>
         ) : null}
 
         {exportStatus ? <p className="settings-status">{exportStatus}</p> : null}
+        {exportFailures.length ? (
+          <details className="export-failure-list">
+            <summary>失败列表</summary>
+            {exportFailures.map((failure, index) => (
+              <p key={`${failure.fileName || 'file'}-${index}`}>{failure.fileName || '未命名文件'}：{failure.error || '导出失败'}</p>
+            ))}
+          </details>
+        ) : null}
             </section>
           </div>
         </div>
+        {permanentDeleteDialogIds.length ? (
+          <div className="note-dialog-overlay" role="presentation">
+            <section className="note-dialog library-delete-dialog" aria-label="永久删除" onClick={(event) => event.stopPropagation()}>
+              <div className="diagram-dialog-header">
+                <h2>永久删除</h2>
+              </div>
+              <p>将删除该文献及全部历史记录，此操作无法撤销。</p>
+              <div className="settings-actions">
+                <button type="button" className="settings-secondary-button" onClick={() => setPermanentDeleteDialogIds([])}>取消</button>
+                <button type="button" className="settings-primary-button" onClick={() => void confirmPermanentlyDeleteRecycledDocuments()}>永久删除</button>
+              </div>
+            </section>
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+
+  function renderLibraryFolderTreeNode(folder, depth = 0, mode = 'library') {
+    const children = getLibraryFolderChildren(folder.id)
+    const isExpanded = folder.expanded !== false
+    const isHistoryMode = mode === 'history'
+    const isSelected = isHistoryMode ? historyLibraryNodeId === folder.id : selectedLibraryFolderId === folder.id
+    const documentCount = getLibraryFolderDocumentCount(folder.id, true)
+    const recordCount = getLibraryFolderRecordCount(folder.id, true)
+    const isDragging = draggedLibraryFolderId === folder.id
+    const dropPlacement = libraryFolderDropTarget?.folderId === folder.id
+      ? libraryFolderDropTarget.placement
+      : ''
+
+    return (
+      <div className="library-folder-tree-branch" key={`${mode}-${folder.id}`}>
+        <div
+          className={isHistoryMode
+            ? 'library-folder-tree-row history-mode'
+            : `library-folder-tree-row${isSelected ? ' active' : ''}${isDragging ? ' dragging' : ''}${dropPlacement ? ` drop-${dropPlacement}` : ''}`}
+          style={{ '--folder-depth': depth }}
+          onContextMenu={isHistoryMode ? undefined : (event) => openLibraryFolderContextMenu(event, folder)}
+          draggable={!isHistoryMode}
+          onDragStart={isHistoryMode ? undefined : (event) => beginLibraryFolderDrag(event, folder)}
+          onDragOver={isHistoryMode ? undefined : (event) => updateLibraryFolderDragTarget(event, folder)}
+          onDrop={isHistoryMode ? undefined : (event) => dropLibraryFolder(event, folder)}
+          onDragEnd={isHistoryMode ? undefined : endLibraryFolderDrag}
+        >
+          {children.length ? (
+            <TreeChevron
+              expanded={isExpanded}
+              onToggle={() => void toggleLibraryFolderExpanded(folder)}
+            />
+          ) : <span className="tree-chevron-spacer" />}
+          {isHistoryMode ? (
+            <button
+              type="button"
+              className={isSelected ? 'library-folder-button active' : 'library-folder-button'}
+              onClick={() => setHistoryLibraryNodeId(folder.id)}
+            >
+              <span>{folder.name}</span>
+              <small>{`${documentCount} · ${recordCount}`}</small>
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                className={isSelected ? 'library-folder-main active' : 'library-folder-main'}
+                onClick={() => setSelectedLibraryFolderId(folder.id)}
+              >
+                <span>{folder.name}</span>
+              </button>
+              <IconButton
+                className="library-folder-create-child"
+                onClick={(event) => createLibrarySubfolder(event, folder)}
+                onDragStart={(event) => event.preventDefault()}
+                label="新建子文件夹"
+                title="新建子文件夹"
+              >
+                +
+              </IconButton>
+              <button
+                type="button"
+                className="library-folder-count"
+                onClick={() => setSelectedLibraryFolderId(folder.id)}
+                aria-label={`${folder.name}，${documentCount} 篇文献`}
+              >
+                {documentCount}
+              </button>
+            </>
+          )}
+        </div>
+        {isExpanded ? children.map((child) => renderLibraryFolderTreeNode(child, depth + 1, mode)) : null}
+      </div>
+    )
+  }
+
+  function renderLibraryFolderMoveTarget(folder, depth = 0) {
+    const movingFolder = libraryFolders.find((item) => item.id === libraryFolderMoveDialog?.folderId)
+    if (!movingFolder) return null
+
+    const invalidTargets = getLibraryDescendantFolderIds(movingFolder.id)
+    const isDisabled = invalidTargets.has(folder.id) || folder.id === movingFolder.parentId
+    const children = getLibraryFolderChildren(folder.id)
+    const isExpanded = libraryFolderMoveExpandedIds.has(folder.id)
+    const isSelected = libraryFolderMoveDialog?.hasTarget && libraryFolderMoveDialog.targetParentId === folder.id
+
+    return (
+      <div className="library-move-tree-branch" key={`folder-move-${folder.id}`}>
+        <div className="library-folder-move-tree-row" style={{ '--folder-depth': depth }}>
+          {children.length ? (
+            <TreeChevron
+              expanded={isExpanded}
+              onToggle={() => toggleLibraryFolderMoveExpanded(folder.id)}
+            />
+          ) : <span className="tree-chevron-spacer" />}
+          <button
+            type="button"
+            className={isSelected ? 'library-folder-move-node active' : 'library-folder-move-node'}
+            disabled={isDisabled}
+            onClick={() => selectLibraryFolderMoveTarget(folder.id)}
+          >
+            <span>{folder.name}</span>
+          </button>
+        </div>
+        {isExpanded ? children.map((child) => renderLibraryFolderMoveTarget(child, depth + 1)) : null}
+      </div>
+    )
+  }
+
+  function renderLibraryFolderMoveRoot() {
+    const movingFolder = libraryFolders.find((folder) => folder.id === libraryFolderMoveDialog?.folderId)
+    const rootDisabled = !movingFolder || movingFolder.parentId === null
+    const isSelected = libraryFolderMoveDialog?.hasTarget && libraryFolderMoveDialog.targetParentId === null
+
+    return (
+      <div className="library-move-tree-branch">
+        <div className="library-folder-move-tree-row" style={{ '--folder-depth': 0 }}>
+          <TreeChevron
+            expanded={libraryFolderMoveRootExpanded}
+            onToggle={() => setLibraryFolderMoveRootExpanded((expanded) => !expanded)}
+          />
+          <button
+            type="button"
+            className={isSelected ? 'library-folder-move-node active' : 'library-folder-move-node'}
+            disabled={rootDisabled}
+            onClick={() => selectLibraryFolderMoveTarget(null)}
+          >
+            <span>全部文献</span>
+          </button>
+        </div>
+        {libraryFolderMoveRootExpanded ? (
+          <>
+            <div className="library-folder-move-tree-row system" style={{ '--folder-depth': 1 }}>
+              <span className="tree-chevron-spacer" />
+              <button type="button" className="library-folder-move-node" disabled>
+                <span>未分类</span>
+              </button>
+            </div>
+            {getLibraryFolderChildren(null).map((folder) => renderLibraryFolderMoveTarget(folder, 1))}
+          </>
+        ) : null}
+      </div>
+    )
+  }
+
+  function renderMoveFolderTree(folder, depth = 0) {
+    const children = getLibraryFolderChildren(folder.id)
+    const isExpanded = libraryMoveExpandedIds.has(folder.id)
+    const isSelectedFolder = libraryMoveDialog?.hasTarget && folder.id === libraryMoveDialog.targetFolderId
+
+    return (
+      <div className="library-move-tree-branch" key={`move-${folder.id}`}>
+        <div className="library-folder-move-tree-row" style={{ '--folder-depth': depth }}>
+          {children.length ? (
+            <TreeChevron
+              expanded={isExpanded}
+              onToggle={() => toggleLibraryMoveExpanded(folder.id)}
+            />
+          ) : <span className="tree-chevron-spacer" />}
+          <button
+            type="button"
+            className={isSelectedFolder ? 'library-folder-move-node active' : 'library-folder-move-node'}
+            onClick={() => selectLibraryMoveTarget(folder.id)}
+          >
+            <span>{folder.name}</span>
+          </button>
+        </div>
+        {isExpanded ? children.map((child) => renderMoveFolderTree(child, depth + 1)) : null}
+      </div>
+    )
+  }
+
+  function renderLibraryDocumentMoveRoot() {
+    const isUnfiledSelected = libraryMoveDialog?.hasTarget && !libraryMoveDialog.targetFolderId
+
+    return (
+      <div className="library-move-tree-branch">
+        <div className="library-folder-move-tree-row system" style={{ '--folder-depth': 0 }}>
+          <TreeChevron
+            expanded={libraryMoveRootExpanded}
+            onToggle={() => setLibraryMoveRootExpanded((expanded) => !expanded)}
+          />
+          <button type="button" className="library-folder-move-node" disabled>
+            <span>全部文献</span>
+          </button>
+        </div>
+        {libraryMoveRootExpanded ? (
+          <>
+            <div className="library-folder-move-tree-row" style={{ '--folder-depth': 1 }}>
+              <span className="tree-chevron-spacer" />
+              <button
+                type="button"
+                className={isUnfiledSelected ? 'library-folder-move-node active' : 'library-folder-move-node'}
+                onClick={() => selectLibraryMoveTarget('')}
+              >
+                <span>未分类</span>
+              </button>
+            </div>
+            {getLibraryFolderChildren(null).map((folder) => renderMoveFolderTree(folder, 1))}
+          </>
+        ) : null}
       </div>
     )
   }
 
   function renderLibraryPage() {
     const visibleDocuments = getVisibleLibraryDocuments()
-    const folderCounts = libraryDocuments.reduce((counts, document) => {
-      const key = document.folderId || 'unfiled'
-      counts[key] = (counts[key] || 0) + 1
-      return counts
-    }, {})
+    const unfiledCount = libraryDocuments.filter((document) => !document.folderId).length
+    const contextFolder = libraryFolderContextMenu
+      ? libraryFolders.find((folder) => folder.id === libraryFolderContextMenu.folderId)
+      : null
 
     return (
       <section className="library-page">
         <aside className="library-folder-panel">
           <div className="library-folder-header">
             <strong>项目文件夹</strong>
-            <button type="button" className="settings-secondary-button" onClick={openLibraryFolderDialog}>
-              新建
-            </button>
+            <IconButton onClick={() => openLibraryFolderDialog(null, null)} label="新建文件夹" title="新建文件夹">
+              <FolderPlus size={16} />
+            </IconButton>
           </div>
           <button
             type="button"
@@ -9767,26 +13352,101 @@ function App() {
             <span>全部文献</span>
             <small>{libraryDocuments.length}</small>
           </button>
-          <button
-            type="button"
-            className={selectedLibraryFolderId === 'unfiled' ? 'library-folder-button active' : 'library-folder-button'}
-            onClick={() => setSelectedLibraryFolderId('unfiled')}
+          <div className="library-folder-tree">
+            <div className={`library-folder-tree-row system-folder-row${selectedLibraryFolderId === 'unfiled' ? ' active' : ''}`} style={{ '--folder-depth': 0 }}>
+              <span className="tree-chevron-spacer" />
+              <button
+                type="button"
+                className={selectedLibraryFolderId === 'unfiled' ? 'library-folder-main active' : 'library-folder-main'}
+                onClick={() => setSelectedLibraryFolderId('unfiled')}
+              >
+                <span>未分类</span>
+              </button>
+              <span className="library-folder-system-spacer" />
+              <button
+                type="button"
+                className="library-folder-count"
+                onClick={() => setSelectedLibraryFolderId('unfiled')}
+                aria-label={`未分类：${unfiledCount} 篇文献`}
+              >
+                {unfiledCount}
+              </button>
+            </div>
+            {getLibraryFolderChildren(null).map((folder) => renderLibraryFolderTreeNode(folder))}
+          </div>
+        </aside>
+
+        {libraryFolderContextMenu && contextFolder ? (
+          <div
+            className="library-context-menu library-folder-context-menu"
+            style={{ left: `${libraryFolderContextMenu.x}px`, top: `${libraryFolderContextMenu.y}px` }}
+            role="menu"
+            aria-label={`${contextFolder.name} 文件夹操作`}
+            onPointerDown={(event) => event.stopPropagation()}
           >
-            <span>未分类</span>
-            <small>{folderCounts.unfiled || 0}</small>
-          </button>
-          {libraryFolders.map((folder) => (
             <button
               type="button"
-              key={folder.id}
-              className={selectedLibraryFolderId === folder.id ? 'library-folder-button active' : 'library-folder-button'}
-              onClick={() => setSelectedLibraryFolderId(folder.id)}
+              role="menuitem"
+              onClick={() => {
+                setLibraryFolderContextMenu(null)
+                openLibraryFolderDialog(contextFolder.parentId, contextFolder)
+              }}
             >
-              <span>{folder.name}</span>
-              <small>{folderCounts[folder.id] || 0}</small>
+              重命名
             </button>
-          ))}
-        </aside>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                openLibraryFolderMoveDialog(contextFolder, libraryFolderContextMenu)
+              }}
+            >
+              移动至
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="danger"
+              onClick={() => {
+                setLibraryFolderContextMenu(null)
+                void deleteLibraryFolder(contextFolder)
+              }}
+            >
+              删除
+            </button>
+          </div>
+        ) : null}
+
+        {libraryFolderMoveDialog ? (
+          <div
+            className="library-move-popover library-folder-move-popover"
+            style={{ left: `${libraryFolderMoveDialog.x}px`, top: `${libraryFolderMoveDialog.y}px` }}
+            role="dialog"
+            aria-label="移动文件夹"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <div className="library-move-header">
+              <strong>移动至</strong>
+              <button type="button" onClick={() => setLibraryFolderMoveDialog(null)}>关闭</button>
+            </div>
+            <div className="library-move-folder-list">
+              {renderLibraryFolderMoveRoot()}
+            </div>
+            <div className="library-move-actions">
+              <button type="button" className="settings-secondary-button" onClick={() => setLibraryFolderMoveDialog(null)}>
+                取消
+              </button>
+              <button
+                type="button"
+                className="settings-primary-button"
+                disabled={!libraryFolderMoveDialog.hasTarget}
+                onClick={confirmLibraryFolderMove}
+              >
+                移动
+              </button>
+            </div>
+          </div>
+        ) : null}
 
         <section className="library-main-panel">
           <div className="library-toolbar">
@@ -9827,7 +13487,7 @@ function App() {
                 <option value="notes">笔记数量</option>
               </select>
             </label>
-            <button type="button" className="settings-primary-button" onClick={importLibraryDocuments}>
+            <button type="button" className="settings-primary-button library-import-button" onClick={importLibraryDocuments}>
               导入文献
             </button>
           </div>
@@ -9855,7 +13515,7 @@ function App() {
           {libraryStatus ? <p className="settings-status">{libraryStatus}</p> : null}
 
           <div className="library-document-list">
-            {visibleDocuments.length ? visibleDocuments.map((document) => (
+            {visibleDocuments.map((document) => (
               <article
                 key={document.documentId}
                 className="library-document-row"
@@ -9868,7 +13528,7 @@ function App() {
                   aria-label={`选择 ${document.fileName}`}
                 />
                 <button type="button" className="library-document-main" onClick={() => openLibraryDocument(document)}>
-                  <strong>{document.fileName}</strong>
+                  <strong>{document.displayName || document.fileName}</strong>
                   <div className="library-progress">
                     <i style={{ width: `${getLibraryProgressPercent(document)}%` }} />
                   </div>
@@ -9879,9 +13539,7 @@ function App() {
                   <span>阅读 {getLibraryProgress(document)}</span>
                 </div>
               </article>
-            )) : (
-              <p className="history-empty">暂无文献</p>
-            )}
+            ))}
           </div>
 
           {libraryContextMenu ? (
@@ -9899,6 +13557,14 @@ function App() {
                 )}
               >
                 移动到
+              </button>
+              <button
+                type="button"
+                onClick={() => void renameLibraryDocument(
+                  libraryDocuments.find((document) => document.documentId === libraryContextMenu.documentId),
+                )}
+              >
+                重命名
               </button>
               <button type="button" onClick={() => deleteLibraryDocuments([libraryContextMenu.documentId])}>
                 删除文献
@@ -9919,20 +13585,7 @@ function App() {
                 </button>
               </div>
               <div className="library-move-folder-list">
-                {[{ id: '', name: '未分类' }, ...libraryFolders].map((folder) => {
-                  const isSelectedFolder = folder.id === libraryMoveDialog.targetFolderId
-
-                  return (
-                    <button
-                      type="button"
-                      key={folder.id || 'unfiled'}
-                      className={isSelectedFolder ? 'library-move-folder active' : 'library-move-folder'}
-                      onClick={() => setLibraryMoveDialog((dialog) => ({ ...dialog, targetFolderId: folder.id }))}
-                    >
-                      <span>{folder.name}</span>
-                    </button>
-                  )
-                })}
+                {renderLibraryDocumentMoveRoot()}
               </div>
               <div className="library-move-actions">
                 <button type="button" className="settings-secondary-button" onClick={() => setLibraryMoveDialog(null)}>
@@ -9941,7 +13594,8 @@ function App() {
                 <button
                   type="button"
                   className="settings-primary-button"
-                  onClick={() => moveLibraryDocuments(libraryMoveDialog.documentIds, libraryMoveDialog.targetFolderId)}
+                  disabled={!libraryMoveDialog.hasTarget}
+                  onClick={confirmLibraryDocumentMove}
                 >
                   确认
                 </button>
@@ -9954,13 +13608,13 @@ function App() {
           <div className="note-dialog-overlay" role="presentation">
             <section
               className="note-dialog library-folder-dialog"
-              aria-label="新建文件夹"
+              aria-label={libraryFolderEditingId ? '重命名文件夹' : libraryFolderParentId ? '新建子文件夹' : '新建文件夹'}
               onPointerDown={(event) => event.stopPropagation()}
               onMouseDown={(event) => event.stopPropagation()}
               onClick={(event) => event.stopPropagation()}
             >
               <div className="diagram-dialog-header">
-                <h2>新建文件夹</h2>
+                <h2>{libraryFolderEditingId ? '重命名文件夹' : libraryFolderParentId ? '新建子文件夹' : '新建文件夹'}</h2>
                 <button type="button" onClick={closeLibraryFolderDialog}>
                   取消
                 </button>
@@ -9998,6 +13652,22 @@ function App() {
             </section>
           </div>
         ) : null}
+
+        {libraryDeleteDialog ? (
+          <div className="note-dialog-overlay" role="presentation">
+            <section className="note-dialog library-delete-dialog" aria-label="删除文献" onClick={(event) => event.stopPropagation()}>
+              <div className="diagram-dialog-header">
+                <h2>删除文献</h2>
+              </div>
+              <div className="settings-actions library-delete-actions">
+                <button type="button" className="settings-secondary-button" onClick={() => setLibraryDeleteDialog(null)}>取消</button>
+                <button type="button" className="settings-secondary-button" onClick={() => void confirmDeleteLibraryDocuments('recycle')}>仅移出文献库</button>
+                <button type="button" className="settings-primary-button" onClick={() => void confirmDeleteLibraryDocuments('permanent')}>删除文献及记录</button>
+              </div>
+            </section>
+          </div>
+        ) : null}
+
       </section>
     )
   }
@@ -10202,10 +13872,6 @@ function App() {
         setIsOcrMenuOpen(false)
       }
 
-      window.setTimeout(() => {
-        syncPageWidthRef.current?.()
-      }, 80)
-
       return nextCollapsed
     })
   }
@@ -10214,58 +13880,68 @@ function App() {
     <main className={sidebarCollapsed ? 'app sidebar-collapsed' : 'app'} ref={appRef}>
       <aside className="module-sidebar" aria-label="主模块">
         <div className="sidebar-head">
-          <div className="sidebar-brand" aria-hidden="true">
+          <div className="sidebar-brand">
             <img className="sidebar-brand-mark" src={APP_ICON_SRC} alt="" draggable="false" />
+            <span className="sidebar-brand-copy">
+              <strong>Paper Reader</strong>
+              <small>RESEARCH DESK</small>
+            </span>
           </div>
-          <button
-            type="button"
+          <IconButton
             className="module-sidebar-toggle"
             onClick={toggleSidebarCollapsed}
-            aria-label={sidebarCollapsed ? '展开左侧栏' : '折叠左侧栏'}
+            label={sidebarCollapsed ? '展开左侧栏' : '折叠左侧栏'}
             title={sidebarCollapsed ? '展开左侧栏' : '折叠左侧栏'}
           >
-            {sidebarCollapsed ? '›' : '‹'}
-          </button>
+            {sidebarCollapsed
+              ? <PanelLeftOpen size={17} strokeWidth={1.8} />
+              : <PanelLeftClose size={17} strokeWidth={1.8} />}
+          </IconButton>
         </div>
         <nav className="module-nav-list" aria-label="页面模块">
-          {MODULE_NAV_ITEMS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={activeModule === item.id ? 'module-nav-button active' : 'module-nav-button'}
-              onClick={() => switchModule(item.id)}
-              title={item.label}
-              aria-current={activeModule === item.id ? 'page' : undefined}
-            >
-              <span className="module-nav-icon" aria-hidden="true">{item.icon}</span>
-              <span className="module-nav-label">{item.label}</span>
-            </button>
-          ))}
+          {MODULE_NAV_ITEMS.map((item) => {
+            const ItemIcon = item.icon
+
+            return (
+              <button
+                key={item.id}
+                type="button"
+                className={activeModule === item.id ? 'module-nav-button active' : 'module-nav-button'}
+                onClick={() => switchModule(item.id)}
+                title={item.label}
+                aria-label={item.label}
+                aria-current={activeModule === item.id ? 'page' : undefined}
+              >
+                <span className="module-nav-icon" aria-hidden="true">
+                  <ItemIcon size={19} strokeWidth={1.75} />
+                </span>
+                <span className="module-nav-label">{item.label}</span>
+              </button>
+            )
+          })}
         </nav>
         {!tocDrawerOpen ? (
-          <button
-            type="button"
+          <IconButton
             className="toc-edge-button"
             onClick={toggleTocPanel}
-            aria-label="目录"
+            label="目录"
             title="目录"
           >
-            ›
-          </button>
+            <ListTree size={15} strokeWidth={1.8} />
+          </IconButton>
         ) : null}
       </aside>
 
       {tocDrawerOpen ? (
         <aside className="toc-drawer-panel" aria-label="目录面板">
-          <button
-            type="button"
+          <IconButton
             className="toc-edge-button toc-drawer-edge-button active"
             onClick={toggleTocPanel}
-            aria-label="收起目录"
+            label="收起目录"
             title="目录"
           >
-            ‹
-          </button>
+            <ChevronLeft size={15} strokeWidth={1.8} />
+          </IconButton>
           {renderTocPanel()}
         </aside>
       ) : null}
@@ -10281,18 +13957,26 @@ function App() {
           aria-hidden={activeModule !== 'reader'}
         >
       {toolbarCollapsed ? (
-        <button
-          type="button"
+        <IconButton
           className="toolbar-collapse-toggle collapsed"
           onClick={toggleToolbarCollapsed}
-          aria-label="展开工具栏"
+          label="展开工具栏"
           title="展开工具栏"
-        />
+        >
+          <ChevronDown size={14} strokeWidth={2} />
+        </IconButton>
       ) : null}
       <header className={toolbarCollapsed ? 'toolbar toolbar-collapsed' : 'toolbar'}>
         <section className="toolbar-group toolbar-left" aria-label="文件">
-          <button type="button" className="upload-button" onClick={handleOpenPdfClick}>
-            {UI.choosePdf}
+          <button
+            type="button"
+            className="upload-button"
+            onClick={handleOpenPdfClick}
+            aria-label={UI.choosePdf}
+            title={UI.choosePdf}
+          >
+            <FilePlus2 size={17} strokeWidth={1.9} aria-hidden="true" />
+            <span>{UI.choosePdf}</span>
           </button>
           <input
             ref={fallbackFileInputRef}
@@ -10306,18 +13990,24 @@ function App() {
             type="button"
             className={isRecentOpen ? 'secondary-toolbar-button active' : 'secondary-toolbar-button'}
             onClick={() => setIsRecentOpen((isOpen) => !isOpen)}
+            aria-label="最近打开"
+            title="最近打开"
           >
-            最近打开
+            <History size={16} strokeWidth={1.8} aria-hidden="true" />
+            <span>最近打开</span>
           </button>
           <div className="annotation-menu-wrap">
             <button
               ref={annotationButtonRef}
               type="button"
-              className={isAnnotationToolbarOpen || annotationColor ? 'ocr-button active' : 'ocr-button'}
+              className={isAnnotationToolbarOpen || annotationColor ? 'ocr-button annotation-toolbar-trigger active' : 'ocr-button annotation-toolbar-trigger'}
               onClick={() => setIsAnnotationToolbarOpen((isOpen) => !isOpen)}
               disabled={!pdfUrl}
+              aria-label="批注"
+              title="批注"
             >
-              批注
+              <Highlighter size={16} strokeWidth={1.8} aria-hidden="true" />
+              <span>批注</span>
             </button>
             {isAnnotationToolbarOpen ? (
               <div className="annotation-toolbar" ref={annotationToolbarRef}>
@@ -10328,7 +14018,7 @@ function App() {
                     onClick={() => setAnnotationColor(null)}
                     aria-label="不标记"
                   >
-                    ⊘
+                    <CircleOff size={15} strokeWidth={1.9} aria-hidden="true" />
                   </button>
                   {HIGHLIGHT_COLORS.map((highlightColor) => (
                     <button
@@ -10341,12 +14031,6 @@ function App() {
                     />
                   ))}
                 </div>
-                <button type="button" onClick={translateActiveHighlight}>
-                  翻译
-                </button>
-                <button type="button" onClick={addNoteForActiveHighlight}>
-                  笔记
-                </button>
                 <button type="button" onClick={() => setHideOcrNoteTags((isHidden) => !isHidden)}>
                   {hideOcrNoteTags ? '显示笔记标签' : '隐藏笔记标签'}
                 </button>
@@ -10356,71 +14040,14 @@ function App() {
           </div>
         </section>
 
-        <section className="toolbar-group toolbar-navigation page-controls" aria-label={UI.pageControl}>
-          <button type="button" onClick={goToPreviousPage} disabled={!pdfUrl || pageNumber <= 1}>
-            {UI.previousPage}
-          </button>
-          <span>
-            {UI.page} {pdfUrl ? pageNumber : 0} {UI.pageSuffix}
-            {numPages ? ` / ${UI.totalPages} ${numPages} ${UI.pageSuffix}` : ''}
-          </span>
-          <label className="page-jump-control">
-            <input
-              type="text"
-              inputMode="numeric"
-              value={isPageJumpFocused ? pageJumpInput : String(pageNumber)}
-              onChange={(event) => setPageJumpInput(event.target.value)}
-              onFocus={() => {
-                setIsPageJumpFocused(true)
-                setPageJumpInput(String(pageNumber))
-                requestAnimationFrame(() => document.activeElement?.select?.())
-              }}
-              onKeyDown={handlePageJumpKeyDown}
-              onBlur={(event) => {
-                jumpToPage(event.currentTarget.value)
-                setIsPageJumpFocused(false)
-              }}
-              disabled={!pdfUrl || !numPages}
-              aria-label="跳转页码"
-            />
-          </label>
-          <button type="button" onClick={jumpToPage} disabled={!pdfUrl || !numPages}>
-            跳转
-          </button>
-          <button
-            type="button"
-            onClick={goToNextPage}
-            disabled={!pdfUrl || !numPages || pageNumber >= numPages}
-          >
-            {UI.nextPage}
-          </button>
-        </section>
-
-        <section className="toolbar-group toolbar-view zoom-controls" aria-label="PDF 缩放">
-          <button type="button" onClick={() => changeZoom(-ZOOM_STEP)} disabled={!pdfUrl}>
-            -
-          </button>
-          <label className="zoom-input-control">
-            <input
-              type="text"
-              inputMode="numeric"
-              value={zoomInput}
-              onChange={(event) => setZoomInput(event.target.value)}
-              onKeyDown={handleZoomInputKeyDown}
-              onBlur={() => applyZoom(zoomInput)}
-              disabled={!pdfUrl}
-              aria-label="缩放比例"
-            />
-            <span>%</span>
-          </label>
-          <button type="button" onClick={() => changeZoom(ZOOM_STEP)} disabled={!pdfUrl}>
-            +
-          </button>
-        </section>
+        <div className="reader-document-identity" title={currentDocument?.fileName || '未打开文献'}>
+          <strong>{currentDocument?.fileName || '未打开文献'}</strong>
+          <span>{pdfUrl ? `${pageNumber} / ${numPages || '—'}` : 'PDF READER'}</span>
+        </div>
 
         <section className="toolbar-group toolbar-actions view-controls" aria-label="工具与设置">
           <label className="toolbar-search-control">
-            <span aria-hidden="true">⌕</span>
+            <Search size={16} strokeWidth={1.8} aria-hidden="true" />
             <input
               type="search"
               value={readerSearchInput}
@@ -10429,6 +14056,7 @@ function App() {
               onKeyDown={handleReaderSearchKeyDown}
               disabled={!pdfUrl}
               aria-label="搜索当前 PDF"
+              placeholder="搜索"
             />
           </label>
           <div className="ocr-menu-wrap">
@@ -10437,8 +14065,11 @@ function App() {
               className={isOcrMode || isOcrMenuOpen ? 'ocr-button active' : 'ocr-button'}
               onClick={toggleOcrMode}
               disabled={!pdfUrl}
+              aria-label="区域 OCR"
+              title="区域 OCR"
             >
-              区域 OCR
+              <ScanLine size={16} strokeWidth={1.8} aria-hidden="true" />
+              <span>区域 OCR</span>
             </button>
             {isOcrMenuOpen ? (
               <div className="ocr-mode-menu">
@@ -10459,18 +14090,24 @@ function App() {
             className="fullscreen-button"
             onClick={toggleFullscreen}
             disabled={!pdfUrl}
+            aria-label={isFullscreen ? UI.exitFullscreen : UI.fullscreen}
+            title={isFullscreen ? UI.exitFullscreen : UI.fullscreen}
           >
-            {isFullscreen ? UI.exitFullscreen : UI.fullscreen}
+            {isFullscreen
+              ? <Minimize2 size={16} strokeWidth={1.8} aria-hidden="true" />
+              : <Maximize2 size={16} strokeWidth={1.8} aria-hidden="true" />}
+            <span>{isFullscreen ? UI.exitFullscreen : UI.fullscreen}</span>
           </button>
         </section>
         {!toolbarCollapsed ? (
-          <button
-            type="button"
+          <IconButton
             className="toolbar-collapse-toggle expanded"
             onClick={toggleToolbarCollapsed}
-            aria-label="收起工具栏"
+            label="收起工具栏"
             title="收起工具栏"
-          />
+          >
+            <ChevronUp size={14} strokeWidth={2} />
+          </IconButton>
         ) : null}
       </header>
 
@@ -10587,15 +14224,16 @@ function App() {
             </div>
           </section>
 
-          <button
-            type="button"
+          <IconButton
             className={rightPanelVisible ? 'panel-toggle-button visible' : 'panel-toggle-button collapsed'}
             onClick={() => setRightPanelVisible((isVisible) => !isVisible)}
-            aria-label={rightPanelVisible ? '隐藏结果栏' : '显示结果栏'}
+            label={rightPanelVisible ? '隐藏结果栏' : '显示结果栏'}
             title={rightPanelVisible ? '隐藏结果栏' : '显示结果栏'}
           >
-            {rightPanelVisible ? '›' : '‹'}
-          </button>
+            {rightPanelVisible
+              ? <ChevronRight size={15} strokeWidth={2} />
+              : <ChevronLeft size={15} strokeWidth={2} />}
+          </IconButton>
 
           {rightPanelVisible ? (
             <div
@@ -10688,6 +14326,89 @@ function App() {
           <p>{UI.emptyPdf}</p>
         </section>
       )}
+      <footer className="reader-statusbar" aria-label="阅读控制">
+        <section className="statusbar-group page-controls" aria-label={UI.pageControl}>
+          <IconButton
+            className="statusbar-icon-button"
+            onClick={goToPreviousPage}
+            disabled={!pdfUrl || pageNumber <= 1}
+            label={UI.previousPage}
+          >
+            <ChevronLeft size={16} strokeWidth={2} />
+          </IconButton>
+          <span className="page-readout">
+            {pdfUrl ? pageNumber : 0} / {numPages || 0}
+          </span>
+          <label className="page-jump-control">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={isPageJumpFocused ? pageJumpInput : String(pageNumber)}
+              onChange={(event) => setPageJumpInput(event.target.value)}
+              onFocus={() => {
+                setIsPageJumpFocused(true)
+                setPageJumpInput(String(pageNumber))
+                requestAnimationFrame(() => document.activeElement?.select?.())
+              }}
+              onKeyDown={handlePageJumpKeyDown}
+              onBlur={(event) => {
+                jumpToPage(event.currentTarget.value)
+                setIsPageJumpFocused(false)
+              }}
+              disabled={!pdfUrl || !numPages}
+              aria-label="跳转页码"
+            />
+          </label>
+          <button type="button" className="statusbar-text-button" onClick={jumpToPage} disabled={!pdfUrl || !numPages}>
+            跳转
+          </button>
+          <IconButton
+            className="statusbar-icon-button"
+            onClick={goToNextPage}
+            disabled={!pdfUrl || !numPages || pageNumber >= numPages}
+            label={UI.nextPage}
+          >
+            <ChevronRight size={16} strokeWidth={2} />
+          </IconButton>
+        </section>
+
+        <div className="reader-status-summary" aria-live="polite">
+          <span className={pdfUrl ? 'reader-status-dot ready' : 'reader-status-dot'} aria-hidden="true" />
+          <span>{pdfUrl ? '文献已加载' : '等待文献'}</span>
+        </div>
+
+        <section className="statusbar-group zoom-controls" aria-label="PDF 缩放">
+          <IconButton
+            className="statusbar-icon-button"
+            onClick={() => changeZoom(-ZOOM_STEP)}
+            disabled={!pdfUrl}
+            label="缩小"
+          >
+            <Minus size={16} strokeWidth={2} />
+          </IconButton>
+          <label className="zoom-input-control">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={zoomInput}
+              onChange={(event) => setZoomInput(event.target.value)}
+              onKeyDown={handleZoomInputKeyDown}
+              onBlur={() => applyZoom(zoomInput)}
+              disabled={!pdfUrl}
+              aria-label="缩放比例"
+            />
+            <span>%</span>
+          </label>
+          <IconButton
+            className="statusbar-icon-button"
+            onClick={() => changeZoom(ZOOM_STEP)}
+            disabled={!pdfUrl}
+            label="放大"
+          >
+            <Plus size={16} strokeWidth={2} />
+          </IconButton>
+        </section>
+      </footer>
         </section>
 
         <section
@@ -10764,7 +14485,7 @@ function App() {
                         <input
                           type="password"
                           value={settingsForm.apiKey}
-                          onChange={(event) => updateSettingsField('apiKey', event.target.value)}
+                          onChange={(event) => updateSettingsApiKey(event.target.value)}
                           autoComplete="off"
                         />
                       </label>
@@ -10773,46 +14494,72 @@ function App() {
                     <section className="settings-glossary">
                       <div className="settings-section-header">
                         <h3>模型参数</h3>
-                        <span>选择或输入用于翻译的模型名称</span>
+                        <span>
+                          {modelListStatus === 'loading'
+                            ? '正在获取模型'
+                            : modelListStatus === 'success'
+                              ? `已获取 ${availableModels.length} 个模型`
+                              : modelListStatus === 'error'
+                                ? '模型列表获取失败'
+                                : ''}
+                        </span>
                       </div>
-                      <label className="settings-field">
-                        <span>模型名</span>
-                        <div className="settings-model-row">
-                          <input
-                            type="text"
-                            value={settingsForm.model}
-                            onChange={(event) => updateSettingsField('model', event.target.value)}
-                            placeholder={PROVIDERS[settingsForm.provider].model || 'model-id'}
-                          />
-                          {PROVIDERS[settingsForm.provider].presets.length ? (
+                      <div className="settings-field">
+                        <label htmlFor="settings-model-input">模型名</label>
+                        <SettingsModelCombobox
+                          value={settingsForm.model}
+                          models={availableModels}
+                          status={modelListStatus}
+                          error={modelListError}
+                          placeholder={
+                            modelListStatus === 'loading'
+                              ? '正在获取可用模型…'
+                              : '选择或输入模型名称'
+                          }
+                          onChange={updateSettingsModel}
+                        />
+                      </div>
+                      <details className="settings-advanced-parameters">
+                        <summary>高级参数</summary>
+                        <div className="settings-advanced-parameters-body">
+                          <label className="settings-field">
+                            <span>Temperature</span>
                             <select
-                              value=""
-                              aria-label="常用模型预设"
-                              onChange={(event) => {
-                                if (event.target.value) {
-                                  updateSettingsField('model', event.target.value)
-                                }
-                              }}
+                              value={settingsForm.temperatureMode}
+                              onChange={(event) => updateSettingsField('temperatureMode', event.target.value)}
                             >
-                              <option value="">常用模型预设</option>
-                              {PROVIDERS[settingsForm.provider].presets.map((model) => (
-                                <option key={model} value={model}>
-                                  {model}
-                                </option>
-                              ))}
+                              <option value="auto">自动</option>
+                              <option value="custom">自定义</option>
                             </select>
+                          </label>
+                          {settingsForm.temperatureMode === 'custom' ? (
+                            <label className="settings-field">
+                              <span>Temperature 数值</span>
+                              <input
+                                type="number"
+                                min="0"
+                                max="2"
+                                step="0.1"
+                                value={settingsForm.temperature}
+                                onChange={(event) => updateSettingsField('temperature', event.target.value)}
+                              />
+                            </label>
                           ) : null}
                         </div>
-                      </label>
+                      </details>
                       <label className="settings-switch-row">
                         <span>
                           <strong>启用多模态翻译</strong>
-                          <small>图解模式和对照模式会优先让支持图片的 AI 直接识别文字坐标并翻译；失败时自动回退到原 OCR 流程。</small>
                         </span>
                         <input
                           type="checkbox"
                           checked={settingsSupportMultimodal(settingsForm)}
                           disabled={!settingsCanEnableMultimodal(settingsForm)}
+                          title={
+                            settingsForm.modelSupportsMultimodal === false
+                              ? '模型列表未声明图片输入能力，仍可手动启用并由接口实际验证'
+                              : '启用多模态图片识别'
+                          }
                           onChange={(event) => updateSettingsField('enableMultimodalTranslation', event.target.checked)}
                         />
                       </label>
@@ -10823,7 +14570,6 @@ function App() {
                     <section className="settings-glossary">
                       <div className="settings-section-header">
                         <h3>Prompt 设置</h3>
-                        <span>用于普通划词、OCR 文本和批注翻译</span>
                       </div>
                       <label className="settings-field">
                         <span>自定义翻译 Prompt</span>
@@ -10910,8 +14656,59 @@ function App() {
           onPointerDown={(event) => event.stopPropagation()}
         >
           <button type="button" onClick={() => deleteHighlightAnnotation(highlightContextMenu.highlightId)}>
-            取消高亮
+            取消
           </button>
+          <button type="button" onClick={translateHighlightFromContextMenu}>
+            翻译
+          </button>
+        </div>
+      ) : null}
+
+      {pdfHighlightWritePromptOpen ? (
+        <div className="note-dialog-overlay" role="presentation">
+          <section
+            className="note-dialog pdf-highlight-write-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="pdf-highlight-write-dialog-title"
+            onPointerDown={(event) => event.stopPropagation()}
+            onMouseDown={(event) => event.stopPropagation()}
+            onMouseUp={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key !== 'Escape') return
+              event.preventDefault()
+              event.stopPropagation()
+              resolvePdfHighlightWritePrompt('internal')
+            }}
+          >
+            <div className="diagram-dialog-header">
+              <h2 id="pdf-highlight-write-dialog-title">高亮写入方式</h2>
+            </div>
+
+            <div className="note-dialog-source">
+              <strong>是否将后续高亮写入 PDF 文件本体？</strong>
+              <p>写入后用其他 PDF 软件打开也能看到。</p>
+            </div>
+
+            <div className="settings-actions">
+              <button
+                type="button"
+                className="settings-secondary-button"
+                autoFocus
+                onClick={() => resolvePdfHighlightWritePrompt('internal')}
+              >
+                仅在 Paper Reader 内显示
+              </button>
+              <button
+                type="button"
+                className="settings-primary-button"
+                onClick={() => resolvePdfHighlightWritePrompt('write')}
+              >
+                写入 PDF 并创建备份
+              </button>
+            </div>
+          </section>
         </div>
       ) : null}
 
@@ -10968,8 +14765,6 @@ function App() {
             onMouseDown={(event) => event.stopPropagation()}
             onMouseUp={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
-            onBeforeInput={(event) => event.stopPropagation()}
-            onInput={(event) => event.stopPropagation()}
             onKeyDown={(event) => event.stopPropagation()}
             onKeyUp={(event) => event.stopPropagation()}
           >
@@ -10985,6 +14780,7 @@ function App() {
               <input
                 ref={noteTitleInputRef}
                 type="text"
+                autoFocus
                 defaultValue={noteDialog.draft?.title ?? noteDraft.title}
                 onFocus={() => setNotesStatus('')}
                 placeholder="输入笔记标题"

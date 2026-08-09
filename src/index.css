@@ -1,7 +1,8 @@
 :root {
-  color: #131c2b;
-  background: #e7edf5;
+  color: #20231f;
+  background: #dfe2de;
   font-family:
+    "Segoe UI Variable Text",
     "Microsoft YaHei UI",
     "Segoe UI",
     system-ui,
@@ -28,7 +29,7 @@ button {
   letter-spacing: 0;
 }
 
-/* Page numbers, zoom %, counts — keep digits aligned. */
+/* Keep dense numeric controls aligned while values change. */
 .page-controls span,
 .zoom-input-control,
 .history-item-meta,
@@ -40,17 +41,16 @@ button {
 body {
   margin: 0;
   min-width: 320px;
-  color: #131c2b;
-  background: #e7edf5;
+  color: #20231f;
+  background: #dfe2de;
 }
 
 #root {
   min-height: 100svh;
 }
 
-/* Refined text selection that picks up the brand ink-blue. */
 ::selection {
-  background: rgba(42, 115, 218, 0.22);
+  background: rgba(173, 77, 45, 0.2);
 }
 
 /* Unified slim scrollbars across panels and lists. Intentionally use ONLY the
@@ -68,13 +68,13 @@ body {
 }
 
 *::-webkit-scrollbar-thumb {
-  background: rgba(120, 137, 161, 0.45);
+  background: rgba(98, 105, 97, 0.42);
   border: 2px solid transparent;
   border-radius: 999px;
   background-clip: padding-box;
 }
 
 *::-webkit-scrollbar-thumb:hover {
-  background: rgba(90, 107, 130, 0.7);
+  background: rgba(75, 82, 74, 0.62);
   background-clip: padding-box;
 }
