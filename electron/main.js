@@ -15,6 +15,7 @@ const storageMutationQueues = new Map()
 const DEFAULT_CONFIG = {
   provider: 'deepseek',
   apiKey: '',
+  providerApiKeys: {},
   baseUrl: 'https://api.deepseek.com',
   model: 'deepseek-v4-flash',
   modelSupportsMultimodal: null,
@@ -80,6 +81,29 @@ const PROVIDER_DEFAULTS = {
   },
 }
 const VALID_PROVIDER_IDS = new Set(Object.keys(PROVIDER_DEFAULTS))
+
+function normalizeProviderApiKeys(config = {}, activeProvider = 'deepseek') {
+  const storedApiKeys =
+    config.providerApiKeys && typeof config.providerApiKeys === 'object' && !Array.isArray(config.providerApiKeys)
+      ? config.providerApiKeys
+      : {}
+  const providerApiKeys = Object.fromEntries(
+    Object.keys(PROVIDER_DEFAULTS)
+      .map((provider) => [provider, String(storedApiKeys[provider] || '').trim()])
+      .filter(([, apiKey]) => apiKey),
+  )
+  const activeApiKey = String(config.apiKey || '').trim()
+  const legacyDeepseekApiKey = String(config.deepseekApiKey || '').trim()
+
+  if (legacyDeepseekApiKey && !providerApiKeys.deepseek) {
+    providerApiKeys.deepseek = legacyDeepseekApiKey
+  }
+  if (activeApiKey && !providerApiKeys[activeProvider]) {
+    providerApiKeys[activeProvider] = activeApiKey
+  }
+
+  return providerApiKeys
+}
 
 function getEnvPath() {
   if (app.isPackaged) {
@@ -264,10 +288,12 @@ function normalizeConfig(config = {}) {
   const rawProvider = String(config.provider || '').trim()
   const provider = VALID_PROVIDER_IDS.has(rawProvider) ? rawProvider : 'deepseek'
   const providerDefaults = PROVIDER_DEFAULTS[provider]
+  const providerApiKeys = normalizeProviderApiKeys(config, provider)
 
   return {
     provider,
-    apiKey: String(config.apiKey || config.deepseekApiKey || '').trim(),
+    apiKey: providerApiKeys[provider] || '',
+    providerApiKeys,
     baseUrl: String(config.baseUrl || config.deepseekBaseUrl || providerDefaults.baseUrl).trim(),
     model: String(config.model || config.deepseekModel || providerDefaults.model).trim(),
     modelSupportsMultimodal:
@@ -3065,6 +3091,7 @@ async function collectApplicationBackupState(documentIds = []) {
   const folderIds = getBackupFolderIds(library.folders, documents)
   const safeConfig = { ...config }
   delete safeConfig.apiKey
+  delete safeConfig.providerApiKeys
 
   return {
     backupVersion: 1,
@@ -3909,6 +3936,7 @@ async function mergeApplicationBackupStates(states, existingLiteratureIds) {
         ...currentConfig,
         ...importedConfig,
         apiKey: currentConfig.apiKey,
+        providerApiKeys: currentConfig.providerApiKeys,
       }
   const writes = [
     [getLibraryPath(), normalizeLibraryData({ ...currentLibrary, folders: nextFolders, documents: nextDocuments })],

@@ -301,6 +301,7 @@ const PROVIDERS = {
 const DEFAULT_SETTINGS = {
   provider: 'deepseek',
   apiKey: '',
+  providerApiKeys: {},
   baseUrl: PROVIDERS.deepseek.baseUrl,
   model: PROVIDERS.deepseek.model,
   modelSupportsMultimodal: null,
@@ -314,6 +315,29 @@ const DEFAULT_SETTINGS = {
 
 function normalizeProviderKey(provider) {
   return Object.hasOwn(PROVIDERS, provider) ? provider : 'deepseek'
+}
+
+function normalizeProviderApiKeys(config = {}, activeProvider = 'deepseek') {
+  const storedApiKeys =
+    config.providerApiKeys && typeof config.providerApiKeys === 'object' && !Array.isArray(config.providerApiKeys)
+      ? config.providerApiKeys
+      : {}
+  const providerApiKeys = Object.fromEntries(
+    Object.keys(PROVIDERS)
+      .map((provider) => [provider, String(storedApiKeys[provider] || '').trim()])
+      .filter(([, apiKey]) => apiKey),
+  )
+  const activeApiKey = String(config.apiKey || '').trim()
+  const legacyDeepseekApiKey = String(config.deepseekApiKey || '').trim()
+
+  if (legacyDeepseekApiKey && !providerApiKeys.deepseek) {
+    providerApiKeys.deepseek = legacyDeepseekApiKey
+  }
+  if (activeApiKey && !providerApiKeys[activeProvider]) {
+    providerApiKeys[activeProvider] = activeApiKey
+  }
+
+  return providerApiKeys
 }
 
 function settingsCanEnableMultimodal(settings) {
@@ -5619,10 +5643,12 @@ function App() {
     const rawProvider = String(config.provider || '').trim()
     const provider = normalizeProviderKey(rawProvider)
     const providerDefaults = PROVIDERS[provider]
+    const providerApiKeys = normalizeProviderApiKeys(config, provider)
 
     return {
       provider,
-      apiKey: config.apiKey || config.deepseekApiKey || '',
+      apiKey: providerApiKeys[provider] || '',
+      providerApiKeys,
       baseUrl: config.baseUrl || config.deepseekBaseUrl || providerDefaults.baseUrl,
       model: config.model || config.deepseekModel || providerDefaults.model,
       modelSupportsMultimodal:
@@ -5698,6 +5724,21 @@ function App() {
     }))
   }
 
+  function updateSettingsApiKey(apiKey) {
+    setSettingsForm((currentSettings) => {
+      const provider = normalizeProviderKey(currentSettings.provider)
+
+      return {
+        ...currentSettings,
+        apiKey,
+        providerApiKeys: {
+          ...currentSettings.providerApiKeys,
+          [provider]: apiKey,
+        },
+      }
+    })
+  }
+
   function updateSettingsModel(modelId) {
     const normalizedModelId = String(modelId || '')
     const modelMetadata = availableModels.find((model) => model.id === normalizedModelId)
@@ -5715,18 +5756,27 @@ function App() {
   function updateSettingsProvider(provider) {
     const nextProvider = normalizeProviderKey(provider)
 
-    setSettingsForm((currentSettings) => ({
-      ...currentSettings,
-      provider: nextProvider,
-      baseUrl: PROVIDERS[nextProvider].baseUrl,
-      apiKey: '',
-      model: '',
-      modelSupportsMultimodal: null,
-      temperatureMode: 'auto',
-      temperature: DEFAULT_SETTINGS.temperature,
-      enableMultimodalTranslation:
-        currentSettings.enableMultimodalTranslation && PROVIDERS[nextProvider].supportsMultimodal,
-    }))
+    setSettingsForm((currentSettings) => {
+      const currentProvider = normalizeProviderKey(currentSettings.provider)
+      const providerApiKeys = {
+        ...currentSettings.providerApiKeys,
+        [currentProvider]: currentSettings.apiKey,
+      }
+
+      return {
+        ...currentSettings,
+        provider: nextProvider,
+        apiKey: providerApiKeys[nextProvider] || '',
+        providerApiKeys,
+        baseUrl: PROVIDERS[nextProvider].baseUrl,
+        model: '',
+        modelSupportsMultimodal: null,
+        temperatureMode: 'auto',
+        temperature: DEFAULT_SETTINGS.temperature,
+        enableMultimodalTranslation:
+          currentSettings.enableMultimodalTranslation && PROVIDERS[nextProvider].supportsMultimodal,
+      }
+    })
   }
 
   function resetPrompt() {
@@ -5791,9 +5841,14 @@ function App() {
     setSettingsStatus('')
 
     try {
+      const provider = normalizeProviderKey(settingsForm.provider)
       const savedConfig = await window.electronAPI.saveConfig({
         ...settingsForm,
-        provider: normalizeProviderKey(settingsForm.provider),
+        provider,
+        providerApiKeys: {
+          ...settingsForm.providerApiKeys,
+          [provider]: settingsForm.apiKey,
+        },
         enableMultimodalTranslation: settingsSupportMultimodal(settingsForm),
         rightPanelWidth,
       })
@@ -14430,7 +14485,7 @@ function App() {
                         <input
                           type="password"
                           value={settingsForm.apiKey}
-                          onChange={(event) => updateSettingsField('apiKey', event.target.value)}
+                          onChange={(event) => updateSettingsApiKey(event.target.value)}
                           autoComplete="off"
                         />
                       </label>

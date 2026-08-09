@@ -89,6 +89,7 @@ export function normalizeProviderConfig(config = {}, env = {}) {
     provider,
     providerKey: rawProvider || provider,
     apiKey:
+      config.providerApiKeys?.[provider] ||
       config.apiKey ||
       config.deepseekApiKey ||
       env.AI_API_KEY ||
