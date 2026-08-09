@@ -72,11 +72,11 @@ npm run electron:dev
 首次启动后：
 
 1. 打开左侧 **设置**。
-2. 选择 Provider，填写 API Key、Base URL 和模型名称。
-3. 保存设置。
+2. 选择 Provider 并填写对应的 API Key；预设 Provider 会自动填入 Base URL。
+3. 从远程模型列表选择模型，或手动填写模型名称，然后保存设置。
 4. 回到 **阅读** 页面并导入 PDF。
 
-> API Key 保存在 Electron `userData/config.json`，不要写入仓库、README、截图或公开日志。
+> 不同 Provider 的 API Key 会分别保存在 Electron `userData/config.json`。不要把该文件、API Key、截图或相关调试日志提交到公开仓库。
 
 ## AI Provider 配置
 
@@ -96,6 +96,13 @@ npm run electron:dev
 | Custom | 用户填写 | 用户填写 |
 
 填写 API Key 和 Base URL 后，设置页会尝试读取远程模型列表。模型服务的名称、权限和接口规则会变化；如果列表或翻译请求失败，请以对应服务商的控制台和官方文档为准。
+
+API Key 按 Provider 独立记忆：
+
+- 切换 Provider 时，应用会保存当前输入的 Key，并恢复目标 Provider 上次保存的 Key。
+- 切换同一 Provider 下的模型不会清空 API Key。
+- 首次使用某个 Provider 时仍需填写一次 Key，并点击 **保存设置** 才会在重启后继续保留。
+- 旧版配置中的当前 API Key 会自动归入当时选中的 Provider；已经被旧配置覆盖或清空的历史 Key 无法自动恢复。
 
 ### Temperature
 
@@ -169,7 +176,7 @@ npm run dev
 
 | 文件 | 内容 |
 | --- | --- |
-| `config.json` | Provider、API Key、模型、Prompt 和界面设置 |
+| `config.json` | Provider、各 Provider 的 API Key、模型、Prompt 和界面设置 |
 | `glossary.json` | 用户术语库 |
 | `paper-reader-browsing-history.json` | 最近打开和阅读位置 |
 | `paper-reader-pdf-session.json` | 上次打开的标签页会话 |
@@ -181,6 +188,8 @@ npm run dev
 | `paper-reader-toc.json` | 自动目录缓存 |
 
 持久化层使用按文件串行队列、临时文件和重命名执行 JSON 写入。读取到可恢复的损坏 JSON 时，应用会保留 `.corrupt-<timestamp>.bak` 并重写修复后的数据。
+
+通过 **备份与恢复** 生成的 `.paperreader.json` 不包含当前 API Key，也不包含各 Provider 的 API Key 映射；在其他设备恢复数据后，需要重新配置模型凭据。
 
 PDF 本体不会复制到 `userData`。当用户选择将高亮写入 PDF 本体时，程序会直接修改原 PDF；**当前实现不会自动为原 PDF 创建备份**。对重要文献使用该功能前，请先自行备份。
 
