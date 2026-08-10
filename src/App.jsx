@@ -135,8 +135,17 @@ const MULTIMODAL_OCR_DEBUG = import.meta.env.VITE_MULTIMODAL_OCR_DEBUG === 'true
 const MULTIMODAL_VISUAL_OCR_ENABLED = import.meta.env.VITE_ENABLE_MULTIMODAL_VISUAL_OCR === 'true'
 const INLINE_FORMULA_OCR_MODEL = 'onnx-community/TexTeller-ONNX'
 let inlineFormulaOcrPipelinePromise = null
-const DEFAULT_TRANSLATION_PROMPT =
+const LEGACY_DEFAULT_TRANSLATION_PROMPT =
   '你是通用学术翻译助手。请把用户提供的英文学术文本翻译成准确、自然、符合中文学术表达习惯的中文。保留必要的专业术语、英文缩写、公式、指数、上下标、单位、变量名和专有名词。遇到 10^16、10^{-6}、H_2O、CO_2 等表达时，不要改写成普通数字。不要扩写，不要总结，不要添加解释，只输出译文。'
+const DEFAULT_TRANSLATION_PROMPT =
+  '你是通用学术翻译助手。请自动识别用户提供文本的源语言，并将其翻译成准确、自然、符合中文学术表达习惯的中文。保留必要的专业术语、原文缩写、公式、指数、上下标、单位、变量名和专有名词。遇到 10^16、10^{-6}、H_2O、CO_2 等表达时，不要改写成普通数字。不要扩写，不要总结，不要添加解释，只输出译文。'
+
+function normalizeTranslationPrompt(prompt) {
+  const normalizedPrompt = String(prompt || '').trim()
+  return !normalizedPrompt || normalizedPrompt === LEGACY_DEFAULT_TRANSLATION_PROMPT
+    ? DEFAULT_TRANSLATION_PROMPT
+    : normalizedPrompt
+}
 
 async function getInlineFormulaOcrPipeline() {
   if (!inlineFormulaOcrPipelinePromise) {
@@ -5659,7 +5668,7 @@ function App() {
       temperature: Number.isFinite(Number(config.temperature))
         ? clampNumber(Number(config.temperature), 0, 2)
         : DEFAULT_SETTINGS.temperature,
-      prompt: config.prompt || DEFAULT_TRANSLATION_PROMPT,
+      prompt: normalizeTranslationPrompt(config.prompt),
       enableMultimodalTranslation: config.enableMultimodalTranslation === true,
       rightPanelWidth: clampNumber(
         Number(config.rightPanelWidth) || DEFAULT_SETTINGS.rightPanelWidth,
@@ -6823,7 +6832,7 @@ function App() {
   }
 
   function getUsefulOcrCharacterCount(text) {
-    return (String(text || '').match(/[A-Za-z0-9\u0370-\u03ff]/g) || []).length
+    return (String(text || '').match(/[\p{L}\p{N}]/gu) || []).length
   }
 
   function shouldPreferPdfTextLayer(pdfTextBlocks, tesseractText) {
@@ -6843,7 +6852,7 @@ function App() {
     if (!compactText) return false
     if (isScientificExpressionOnly(normalizedText)) return true
 
-    const normalWords = normalizedText.match(/[A-Za-z][A-Za-z'-]{2,}/g) || []
+    const normalWords = normalizedText.match(/\p{L}[\p{L}\p{M}'’ʼ-]{2,}/gu) || []
     const formulaSymbols = normalizedText.match(/[=<>±×÷→←↔^_{}[\]ΔμΩλπσ∑∫√∞≈≠≤≥·′°₀-₉⁰-⁹]/g) || []
     const operators = normalizedText.match(/[=<>±×÷→←↔^_+\-*/∑∫√∞≈≠≤≥·]/g) || []
     const formulaRatio = formulaSymbols.length / Math.max(compactText.length, 1)
@@ -7322,7 +7331,7 @@ function App() {
         }
 
         currentParagraph = line
-      } else if (currentParagraph.endsWith('-') && /^[a-z]/i.test(line)) {
+      } else if (currentParagraph.endsWith('-') && /^\p{L}/u.test(line)) {
         currentParagraph = `${currentParagraph.slice(0, -1)}${line}`
       } else if (hasSentenceEnding(currentParagraph) && /^[A-Z(]/.test(line) && line.length > 28) {
         paragraphs.push(currentParagraph)
@@ -7381,52 +7390,48 @@ function App() {
     const bondPattern = /^[A-Z][a-z]?[—–-][A-Z][a-z]?$/
     const formulaPattern = /^[A-Za-zΔμ′°0-9+\-*/=()[\]{}^_ .·×]+$/
     const hasOperator = /[=+\-*/^×·()[\]{}]/.test(normalizedText)
-    const hasLongEnglishWord = /[A-Za-z]{4,}/.test(normalizedText)
+    const naturalLanguageWords = normalizedText.match(/\p{L}[\p{L}\p{M}'’ʼ-]{2,}/gu) || []
+    const hasLongNaturalLanguageWord = /(?:\p{L}\p{M}*){4,}/u.test(normalizedText)
 
     if (variablePattern.test(compactText)) return true
     if (unitPattern.test(compactText)) return true
     if (numberPattern.test(normalizedText)) return true
     if (bondPattern.test(compactText)) return true
     if (ionPattern.test(compactText)) return true
-    if (chemicalFormulaPattern.test(compactText) && !hasLongEnglishWord) return true
-    if (formulaPattern.test(normalizedText) && hasOperator && !/\b(the|and|with|for|rate|value|depends|requires)\b/i.test(normalizedText)) {
+    if (chemicalFormulaPattern.test(compactText) && !hasLongNaturalLanguageWord) return true
+    if (formulaPattern.test(normalizedText) && hasOperator && naturalLanguageWords.length < 2) {
       return true
     }
 
     return false
   }
 
-  function isMeaningfulEnglishText(text) {
+  function isMeaningfulTranslatableText(text) {
     const normalizedText = normalizeScientificText(text)
 
     if (!normalizedText) return false
 
     const compactText = normalizedText.replace(/\s/g, '')
     const usefulShortTerms = isUsefulShortOcrLabel(normalizedText)
-    const usefulAcademicPhrase =
-      /\b(enzyme|substrate|product|transition|ground|state|reaction|coordinate|coenzyme|cofactor|metal|ion|ions|precursor|activity|rate|energy|enhancement|carbonic|anhydrase|isomerase|transfer|chemical|group|groups|dietary|heat|light|work|cell|cells|signal|signals|transduction|production|motion|protein|proteins|gene|genes|dna|rna)\b/i
-
     if (isScientificExpressionOnly(normalizedText) || isDenseFormulaOrSymbolText(normalizedText)) return false
     if (usefulShortTerms) return true
     if (compactText.length < 3) return false
 
-    const latinLetters = normalizedText.match(/[A-Za-z]/g) || []
-    const cjkCharacters = normalizedText.match(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/g) || []
-    const wordLikeTokens = normalizedText.match(/[A-Za-z][A-Za-z-]{1,}/g) || []
+    const letters = normalizedText.match(/\p{L}/gu) || []
+    const wordLikeTokens = normalizedText.match(/\p{L}[\p{L}\p{M}'’ʼ-]*/gu) || []
     const noisyCharacters = normalizedText.match(/[|\\/_~`^]+/g) || []
-    const usefulCharacters = normalizedText.match(/[A-Za-z0-9]/g) || []
-    const letterRatio = latinLetters.length / Math.max(compactText.length, 1)
+    const usefulCharacters = normalizedText.match(/[\p{L}\p{N}]/gu) || []
+    const letterRatio = letters.length / Math.max(compactText.length, 1)
     const usefulRatio = usefulCharacters.length / Math.max(compactText.length, 1)
 
-    if (latinLetters.length < 2) return false
-    if (cjkCharacters.length > latinLetters.length) return false
+    if (letters.length < 2) return false
     if (wordLikeTokens.length === 0 && letterRatio < 0.55) return false
     if (letterRatio < 0.28 || usefulRatio < 0.45) return false
     if (noisyCharacters.length > Math.max(2, compactText.length * 0.18)) return false
     if (/^[\d\s.,;:()[\]{}+\-*/=<>%|\\_]+$/.test(normalizedText)) return false
-    if (/^[A-Z]{1,2}[,.;:]*$/.test(normalizedText)) return false
+    if (/^\p{Lu}{1,2}[,.;:]*$/u.test(normalizedText)) return false
     if (/^[|\\/_\s.,;:'"`-]+$/.test(normalizedText)) return false
-    if (!usefulAcademicPhrase.test(normalizedText) && wordLikeTokens.length === 1 && compactText.length < 6) return false
+    if (wordLikeTokens.length === 1 && letters.length < 3) return false
 
     return true
   }
@@ -7442,10 +7447,10 @@ function App() {
   function isLikelyOcrNoiseText(text, confidence = 100, nearEdge = false) {
     const normalizedText = String(text || '').replace(/\s+/g, ' ').trim()
     const lowerText = normalizedText.toLowerCase()
-    const letters = normalizedText.match(/[A-Za-z]/g) || []
-    const usefulCharacters = normalizedText.match(/[A-Za-z0-9]/g) || []
+    const letters = normalizedText.match(/\p{L}/gu) || []
+    const usefulCharacters = normalizedText.match(/[\p{L}\p{N}]/gu) || []
     const symbolCharacters = normalizedText.match(/[|\\/_~`^=<>[\]{}]+/g) || []
-    const wordTokens = normalizedText.match(/[A-Za-z]+/g) || []
+    const wordTokens = normalizedText.match(/\p{L}[\p{L}\p{M}'’ʼ-]*/gu) || []
     const hasKnownShortAbbreviation = /\b(DNA|RNA|ATP|ADP|AMP|NADH|NADPH|FAD|CO2|NH3|H2O)\b/i.test(normalizedText)
 
     if (!normalizedText) return true
@@ -7453,7 +7458,8 @@ function App() {
     if (
       !hasKnownShortAbbreviation &&
       wordTokens.length >= 2 &&
-      wordTokens.every((token) => token.length <= 2) &&
+      wordTokens.every((token) => Array.from(token).length <= 2) &&
+      Number(confidence) < 55 &&
       !isUsefulShortOcrLabel(normalizedText)
     ) {
       return true
@@ -7476,7 +7482,7 @@ function App() {
     if (isLikelyOcrNoiseText(block.text, block.confidence, isNearEdge)) return false
     if (Number.isFinite(block.confidence) && block.confidence < (isNearEdge || isShortLabel ? 18 : 35)) return false
 
-    return isMeaningfulEnglishText(block.text)
+    return isMeaningfulTranslatableText(block.text)
   }
 
   function getOcrBlockContentType(block) {
@@ -7502,7 +7508,7 @@ function App() {
       return 'formula'
     }
     if (shouldTranslateOcrBlock({ ...block, text })) return 'text'
-    if (block?.skipTranslation && isMeaningfulEnglishText(text)) return 'text'
+    if (block?.skipTranslation && isMeaningfulTranslatableText(text)) return 'text'
     return 'noise'
   }
 
@@ -7868,8 +7874,8 @@ function App() {
     return (
       isNumberedLine(text) ||
       /^[-*•·]\s+/.test(text) ||
-      /^\(?[A-Za-z0-9]\)\s+/.test(text) ||
-      /^[A-Za-z]\.\s+/.test(text) ||
+      /^\(?[\p{L}\p{N}]\)\s+/u.test(text) ||
+      /^\p{L}\.\s+/u.test(text) ||
       /^\s*(table|figure|fig\.|scheme|equation)\s+\d+/i.test(text)
     )
   }
@@ -7886,10 +7892,10 @@ function App() {
 
   function isLikelyFormulaOrTableLine(text) {
     const normalizedText = text.replace(/\s+/g, ' ').trim()
-    const letters = normalizedText.match(/[A-Za-z]/g) || []
+    const letters = normalizedText.match(/\p{L}/gu) || []
     const digits = normalizedText.match(/\d/g) || []
     const operators = normalizedText.match(/[=+*/<>→←↔^_()[\]{}|]/g) || []
-    const words = normalizedText.match(/[A-Za-z][A-Za-z-]{1,}/g) || []
+    const words = normalizedText.match(/\p{L}[\p{L}\p{M}'’ʼ-]*/gu) || []
 
     if (!normalizedText) return false
     if (operators.length >= Math.max(2, letters.length * 0.45)) return true
@@ -7943,10 +7949,10 @@ function App() {
     const previousEndsOpen =
       /[-,(（/:：]$/.test(previousText) ||
       /\b(of|by|for|with|from|to|in|on|at|and|or|the|a|an|into|under|over|between|within|using|via)$/i.test(previousText)
-    const nextContinues = /^[a-z(（]/.test(nextText) || isLikelyContinuationLine(nextText)
+    const nextContinues = /^(?:\p{Ll}|[（(])/u.test(nextText) || isLikelyContinuationLine(nextText)
     const bodyWrap = previousWords >= 6 && nextWords >= 3 && !hasSentenceEnding(previousText)
     const bothShort = previousWords <= 4 && nextWords <= 4
-    const nextStartsLikeIndependentLabel = /^[A-Z0-9][A-Za-z0-9\s-]{1,}$/.test(nextText) && nextWords <= 6
+    const nextStartsLikeIndependentLabel = /^(?:\p{Lu}|\p{N})[\p{L}\p{M}\p{N}\s-]{1,}$/u.test(nextText) && nextWords <= 6
     const maximumGap = lineHeight * (boundaryReview ? 0.72 : 0.95)
     const minimumOverlap = boundaryReview ? 0.68 : 0.56
     const maximumLeftOffset = lineHeight * (boundaryReview ? 0.72 : 0.95)
@@ -8263,7 +8269,7 @@ function App() {
 
   function getCompareLineWeight(line) {
     const sourceText = String(line.text || line.sourceText || '').replace(/\s+/g, ' ').trim()
-    const textUnits = (sourceText.match(/[A-Za-z0-9\u3400-\u9fff]/g) || []).length
+    const textUnits = (sourceText.match(/[\p{L}\p{N}]/gu) || []).length
     return {
       textUnits: Math.max(1, textUnits),
       width: Math.max(1, Number(line.width) || 1),
@@ -8343,7 +8349,7 @@ function App() {
 
   function isShortCompareModule(block) {
     const sourceText = cleanOcrSourceForTranslation(block?.text || '')
-    const words = sourceText.match(/[A-Za-z][A-Za-z'-]*/g) || []
+    const words = sourceText.match(/\p{L}[\p{L}\p{M}'’ʼ-]*/gu) || []
 
     return words.length <= 8 || sourceText.length <= 48
   }
@@ -8365,25 +8371,25 @@ function App() {
     }
     if (isShortCompareModule(block)) return { valid: true, reason: '' }
 
-    const sourceWords = sourceText.match(/[A-Za-z][A-Za-z'-]*/g) || []
+    const sourceWords = sourceText.match(/\p{L}[\p{L}\p{M}'’ʼ-]*/gu) || []
     const targetCjkCharacters = translation.match(/[\u3400-\u9fff]/g) || []
-    const targetLatinTokens = translation.match(/[A-Za-z0-9]+/g) || []
-    const targetUnits = targetCjkCharacters.length + targetLatinTokens.length
+    const targetNonCjkTokens = getNonCjkWordTokens(translation)
+    const targetUnits = targetCjkCharacters.length + targetNonCjkTokens.length
     const minimumTargetUnits = Math.max(8, Math.ceil(sourceWords.length * 0.58))
     const sourceLooksOpen =
-      /^[a-z]/.test(sourceText) ||
+      /^\p{Ll}/u.test(sourceText) ||
       /[-,;:(]$/.test(sourceText) ||
       /\b(of|by|for|with|from|to|in|on|at|and|or|the|a|an|into|under|over|between|within|using|via)$/i.test(sourceText)
     const translationLooksOpen =
       /(?:的|和|与|或|及|以及|在|从|向|对|为|由|通过|由于|因为|如果|当|将|被|使|而|但|且|并|从而|以便)[，,;；:]?$/.test(
         translation,
       )
-    const sourceEndsSentence = /[.!?]["')\]]*$/.test(sourceText)
+    const sourceEndsSentence = /[.!?。！？]["')\]]*$/.test(sourceText)
     const translationEndsSentence = /[。！？!?]["')\]]*$/.test(translation)
 
     if (targetUnits < minimumTargetUnits) return { valid: false, reason: 'missing-content' }
     if (
-      targetLatinTokens.length >= Math.max(5, Math.ceil(sourceWords.length * 0.45)) &&
+      targetNonCjkTokens.length >= Math.max(5, Math.ceil(sourceWords.length * 0.45)) &&
       targetCjkCharacters.length < Math.max(4, sourceWords.length * 0.5)
     ) {
       return { valid: false, reason: 'untranslated-residue' }
@@ -8845,12 +8851,28 @@ function App() {
   }
 
   function getSelectionWordSimilarity(firstText, secondText) {
-    const firstWords = (String(firstText || '').toLowerCase().match(/[a-z]{2,}/g) || [])
-    const secondWords = new Set(String(secondText || '').toLowerCase().match(/[a-z]{2,}/g) || [])
-    if (!firstWords.length) return secondWords.size ? 0 : 1
-
+    const normalizeWords = (text) =>
+      String(text || '')
+        .normalize('NFKC')
+        .toLocaleLowerCase()
+        .match(/\p{L}[\p{L}\p{M}\p{N}'’ʼ-]*/gu) || []
+    const firstWords = normalizeWords(firstText)
+    const secondWords = new Set(normalizeWords(secondText))
     const matchedWords = firstWords.filter((word) => secondWords.has(word))
-    return matchedWords.length / firstWords.length
+    const wordSimilarity = firstWords.length
+      ? matchedWords.length / firstWords.length
+      : secondWords.size ? 0 : 1
+    const firstCharacters = Array.from(String(firstText || '').normalize('NFKC').toLocaleLowerCase())
+      .filter((character) => /[\p{L}\p{N}]/u.test(character))
+    const secondCharacters = new Set(
+      Array.from(String(secondText || '').normalize('NFKC').toLocaleLowerCase())
+        .filter((character) => /[\p{L}\p{N}]/u.test(character)),
+    )
+    const characterSimilarity = firstCharacters.length
+      ? firstCharacters.filter((character) => secondCharacters.has(character)).length / firstCharacters.length
+      : secondCharacters.size ? 0 : 1
+
+    return Math.max(wordSimilarity, characterSimilarity)
   }
 
   function applyFormulaCorrectionsToText(text, corrections = []) {
@@ -9578,11 +9600,16 @@ function App() {
     })
   }
 
+  function getNonCjkWordTokens(text) {
+    return (String(text || '').match(/[\p{L}\p{N}]+/gu) || [])
+      .filter((token) => !/[\u3400-\u9fff]/u.test(token))
+  }
+
   function getDiagramTranslationUnits(text) {
     const cjkCharacters = String(text || '').match(/[\u3400-\u9fff]/g) || []
-    const latinTokens = String(text || '').match(/[A-Za-z0-9]+/g) || []
+    const nonCjkTokens = getNonCjkWordTokens(text)
 
-    return cjkCharacters.length + latinTokens.length
+    return cjkCharacters.length + nonCjkTokens.length
   }
 
   function hasWeirdDiagramTranslationStack(translation, block) {
@@ -9604,7 +9631,7 @@ function App() {
     })
     const lineCount = normalizedTranslation.split(/\n+/).filter((line) => line.trim()).length
     const sourceText = cleanOcrSourceForTranslation(block?.text || '')
-    const sourceWords = sourceText.match(/[A-Za-z][A-Za-z'-]*/g) || []
+    const sourceWords = sourceText.match(/\p{L}[\p{L}\p{M}'’ʼ-]*/gu) || []
     const targetUnits = getDiagramTranslationUnits(normalizedTranslation)
 
     if (getRecognitionInvalidCharacterCount(normalizedTranslation) > 0) return true
@@ -9620,7 +9647,7 @@ function App() {
   function assessDiagramTranslation(block) {
     const sourceText = cleanOcrSourceForTranslation(block?.text || '')
     const translation = cleanResultText(block?.translation || '')
-    const sourceWords = sourceText.match(/[A-Za-z][A-Za-z'-]*/g) || []
+    const sourceWords = sourceText.match(/\p{L}[\p{L}\p{M}'’ʼ-]*/gu) || []
     const isShort = sourceWords.length <= 8 || sourceText.length <= 48
 
     if (block?.visualLayoutIssue) {
@@ -9637,7 +9664,7 @@ function App() {
     if (translation.toLowerCase() === sourceText.toLowerCase()) {
       const canRemainUntranslated =
         isLikelyFormulaOrTableLine(sourceText) ||
-        /^(?:[A-Z0-9]{1,12}|pH)$/.test(sourceText)
+        /^(?:[\p{Lu}\p{N}]{1,12}|pH)$/u.test(sourceText)
       if (canRemainUntranslated) {
         return { valid: true, isShort, needsExpansion: false, reason: '' }
       }
@@ -9654,23 +9681,23 @@ function App() {
 
     const minimumTargetUnits = Math.max(8, Math.ceil(sourceWords.length * 0.58))
     const targetCjkCharacters = translation.match(/[\u3400-\u9fff]/g) || []
-    const targetLatinTokens = translation.match(/[A-Za-z0-9]+/g) || []
+    const targetNonCjkTokens = getNonCjkWordTokens(translation)
     const sourceLooksOpen =
-      /^[a-z]/.test(sourceText) ||
+      /^\p{Ll}/u.test(sourceText) ||
       /[-,;:(（]$/.test(sourceText) ||
       /\b(of|by|for|with|from|to|in|on|at|and|or|the|a|an|into|under|over|between|within|using|via)$/i.test(sourceText)
     const translationLooksOpen =
       /(?:的|和|与|或|及|以及|在|从|向|对|为|由|通过|由于|因为|如果|当|将|被|使|而|但|且|并|从而|以便)[，,;；:]?$/.test(
         translation,
       )
-    const sourceEndsSentence = /[.!?]["')\]]*$/.test(sourceText)
+    const sourceEndsSentence = /[.!?。！？]["')\]]*$/.test(sourceText)
     const translationEndsSentence = /[。！？!?]["')\]]*$/.test(translation)
 
     if (targetUnits < minimumTargetUnits) {
       return { valid: false, isShort, needsExpansion: true, reason: 'missing-content' }
     }
     if (
-      targetLatinTokens.length >= Math.max(5, Math.ceil(sourceWords.length * 0.45)) &&
+      targetNonCjkTokens.length >= Math.max(5, Math.ceil(sourceWords.length * 0.45)) &&
       targetCjkCharacters.length < Math.max(4, sourceWords.length * 0.5)
     ) {
       return { valid: false, isShort, needsExpansion: false, reason: 'untranslated-residue' }
@@ -11080,7 +11107,7 @@ function App() {
         })
 
         if (!validTextBlocks.length) {
-          throw new Error('未识别到可翻译的英文文本')
+          throw new Error('未识别到可翻译的文本')
         }
 
         const translatedBlocks = mode === 'compare'
@@ -11088,7 +11115,7 @@ function App() {
           : await translateDiagramBlocks(validTextBlocks)
 
         if (!translatedBlocks.length) {
-          throw new Error('未识别到可翻译的英文文本')
+          throw new Error('未识别到可翻译的文本')
         }
 
         if (mode === 'compare') {
@@ -11129,7 +11156,7 @@ function App() {
           image: recognitionImage,
           text: recognizedText,
           translation: '',
-          error: '未识别到可展示的英文文本或公式',
+          error: '未识别到可展示的文本或公式',
         })
         return
       }

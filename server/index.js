@@ -13,8 +13,10 @@ import {
 } from './aiProviders.js'
 
 const envPath = process.env.PAPER_READER_ENV_PATH || path.resolve(process.cwd(), '.env')
-const defaultTranslationPrompt =
+const legacyDefaultTranslationPrompt =
   '你是通用学术翻译助手。请把用户提供的英文学术文本翻译成准确、自然、符合中文学术表达习惯的中文。保留必要的专业术语、英文缩写、公式、指数、上下标、单位、变量名和专有名词。遇到 10^16、10^{-6}、H_2O、CO_2 等表达时，不要改写成普通数字。不要扩写，不要总结，不要添加解释，只输出译文。'
+const defaultTranslationPrompt =
+  '你是通用学术翻译助手。请自动识别用户提供文本的源语言，并将其翻译成准确、自然、符合中文学术表达习惯的中文。保留必要的专业术语、原文缩写、公式、指数、上下标、单位、变量名和专有名词。遇到 10^16、10^{-6}、H_2O、CO_2 等表达时，不要改写成普通数字。不要扩写，不要总结，不要添加解释，只输出译文。'
 const maxGlossaryEntries = 200
 const maxGlossaryPromptLength = 8000
 const maxTocRecognitionCandidates = 180
@@ -103,7 +105,10 @@ function buildGlossaryPrompt(glossary) {
 }
 
 function buildSystemPrompt(config) {
-  const basePrompt = config.prompt || defaultTranslationPrompt
+  const configuredPrompt = String(config.prompt || '').trim()
+  const basePrompt = !configuredPrompt || configuredPrompt === legacyDefaultTranslationPrompt
+    ? defaultTranslationPrompt
+    : configuredPrompt
   const glossaryPrompt = buildGlossaryPrompt(readGlossary())
 
   return `${basePrompt}${glossaryPrompt}`
