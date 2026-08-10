@@ -11,6 +11,17 @@ let backendServer = null
 let mainWindow = null
 const jsonWriteQueues = new Map()
 const storageMutationQueues = new Map()
+const LEGACY_DEFAULT_TRANSLATION_PROMPT =
+  '你是通用学术翻译助手。请把用户提供的英文学术文本翻译成准确、自然、符合中文学术表达习惯的中文。保留必要的专业术语、英文缩写、公式、指数、上下标、单位、变量名和专有名词。遇到 10^16、10^{-6}、H_2O、CO_2 等表达时，不要改写成普通数字。不要扩写，不要总结，不要添加解释，只输出译文。'
+const DEFAULT_TRANSLATION_PROMPT =
+  '你是通用学术翻译助手。请自动识别用户提供文本的源语言，并将其翻译成准确、自然、符合中文学术表达习惯的中文。保留必要的专业术语、原文缩写、公式、指数、上下标、单位、变量名和专有名词。遇到 10^16、10^{-6}、H_2O、CO_2 等表达时，不要改写成普通数字。不要扩写，不要总结，不要添加解释，只输出译文。'
+
+function normalizeTranslationPrompt(prompt) {
+  const normalizedPrompt = String(prompt || '').trim()
+  return !normalizedPrompt || normalizedPrompt === LEGACY_DEFAULT_TRANSLATION_PROMPT
+    ? DEFAULT_TRANSLATION_PROMPT
+    : normalizedPrompt
+}
 
 const DEFAULT_CONFIG = {
   provider: 'deepseek',
@@ -21,7 +32,7 @@ const DEFAULT_CONFIG = {
   modelSupportsMultimodal: null,
   temperatureMode: 'auto',
   temperature: 0.2,
-  prompt: '',
+  prompt: DEFAULT_TRANSLATION_PROMPT,
   enableMultimodalTranslation: false,
   rightPanelWidth: 420,
   exportDefaultDir: '',
@@ -304,7 +315,7 @@ function normalizeConfig(config = {}) {
     temperature: Number.isFinite(Number(config.temperature))
       ? Math.max(0, Math.min(2, Number(config.temperature)))
       : 0.2,
-    prompt: String(config.prompt || '').trim(),
+    prompt: normalizeTranslationPrompt(config.prompt),
     enableMultimodalTranslation: config.enableMultimodalTranslation === true,
     rightPanelWidth: Math.min(700, Math.max(280, Number(config.rightPanelWidth) || 420)),
     exportDefaultDir: String(config.exportDefaultDir || '').trim(),
