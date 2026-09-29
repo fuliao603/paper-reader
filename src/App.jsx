@@ -32,8 +32,12 @@ import {
 import 'react-pdf/dist/Page/AnnotationLayer.css'
 import 'react-pdf/dist/Page/TextLayer.css'
 import './App.css'
+import './styles/workspace.css'
 import appIconUrl from '../build/icon.png'
 import IconButton from './components/ui/IconButton'
+import WorkspaceHeader from './components/ui/WorkspaceHeader'
+import ReadingWelcome from './components/ui/ReadingWelcome'
+import ActionLabel from './components/ui/ActionLabel'
 import {
   HISTORY_LIMIT,
   HISTORY_TYPE_LABELS,
@@ -12049,6 +12053,10 @@ function App() {
 
     return (
       <section className="history-panel notes-panel" aria-label="笔记">
+        <div className="history-panel-summary">
+          <strong>笔记</strong>
+          <span>{documentNotes.length} 条记录</span>
+        </div>
         <div className="history-panel-actions">
           <button
             type="button"
@@ -12056,7 +12064,7 @@ function App() {
             onClick={isNotesBatchSelecting ? deleteSelectedNotes : clearCurrentDocumentNotes}
             disabled={!documentNotes.length || (isNotesBatchSelecting && !selectedNoteIds.length)}
           >
-            {isNotesBatchSelecting ? '删除所选' : '清空'}
+            <ActionLabel icon="delete">{isNotesBatchSelecting ? '删除所选' : '清空'}</ActionLabel>
           </button>
           <button
             type="button"
@@ -12073,7 +12081,7 @@ function App() {
             }}
             disabled={!documentNotes.length}
           >
-            {isNotesBatchSelecting ? '取消选择' : '批量选择'}
+            <ActionLabel icon={isNotesBatchSelecting ? 'cancel' : 'select'}>{isNotesBatchSelecting ? '取消选择' : '批量选择'}</ActionLabel>
           </button>
         </div>
 
@@ -12084,7 +12092,7 @@ function App() {
         ) : documentNotes.length ? (
           <div className="history-list">
             {documentNotes.map((note) => (
-              <article key={note.id} className="history-item selectable-history-item">
+              <article key={note.id} className={selectedNoteIds.includes(note.id) ? 'history-item selectable-history-item selected' : 'history-item selectable-history-item'}>
                 {isNotesBatchSelecting ? (
                   <input
                     type="checkbox"
@@ -12114,8 +12122,10 @@ function App() {
                     event.stopPropagation()
                     deleteNote(note)
                   }}
+                  aria-label="删除这条笔记"
+                  title="删除这条笔记"
                 >
-                  删除
+                  <Trash2 size={15} strokeWidth={1.7} aria-hidden="true" />
                 </button>
               </article>
             ))}
@@ -12251,28 +12261,29 @@ function App() {
   function renderBookmarksPanel() {
     return (
       <section className="history-panel bookmarks-panel" aria-label="书签">
-        <div className="bookmark-add-row">
+        <div className="bookmark-add-row history-panel-summary">
+          <span><strong>书签</strong><span>{documentBookmarks.length} 条记录</span></span>
           <button type="button" className="settings-primary-button bookmark-add-button" onClick={openBookmarkDialog}>
-            添加书签
+            <ActionLabel icon="bookmark">添加书签</ActionLabel>
           </button>
         </div>
 
         <div className="history-panel-actions bookmark-management-actions">
-          <button
+          {isBookmarksBatchSelecting ? <button
             type="button"
             className="history-clear-button"
             onClick={deleteSelectedBookmarks}
             disabled={!selectedBookmarkIds.length}
           >
-            删除所选
-          </button>
+            <ActionLabel icon="delete">删除所选</ActionLabel>
+          </button> : null}
           <button
             type="button"
             className="history-clear-button"
             onClick={clearCurrentDocumentBookmarks}
             disabled={!documentBookmarks.length}
           >
-            清空
+            <ActionLabel icon="delete">清空</ActionLabel>
           </button>
           <button
             type="button"
@@ -12288,7 +12299,7 @@ function App() {
             }}
             disabled={!documentBookmarks.length}
           >
-            {isBookmarksBatchSelecting ? '取消选择' : '批量选择'}
+            <ActionLabel icon={isBookmarksBatchSelecting ? 'cancel' : 'select'}>{isBookmarksBatchSelecting ? '取消选择' : '批量选择'}</ActionLabel>
           </button>
         </div>
 
@@ -12297,7 +12308,7 @@ function App() {
         {documentBookmarks.length ? (
           <div className="history-list bookmark-list">
             {documentBookmarks.map((bookmark) => (
-              <article key={bookmark.id} className="history-item bookmark-item">
+              <article key={bookmark.id} className={selectedBookmarkIds.includes(bookmark.id) ? 'history-item bookmark-item selected' : 'history-item bookmark-item'}>
                 {isBookmarksBatchSelecting ? (
                   <input
                     type="checkbox"
@@ -12391,6 +12402,10 @@ function App() {
   function renderHistoryPanel() {
     return (
       <section className="history-panel" aria-label="翻译历史记录">
+        <div className="history-panel-summary">
+          <strong>翻译历史</strong>
+          <span>{translationHistory.length} 条记录</span>
+        </div>
         <div className="history-panel-actions">
           <button
             type="button"
@@ -12398,7 +12413,7 @@ function App() {
             onClick={isHistoryBatchSelecting ? deleteSelectedHistoryItems : clearHistory}
             disabled={!translationHistory.length || (isHistoryBatchSelecting && !selectedHistoryIds.length)}
           >
-            {isHistoryBatchSelecting ? '删除所选' : '清空'}
+            <ActionLabel icon="delete">{isHistoryBatchSelecting ? '删除所选' : '清空'}</ActionLabel>
           </button>
           <button
             type="button"
@@ -12414,7 +12429,7 @@ function App() {
             }}
             disabled={!translationHistory.length}
           >
-            {isHistoryBatchSelecting ? '取消选择' : '批量选择'}
+            <ActionLabel icon={isHistoryBatchSelecting ? 'cancel' : 'select'}>{isHistoryBatchSelecting ? '取消选择' : '批量选择'}</ActionLabel>
           </button>
         </div>
         <p className="history-panel-limit">最多保留最新 {HISTORY_LIMIT} 条</p>
@@ -12424,7 +12439,7 @@ function App() {
         {translationHistory.length ? (
           <div className="history-list">
             {translationHistory.map((item) => (
-              <article key={item.id} className="history-item selectable-history-item">
+              <article key={item.id} className={selectedHistoryIds.includes(item.id) ? 'history-item selectable-history-item selected' : 'history-item selectable-history-item'}>
                 {isHistoryBatchSelecting ? (
                   <input
                     type="checkbox"
@@ -12456,8 +12471,9 @@ function App() {
                     deleteHistoryItem(item.id)
                   }}
                   aria-label="删除这条历史记录"
+                  title="删除这条历史记录"
                 >
-                  删除
+                  <Trash2 size={15} strokeWidth={1.7} aria-hidden="true" />
                 </button>
               </article>
             ))}
@@ -12801,6 +12817,11 @@ function App() {
 
     return (
       <div className="settings-dialog module-settings-panel import-export-settings-panel">
+        <WorkspaceHeader
+          eyebrow="RESEARCH ARCHIVE"
+          title="文献与研究记录"
+          description="整理阅读所得，让知识有序积累。"
+        />
         <div className="settings-dialog-body">
           <nav className="settings-tabs" aria-label="文献数据工具">
           <button
@@ -12808,21 +12829,21 @@ function App() {
             className={importExportTab === 'libraryRecords' ? 'settings-tab active' : 'settings-tab'}
             onClick={() => setImportExportTab('libraryRecords')}
           >
-            文献与记录
+            <ActionLabel icon="notes">文献与记录</ActionLabel>
           </button>
           <button
             type="button"
             className={importExportTab === 'backupRestore' ? 'settings-tab active' : 'settings-tab'}
             onClick={() => setImportExportTab('backupRestore')}
           >
-            备份与恢复
+            <ActionLabel icon="backup">备份与恢复</ActionLabel>
           </button>
           <button
             type="button"
             className={importExportTab === 'fileExport' ? 'settings-tab active' : 'settings-tab'}
             onClick={() => setImportExportTab('fileExport')}
           >
-            导出文件
+            <ActionLabel icon="export">导出文件</ActionLabel>
           </button>
           </nav>
 
@@ -12886,7 +12907,7 @@ function App() {
                   </label>
                 ) : null}
                 <button type="button" className="settings-primary-button" onClick={openFileExportFromHistory}>
-                  导出
+                  <ActionLabel icon="export">导出</ActionLabel>
                 </button>
               </div>
 
@@ -12904,7 +12925,7 @@ function App() {
 
               <div className="history-library-document-list">
                 {historyDocuments.length ? historyDocuments.map((document) => (
-                  <article className={document.recordCount ? 'history-library-document' : 'history-library-document empty-records'} key={document.documentId}>
+                  <article className={`history-library-document${document.recordCount ? '' : ' empty-records'}${selectedExportDetailDocumentId === document.documentId ? ' selected' : ''}${historyLibraryNodeId === 'recycle' ? ' recycle-document' : ''}`} key={document.documentId}>
                     {historyLibraryNodeId === 'recycle' ? (
                       <input
                         type="checkbox"
@@ -12918,8 +12939,8 @@ function App() {
                       />
                     ) : null}
                     <button type="button" className="history-library-document-main" onClick={() => setSelectedExportDetailDocumentId(document.documentId)}>
-                      <strong>{document.displayName || document.fileName}</strong>
-                      <span>{document.recordCount || 0} 条记录</span>
+                      <strong><ActionLabel icon="pdf">{document.displayName || document.fileName}</ActionLabel></strong>
+                      <span className="history-library-record-count">{document.recordCount || 0} 条记录</span>
                     </button>
                     <span className="history-library-document-folder">
                       {historyLibraryNodeId === 'recycle'
@@ -12961,10 +12982,10 @@ function App() {
               </div>
               <div className="settings-inline-actions">
                 <button type="button" className="settings-secondary-button" onClick={selectExportDefaultDir}>
-                  选择文件夹
+                  <ActionLabel icon="folder">选择文件夹</ActionLabel>
                 </button>
                 <button type="button" className="settings-secondary-button" onClick={resetExportDefaultDir}>
-                  恢复默认
+                  <ActionLabel icon="reset">恢复默认</ActionLabel>
                 </button>
               </div>
             </section>
@@ -12994,10 +13015,10 @@ function App() {
 
               <div className="settings-inline-actions backup-actions">
                 <button type="button" className="settings-primary-button" onClick={() => void backupPaperReaderData('full')}>
-                  完整备份
+                  <ActionLabel icon="backup">完整备份</ActionLabel>
                 </button>
                 <button type="button" className="settings-secondary-button" onClick={() => void backupPaperReaderData('selected')} disabled={!selectedExportDocumentIds.length}>
-                  选择文献备份
+                  <ActionLabel icon="selected">选择文献备份</ActionLabel>
                 </button>
               </div>
             </section>
@@ -13008,7 +13029,7 @@ function App() {
               </div>
               <div className="settings-inline-actions">
                 <button type="button" className="settings-primary-button" onClick={batchImportPaperReaderData}>
-                  导入备份
+                  <ActionLabel icon="import">导入备份</ActionLabel>
                 </button>
               </div>
             </section>
@@ -13030,7 +13051,7 @@ function App() {
                 ].map(([value, label]) => (
                   <label key={value} className={fileExportScope === value ? 'file-export-choice active' : 'file-export-choice'}>
                     <input type="radio" name="file-export-scope" value={value} checked={fileExportScope === value} onChange={() => setFileExportScope(value)} />
-                    {label}
+                    <ActionLabel icon={value}>{label}</ActionLabel>
                   </label>
                 ))}
               </div>
@@ -13057,8 +13078,8 @@ function App() {
               <div>
                 <h3>输出格式</h3>
                 <div className="segmented-control">
-                  <button type="button" className={fileExportFormat === 'markdown' ? 'active' : ''} onClick={() => setFileExportFormat('markdown')}>Markdown</button>
-                  <button type="button" className={fileExportFormat === 'pdf' ? 'active' : ''} onClick={() => setFileExportFormat('pdf')}>PDF</button>
+                  <button type="button" className={fileExportFormat === 'markdown' ? 'active' : ''} onClick={() => setFileExportFormat('markdown')}><ActionLabel icon="markdown">Markdown</ActionLabel></button>
+                  <button type="button" className={fileExportFormat === 'pdf' ? 'active' : ''} onClick={() => setFileExportFormat('pdf')}><ActionLabel icon="pdf">PDF</ActionLabel></button>
                 </div>
               </div>
               <div>
@@ -13104,7 +13125,7 @@ function App() {
                     placeholder="未命名导出"
                   />
                 </label>
-                <div className="file-export-location"><span>{exportDefaultDir || 'Downloads'}</span><button type="button" className="settings-secondary-button" onClick={selectExportDefaultDir}>选择文件夹</button><button type="button" className="settings-secondary-button" onClick={resetExportDefaultDir}>恢复默认</button></div>
+                <div className="file-export-location"><span>{exportDefaultDir || 'Downloads'}</span><button type="button" className="settings-secondary-button" onClick={selectExportDefaultDir}><ActionLabel icon="folder">选择文件夹</ActionLabel></button><button type="button" className="settings-secondary-button" onClick={resetExportDefaultDir}><ActionLabel icon="reset">恢复默认</ActionLabel></button></div>
               </div>
             </section>
 
@@ -13115,7 +13136,7 @@ function App() {
 
             <div className="file-export-submit">
               <button type="button" className="settings-primary-button" onClick={() => void exportFiles()} disabled={isFileExporting || !getFileExportDocumentIds().length || !hasSelectedContentExportOption(fileExportContents)}>
-                {isFileExporting ? '导出中...' : '导出'}
+                <ActionLabel icon="export">{isFileExporting ? '导出中...' : '导出'}</ActionLabel>
               </button>
             </div>
           </section>
@@ -13469,13 +13490,20 @@ function App() {
                 disabled={!libraryFolderMoveDialog.hasTarget}
                 onClick={confirmLibraryFolderMove}
               >
-                移动
+                <ActionLabel icon="move">移动</ActionLabel>
               </button>
             </div>
           </div>
         ) : null}
 
         <section className="library-main-panel">
+          <WorkspaceHeader
+            eyebrow="YOUR LIBRARY"
+            title={selectedLibraryFolderId === 'all' ? '全部文献' : selectedLibraryFolderId === 'unfiled' ? '未分类' : libraryFolders.find((folder) => folder.id === selectedLibraryFolderId)?.name || '文献库'}
+            description="收藏、整理，回到每一篇值得细读的文献。"
+          >
+            <span className="workspace-count"><strong>{visibleDocuments.length}</strong><span>篇文献</span></span>
+          </WorkspaceHeader>
           <div className="library-toolbar">
             <div className="library-search">
               <input
@@ -13515,7 +13543,7 @@ function App() {
               </select>
             </label>
             <button type="button" className="settings-primary-button library-import-button" onClick={importLibraryDocuments}>
-              导入文献
+              <ActionLabel icon="import">导入文献</ActionLabel>
             </button>
           </div>
 
@@ -13527,7 +13555,7 @@ function App() {
               onClick={() => openLibraryMoveDialog(selectedLibraryDocumentIds)}
               disabled={!selectedLibraryDocumentIds.length}
             >
-              批量移动
+              <ActionLabel icon="move">批量移动</ActionLabel>
             </button>
             <button
               type="button"
@@ -13535,7 +13563,7 @@ function App() {
               onClick={() => deleteLibraryDocuments()}
               disabled={!selectedLibraryDocumentIds.length}
             >
-              批量删除
+              <ActionLabel icon="delete">批量删除</ActionLabel>
             </button>
           </div>
 
@@ -13555,7 +13583,7 @@ function App() {
                   aria-label={`选择 ${document.fileName}`}
                 />
                 <button type="button" className="library-document-main" onClick={() => openLibraryDocument(document)}>
-                  <strong>{document.displayName || document.fileName}</strong>
+                  <strong><ActionLabel icon="pdf">{document.displayName || document.fileName}</ActionLabel></strong>
                   <div className="library-progress">
                     <i style={{ width: `${getLibraryProgressPercent(document)}%` }} />
                   </div>
@@ -13624,7 +13652,7 @@ function App() {
                   disabled={!libraryMoveDialog.hasTarget}
                   onClick={confirmLibraryDocumentMove}
                 >
-                  确认
+                  <ActionLabel icon="move">确认</ActionLabel>
                 </button>
               </div>
             </div>
@@ -13673,7 +13701,7 @@ function App() {
                   取消
                 </button>
                 <button type="button" className="settings-primary-button" onClick={confirmCreateLibraryFolder}>
-                  确认
+                  <ActionLabel icon="confirm">确认</ActionLabel>
                 </button>
               </div>
             </section>
@@ -14287,41 +14315,42 @@ function App() {
                   className={rightPanelTab === 'result' ? 'right-panel-tab active' : 'right-panel-tab'}
                   onClick={() => setRightPanelTab('result')}
                 >
-                  翻译结果
+                  <ActionLabel icon="translate">翻译结果</ActionLabel>
                 </button>
                 <button
                   type="button"
                   className={rightPanelTab === 'history' ? 'right-panel-tab active' : 'right-panel-tab'}
                   onClick={() => setRightPanelTab('history')}
                 >
-                  翻译历史
+                  <ActionLabel icon="history">翻译历史</ActionLabel>
                 </button>
                 <button
                   type="button"
                   className={rightPanelTab === 'notes' ? 'right-panel-tab active' : 'right-panel-tab'}
                   onClick={() => setRightPanelTab('notes')}
                 >
-                  笔记
+                  <ActionLabel icon="notes">笔记</ActionLabel>
                 </button>
                 <button
                   type="button"
                   className={rightPanelTab === 'bookmarks' ? 'right-panel-tab active' : 'right-panel-tab'}
                   onClick={() => setRightPanelTab('bookmarks')}
                 >
-                  书签
+                  <ActionLabel icon="bookmark">书签</ActionLabel>
                 </button>
               </div>
             </div>
 
             {rightPanelTab === 'result' ? (
               <div className="selection-panel-actions">
+              <span className="selection-panel-action-heading">当前结果</span>
               <button
                 type="button"
                 className="copy-button"
                 onClick={copyTranslation}
                 disabled={!canCopyTranslation()}
               >
-                复制
+                <ActionLabel icon="copy">复制</ActionLabel>
               </button>
               <button
                 type="button"
@@ -14329,7 +14358,7 @@ function App() {
                 onClick={clearRightPanelResult}
                 disabled={!hasRightPanelContent()}
               >
-                清空
+                <ActionLabel icon="delete">清空</ActionLabel>
               </button>
               {copyStatus ? <span className="copy-status">{copyStatus}</span> : null}
               </div>
@@ -14349,9 +14378,7 @@ function App() {
           ) : null}
         </div>
       ) : (
-        <section className="empty-state">
-          <p>{UI.emptyPdf}</p>
-        </section>
+        <ReadingWelcome onOpenPdf={handleOpenPdfClick} />
       )}
       <footer className="reader-statusbar" aria-label="阅读控制">
         <section className="statusbar-group page-controls" aria-label={UI.pageControl}>
@@ -14459,6 +14486,11 @@ function App() {
           aria-hidden={activeModule !== 'settings'}
         >
           <form className="settings-dialog module-settings-panel" onSubmit={saveSettings}>
+            <WorkspaceHeader
+              eyebrow="PREFERENCES"
+              title="打造你的阅读方式"
+              description="连接模型，调整翻译，让工具适应你的研究习惯。"
+            />
             <div className="settings-dialog-body">
               <nav className="settings-tabs" aria-label="设置分类">
                 <button
@@ -14466,23 +14498,23 @@ function App() {
                   className={settingsTab === 'model' ? 'settings-tab active' : 'settings-tab'}
                   onClick={() => setSettingsTab('model')}
                 >
-                  模型设置
+                  <ActionLabel icon="model">模型设置</ActionLabel>
                 </button>
                 <button
                   type="button"
                   className={settingsTab === 'prompt' ? 'settings-tab active' : 'settings-tab'}
                   onClick={() => setSettingsTab('prompt')}
                 >
-                  翻译设置
+                  <ActionLabel icon="translate">翻译设置</ActionLabel>
                 </button>
               </nav>
 
               <div className="settings-content">
                 {settingsTab === 'model' ? (
-                  <section className="settings-page import-export-page">
+                  <section className="settings-page import-export-page model-settings-page">
                     <section className="settings-glossary">
                       <div className="settings-section-header">
-                        <h3>API 配置</h3>
+                        <h3><ActionLabel icon="key">API 配置</ActionLabel></h3>
                         <span>{settingsForm.apiKey ? UI.settingsKeyConfigured : UI.settingsKeyEmpty}</span>
                       </div>
                       <label className="settings-field">
@@ -14520,7 +14552,7 @@ function App() {
 
                     <section className="settings-glossary">
                       <div className="settings-section-header">
-                        <h3>模型参数</h3>
+                        <h3><ActionLabel icon="model">模型参数</ActionLabel></h3>
                         <span>
                           {modelListStatus === 'loading'
                             ? '正在获取模型'
@@ -14596,7 +14628,7 @@ function App() {
                   <section className="settings-page import-export-page">
                     <section className="settings-glossary">
                       <div className="settings-section-header">
-                        <h3>Prompt 设置</h3>
+                        <h3><ActionLabel icon="translate">Prompt 设置</ActionLabel></h3>
                       </div>
                       <label className="settings-field">
                         <span>自定义翻译 Prompt</span>
@@ -14608,20 +14640,20 @@ function App() {
                       </label>
                       <div className="settings-inline-actions">
                         <button type="button" className="settings-secondary-button" onClick={resetPrompt}>
-                          恢复默认 Prompt
+                          <ActionLabel icon="reset">恢复默认 Prompt</ActionLabel>
                         </button>
                       </div>
                     </section>
 
                     <section className="settings-glossary">
                       <div className="settings-section-header">
-                        <h3>术语库</h3>
+                        <h3><ActionLabel icon="glossary">术语库</ActionLabel></h3>
                         <span>{glossaryStatus}</span>
                       </div>
 
                       <div className="settings-inline-actions">
                         <button type="button" className="settings-secondary-button" onClick={importGlossary}>
-                          导入术语库
+                          <ActionLabel icon="import">导入术语库</ActionLabel>
                         </button>
                         <button
                           type="button"
@@ -14629,7 +14661,7 @@ function App() {
                           onClick={() => setIsGlossaryVisible((isVisible) => !isVisible)}
                           disabled={!glossary.length}
                         >
-                          {isGlossaryVisible ? '隐藏术语库' : '查看术语库'}
+                          <ActionLabel icon="glossary">{isGlossaryVisible ? '隐藏术语库' : '查看术语库'}</ActionLabel>
                         </button>
                         <button
                           type="button"
@@ -14637,7 +14669,7 @@ function App() {
                           onClick={clearGlossary}
                           disabled={!glossary.length}
                         >
-                          清空术语库
+                          <ActionLabel icon="delete">清空术语库</ActionLabel>
                         </button>
                       </div>
 
@@ -14664,7 +14696,7 @@ function App() {
 
             <div className="settings-actions">
               <button type="submit" className="settings-primary-button" disabled={isSavingSettings}>
-                {UI.settingsSave}
+                <ActionLabel icon="save">{UI.settingsSave}</ActionLabel>
               </button>
             </div>
           </form>
@@ -14774,7 +14806,7 @@ function App() {
                 取消
               </button>
               <button type="button" className="settings-primary-button" onClick={confirmAddBookmark}>
-                确认
+                <ActionLabel icon="confirm">确认</ActionLabel>
               </button>
             </div>
           </section>
@@ -14839,7 +14871,7 @@ function App() {
                 取消
               </button>
               <button type="button" className="settings-primary-button" onClick={saveNoteDialog}>
-                保存
+                <ActionLabel icon="save">保存</ActionLabel>
               </button>
             </div>
           </section>
